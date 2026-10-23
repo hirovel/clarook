@@ -41,25 +41,31 @@ export function isOpenAIReasoningOpaque(x: unknown): x is OpenAIReasoningOpaque 
   );
 }
 
+type OutputItem = {
+  type: string;
+  id?: string;
+  call_id?: string;
+  name?: string;
+  arguments?: string;
+  summary?: { type: string; text: string }[];
+  encrypted_content?: string;
+  content?: { type: string; text?: string; refusal?: string }[];
+};
+
 /** 流式事件的最小类型,只声明用到的字段。 */
 export type ResponsesEvent = {
   type: string;
   output_index?: number;
+  content_index?: number;
   delta?: string;
-  item?: {
-    type: string;
-    id?: string;
-    call_id?: string;
-    name?: string;
-    arguments?: string;
-    summary?: { type: string; text: string }[];
-    encrypted_content?: string;
-    content?: { type: string; text?: string }[];
-  };
+  text?: string;
+  refusal?: string;
+  item?: OutputItem;
   response?: {
     id?: string;
     model?: string;
     status?: string;
+    output?: OutputItem[];
     incomplete_details?: { reason?: string };
     error?: { message?: string; code?: string };
     usage?: {
@@ -76,7 +82,7 @@ export type ResponsesEvent = {
 type Item = {
   type: string;
   id: string;
-  text: string;
+  text: string[];
   callId: string;
   name: string;
   argsJson: string;
@@ -101,11 +107,45 @@ export function newResponsesAcc(): ResponsesAcc {
 function itemAt(acc: ResponsesAcc, index: number, type = ""): Item {
   let it = acc.items.get(index);
   if (!it) {
-    it = { type, id: "", text: "", callId: "", name: "", argsJson: "", summary: "" };
+    it = { type, id: "", text: [], callId: "", name: "", argsJson: "", summary: "" };
     acc.items.set(index, it);
   }
   if (type && !it.type) it.type = type;
   return it;
+}
+
+function setTextPart(it: Item, index: number, text: string): string {
+  const before = it.text[index] ?? "";
+  it.text[index] = text;
+  // 完成快照只补尚未显示的后缀,同一部件的正文不能再次推送。
+  return text.startsWith(before) ? text.slice(before.length) : "";
+}
+
+function finishItem(acc: ResponsesAcc, index: number, item: OutputItem): string {
+  // 完成项以服务器给的为准:参数全文、加密推理、摘要段落与可见正文。
+  const it = itemAt(acc, index, item.type);
+  if (item.id) it.id = item.id;
+  if (item.call_id) it.callId = item.call_id;
+  if (item.name) it.name = item.name;
+  if (typeof item.arguments === "string") it.argsJson = item.arguments;
+  if (item.encrypted_content) it.encrypted = item.encrypted_content;
+  if (item.summary) it.summary = item.summary.map((s) => s.text).join("\n\n");
+  if (item.type !== "message" || !item.content) return "";
+  const delta = item.content
+    .map((part, partIndex) =>
+      setTextPart(
+        it,
+        partIndex,
+        part.type === "output_text"
+          ? (part.text ?? "")
+          : part.type === "refusal"
+            ? (part.refusal ?? "")
+            : "",
+      ),
+    )
+    .join("");
+  it.text.length = item.content.length;
+  return delta;
 }
 
 /** 喂入一个已解析的事件,返回本事件的文本增量。纯函数,不碰网络。 */
@@ -119,10 +159,18 @@ export function feedResponsesEvent(acc: ResponsesAcc, ev: ResponsesEvent): strin
       if (ev.item?.name) it.name = ev.item.name;
       return "";
     }
-    case "response.output_text.delta": {
+    case "response.output_text.delta":
+    case "response.refusal.delta": {
       const it = itemAt(acc, idx, "message");
-      it.text += ev.delta ?? "";
-      return ev.delta ?? "";
+      const part = ev.content_index ?? 0;
+      const delta = ev.delta ?? "";
+      it.text[part] = (it.text[part] ?? "") + delta;
+      return delta;
+    }
+    case "response.output_text.done":
+    case "response.refusal.done": {
+      const it = itemAt(acc, idx, "message");
+      return setTextPart(it, ev.content_index ?? 0, ev.refusal ?? ev.text ?? "");
     }
     case "response.reasoning_summary_text.delta": {
       const it = itemAt(acc, idx, "reasoning");
@@ -134,26 +182,8 @@ export function feedResponsesEvent(acc: ResponsesAcc, ev: ResponsesEvent): strin
       it.argsJson += ev.delta ?? "";
       return "";
     }
-    case "response.output_item.done": {
-      // 完成项以服务器给的为准:参数全文、加密推理、摘要段落。
-      const it = itemAt(acc, idx, ev.item?.type);
-      const item = ev.item;
-      if (!item) return "";
-      if (item.id) it.id = item.id;
-      if (item.call_id) it.callId = item.call_id;
-      if (item.name) it.name = item.name;
-      if (typeof item.arguments === "string") it.argsJson = item.arguments;
-      if (item.encrypted_content) it.encrypted = item.encrypted_content;
-      if (item.summary) it.summary = item.summary.map((s) => s.text).join("\n\n");
-      if (item.content) {
-        const text = item.content
-          .filter((c) => c.type === "output_text")
-          .map((c) => c.text ?? "")
-          .join("");
-        if (text) it.text = text;
-      }
-      return "";
-    }
+    case "response.output_item.done":
+      return ev.item ? finishItem(acc, idx, ev.item) : "";
     case "response.completed":
     case "response.incomplete":
     case "response.failed": {
@@ -185,7 +215,7 @@ export function feedResponsesEvent(acc: ResponsesAcc, ev: ResponsesEvent): strin
           ...(reasoning !== undefined && { reasoningTokens: reasoning }),
         };
       }
-      return "";
+      return r?.output?.map((item, index) => finishItem(acc, index, item)).join("") ?? "";
     }
     case "error":
       acc.error = `${ev.error?.code ?? "error"}: ${ev.error?.message ?? ev.message ?? ""}`;
@@ -218,7 +248,7 @@ export function finishResponsesAcc(acc: ResponsesAcc, aborted: boolean, model = 
   const ordered = [...acc.items.entries()].sort(([a], [b]) => a - b).map(([, it]) => it);
   const text = ordered
     .filter((it) => it.type === "message")
-    .map((it) => it.text)
+    .map((it) => it.text.join(""))
     .join("");
   const toolCalls: ToolCall[] = ordered
     .filter((it) => it.type === "function_call")
@@ -364,7 +394,8 @@ export const OPENAI_RESPONSES_FIELDS: FieldTable = {
   ],
   reads: [
     "response.output_item.added / done:item.type = message | function_call | reasoning;done 时以 item 全量为准",
-    "response.output_text.delta → text",
+    "response.output_text.delta / done、response.refusal.delta / done → text(按 content_index 合并)",
+    "message.content[]:output_text.text / refusal.refusal;response.output 完成快照补齐正文",
     "response.reasoning_summary_text.delta → reasoning(摘要,不可编辑)",
     "response.function_call_arguments.delta → 工具参数 JSON",
     "reasoning 项的 encrypted_content + id → opaque(原样回传)",
@@ -373,7 +404,7 @@ export const OPENAI_RESPONSES_FIELDS: FieldTable = {
     "response.id · response.model · status · incomplete_details → extras(不解释,原样存)",
   ],
   ignores: [
-    "response.created / in_progress、content_part 事件、annotations、refusal 内容块、web_search 等内置工具项",
+    "response.created / in_progress、content_part 事件、annotations、web_search 等内置工具项",
     "推理正文只以密文返回,客户端读不到;summary 是模型另写的摘要",
   ],
 };

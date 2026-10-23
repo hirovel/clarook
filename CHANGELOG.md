@@ -5,6 +5,10 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve visible Responses refusal text in streamed replies and completed responses. Merge complete snapshots without repeating text, and retain the existing message, usage and stop behavior.
+
 ## [0.1.3] - 2026-10-08
 
 ### Added

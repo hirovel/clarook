@@ -28,14 +28,24 @@ import {
   newResponsesAcc,
   OPENAI_RESPONSES_FIELDS,
   openaiResponses,
+  type ResponsesEvent,
   toResponsesInput,
 } from "../src/providers/openai-responses.js";
 import { defineTool } from "../src/tools.js";
 import { testDirectory } from "./helpers/setup.js";
 
 describe("Responses 流式累积", () => {
-  it("推理项摘要 + 密文、文本、函数调用按 output_index 归位;done 项全量覆盖增量", () => {
+  it("推理项摘要 + 密文、文本与拒绝、函数调用按 output_index 归位;done 项全量覆盖增量", () => {
     const acc = newResponsesAcc();
+    const message = {
+      type: "message",
+      id: "msg_1",
+      content: [
+        { type: "output_text", text: "好" },
+        { type: "refusal", refusal: "I cannot help with that request." },
+        { type: "output_text", text: " I can explain safer alternatives." },
+      ],
+    };
     feedResponsesEvent(acc, {
       type: "response.output_item.added",
       output_index: 0,
@@ -64,6 +74,37 @@ describe("Responses 流式累积", () => {
     expect(
       feedResponsesEvent(acc, { type: "response.output_text.delta", output_index: 1, delta: "好" }),
     ).toBe("好");
+    expect(
+      feedResponsesEvent(acc, {
+        type: "response.output_text.done",
+        output_index: 1,
+        content_index: 0,
+        text: "好",
+      }),
+    ).toBe("");
+    expect(
+      feedResponsesEvent(acc, {
+        type: "response.refusal.delta",
+        output_index: 1,
+        content_index: 1,
+        delta: "I cannot ",
+      }),
+    ).toBe("I cannot ");
+    expect(
+      feedResponsesEvent(acc, {
+        type: "response.refusal.done",
+        output_index: 1,
+        content_index: 1,
+        refusal: "I cannot help with that request.",
+      }),
+    ).toBe("help with that request.");
+    expect(
+      feedResponsesEvent(acc, {
+        type: "response.output_item.done",
+        output_index: 1,
+        item: message,
+      }),
+    ).toBe(" I can explain safer alternatives.");
     feedResponsesEvent(acc, {
       type: "response.output_item.added",
       output_index: 2,
@@ -85,21 +126,28 @@ describe("Responses 流式累积", () => {
         arguments: '{"path":"."}',
       },
     });
-    feedResponsesEvent(acc, {
-      type: "response.completed",
-      response: {
-        status: "completed",
-        usage: {
-          input_tokens: 100,
-          output_tokens: 40,
-          input_tokens_details: { cached_tokens: 60 },
-          output_tokens_details: { reasoning_tokens: 30 },
+    expect(
+      feedResponsesEvent(acc, {
+        type: "response.completed",
+        response: {
+          status: "completed",
+          output: [
+            { type: "reasoning", id: "rs_1" },
+            message,
+            { type: "function_call", id: "fc_1", call_id: "call_1", name: "ls" },
+          ],
+          usage: {
+            input_tokens: 100,
+            output_tokens: 40,
+            input_tokens_details: { cached_tokens: 60 },
+            output_tokens_details: { reasoning_tokens: 30 },
+          },
         },
-      },
-    });
+      }),
+    ).toBe("");
     const turn = finishResponsesAcc(acc, false, "gpt-5.5");
     expect(turn).toMatchObject({
-      text: "好",
+      text: "好I cannot help with that request. I can explain safer alternatives.",
       toolCalls: [{ id: "call_1", name: "ls", args: { path: "." } }],
       stopReason: "tool",
       usage: { inputTokens: 100, outputTokens: 40, cacheReadTokens: 60, reasoningTokens: 30 },
@@ -118,6 +166,37 @@ describe("Responses 流式累积", () => {
       },
     });
   });
+
+  it.each(["response.refusal.done", "response.output_item.done", "response.completed"])(
+    "只有 %s 携带拒绝正文时补齐显示,后续完整响应不重复正文",
+    (type) => {
+      const acc = newResponsesAcc();
+      const refusal = "I cannot help with that request.";
+      const item = { type: "message", id: "msg", content: [{ type: "refusal", refusal }] };
+      const completed: ResponsesEvent = {
+        type: "response.completed",
+        response: {
+          status: "completed",
+          output: [item],
+          usage: { input_tokens: 12, output_tokens: 7 },
+        },
+      };
+      const first =
+        type === "response.completed"
+          ? completed
+          : type === "response.output_item.done"
+            ? { type, output_index: 0, item }
+            : { type, output_index: 0, content_index: 0, refusal };
+      expect(feedResponsesEvent(acc, first)).toBe(refusal);
+      expect(feedResponsesEvent(acc, completed)).toBe("");
+      expect(finishResponsesAcc(acc, false)).toMatchObject({
+        text: refusal,
+        toolCalls: [],
+        stopReason: "end",
+        usage: { inputTokens: 12, outputTokens: 7 },
+      });
+    },
+  );
 
   it("max_output_tokens 截断 → length;打断 → 无工具调用、无回传物", () => {
     const acc = newResponsesAcc();
@@ -254,8 +333,10 @@ describe("字段清单表", () => {
 });
 
 describe("Responses 假服务器全链路", () => {
-  it("Responses 全链路:推理回传与用量;失败终止不执行工具", async () => {
+  it("Responses 全链路:推理回传、可见拒绝与用量;失败终止不执行工具", async () => {
     const calls: { url: string; body: Record<string, unknown> }[] = [];
+    const refusal = "I cannot help with that request.";
+    const refusalItem = { type: "message", id: "m", content: [{ type: "refusal", refusal }] };
     let failed: "failed" | "incomplete" | undefined;
     let failedRequest = 0;
     const sse = (res: http.ServerResponse, events: unknown[]) => {
@@ -350,10 +431,27 @@ describe("Responses 假服务器全链路", () => {
               output_index: 0,
               item: { type: "message", id: "m" },
             },
-            { type: "response.output_text.delta", output_index: 0, delta: "done" },
+            {
+              type: "response.refusal.delta",
+              output_index: 0,
+              content_index: 0,
+              delta: "I cannot ",
+            },
+            {
+              type: "response.refusal.delta",
+              output_index: 0,
+              content_index: 0,
+              delta: "help with that request.",
+            },
+            { type: "response.refusal.done", output_index: 0, content_index: 0, refusal },
+            { type: "response.output_item.done", output_index: 0, item: refusalItem },
             {
               type: "response.completed",
-              response: { status: "completed", usage: { input_tokens: 80, output_tokens: 3 } },
+              response: {
+                status: "completed",
+                output: [refusalItem],
+                usage: { input_tokens: 12, output_tokens: 7 },
+              },
             },
           ]);
         }
@@ -400,8 +498,28 @@ describe("Responses 假服务器全链路", () => {
     const log = new EventLog();
     log.append({ type: "session/start", at: "", model: "gpt-5.5", system: "sys" });
     log.append({ type: "user/message", at: "", text: "go" });
+    let visible = "";
     try {
-      expect(await runTurn({ log, provider, tools: [echo] })).toBe("idle");
+      expect(
+        await runTurn({
+          log,
+          provider,
+          tools: [echo],
+          onDelta: (delta) => {
+            visible += delta;
+          },
+        }),
+      ).toBe("idle");
+      expect(visible).toBe(refusal);
+      expect(calls).toHaveLength(2);
+      expect(log.events.filter((event) => event.type === "assistant/message").at(-1)).toMatchObject(
+        {
+          text: refusal,
+          toolCalls: [],
+          stopReason: "end",
+          usage: { inputTokens: 12, outputTokens: 7 },
+        },
+      );
       expect(executions).toBe(1);
       for (const outcome of ["failed", "incomplete"] as const) {
         failed = outcome;
