@@ -1,6 +1,7 @@
 node_modules/
 sessions/
 .preview/
+.scratch/
 dist/
 coverage/
 .claude/

@@ -259,7 +259,7 @@ describe("界面:策略提示、选择理由、/approve 规则", () => {
 
 describe("日志半行恢复", () => {
   it("恢复保留完整末行并隔开新事件,半行明确恢复;中间坏行仍报错", () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-log-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-log-"));
     const file = join(dir, "s.jsonl");
     const good = JSON.stringify({ type: "session/start", at: "t", model: "m", system: "s" });
     const attached: EventLog[] = [];
@@ -317,7 +317,7 @@ describe("日志半行恢复", () => {
 });
 
 describe("统一入口", () => {
-  it("clari once --help 走一次性入口,exit 0", () => {
+  it("clarook once --help 走一次性入口,exit 0", () => {
     // 直接用本机 node 跑 tsx 的入口:npx 的解析本身要 4 秒多,会撞上测试的 5 秒上限。
     const r = spawnSync(
       process.execPath,

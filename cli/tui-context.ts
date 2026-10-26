@@ -125,8 +125,6 @@ export type ApprovalState = {
   mode: "all" | "ask" | "policy";
   /** 明确选择本会话放行的工具,本会话内不再问。 */
   alwaysAllow: Set<string>;
-  /** 用户触发的技能声明的 allowed-tools:这一 turn 内免审批。 */
-  skillAllow: Set<string>;
   overlay: OverlayHandle | undefined;
   prompt: ApprovalPrompt | undefined;
 };
@@ -147,8 +145,8 @@ export type SessionTarget = ({ kind: "new" } | { kind: "resume"; file: string })
 
 export type TuiContext = {
   deps: TuiAppDeps;
-  /** 不可变的启动快照;待重启的设置从这里读,不拿新保存的值冒充正在生效。 */
-  setupInitial: Preset;
+  /** 当前实例的配置基底;技能即时修改在此提交,待重启项仍保留启动值。 */
+  setupBase: Preset;
   log: EventLog;
   tools: Tool[];
   compaction: CompactionConfig;

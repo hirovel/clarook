@@ -90,7 +90,7 @@ try {
   app.inspector.close();
   app.stop();
 
-  writeFileSync(out, ansiToHtmlDocument([...app.lines(110), ...shots], "clari 零 key 演示"), "utf8");
+  writeFileSync(out, ansiToHtmlDocument([...app.lines(110), ...shots], "clarook 零 key 演示"), "utf8");
   console.log(`已写入 ${out};会话文件 ${sessionFile}(${log.events.length} 条事件)`);
 } finally {
   server.kill();

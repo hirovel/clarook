@@ -1,6 +1,7 @@
 // 错误处理(P1):分类、供应商原话、下一步提示;request/error 事件带分类与响应体;界面画错误卡。
 import http from "node:http";
 import { join } from "node:path";
+import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { readRequestRecording } from "../cli/session-records.js";
 import { createTuiApp } from "../cli/tui-app.js";
@@ -16,6 +17,7 @@ import {
 } from "../src/providers/errors.js";
 import { openaiCompat } from "../src/providers/openai-chat.js";
 import { StreamStall } from "../src/providers/sse.js";
+import { defineTool } from "../src/tools.js";
 import { testDirectory } from "./helpers/setup.js";
 import { VirtualTerminal } from "./helpers/virtual-terminal.js";
 
@@ -106,10 +108,34 @@ describe("classifyError", () => {
 });
 
 describe("request/error 事件与错误卡", () => {
-  it("HTTP鉴权与网络断连:分类、重试、原始尝试和回放保持一致", async () => {
+  it("HTTP鉴权、异常终止与网络断连:分类、执行边界、原始尝试和回放保持一致", async () => {
     let disconnected: false | "before" | "empty" | "partial" = false;
     let networkCalls = 0;
+    let finishReason: string | undefined;
+    let finishCalls = 0;
     const server = http.createServer((_req, res) => {
+      if (finishReason !== undefined) {
+        finishCalls++;
+        const unfinished = finishReason === "unfinished";
+        const choice =
+          finishCalls === 1
+            ? {
+                delta: {
+                  content: "Visible partial reply.",
+                  tool_calls: [
+                    { index: 0, id: "c1", function: { name: "count", arguments: "{}" } },
+                  ],
+                },
+                finish_reason: unfinished ? null : finishReason,
+              }
+            : { delta: { content: "Done." }, finish_reason: "stop" };
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        const ending = unfinished
+          ? 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
+          : "data: [DONE]\n\n";
+        res.end(`data: ${JSON.stringify({ choices: [choice] })}\n\n${ending}`);
+        return;
+      }
       if (disconnected) {
         _req.resume();
         _req.on("end", () => {
@@ -155,6 +181,60 @@ describe("request/error 事件与错误卡", () => {
       });
       expect(err && "body" in err && err.body).toContain("Incorrect API key");
 
+      const directory = testDirectory("clarook-network-error-");
+      for (const reason of [
+        "content_filter",
+        "network_error",
+        "unknown_reason",
+        "unfinished",
+        "tool_calls",
+        "length",
+      ]) {
+        finishReason = reason;
+        finishCalls = 0;
+        let executed = 0;
+        const file = join(directory, `${reason}.jsonl`);
+        const finishLog = new EventLog(file);
+        const count = defineTool({
+          name: "count",
+          description: "Count executions",
+          parameters: Type.Object({}),
+          async execute() {
+            executed++;
+            return "counted";
+          },
+        });
+        try {
+          finishLog.append({ type: "session/start", at: "", model: "m", system: "s" });
+          finishLog.append({ type: "user/message", at: "", text: "count" });
+          const turn = runTurn({ log: finishLog, provider, tools: [count] });
+          if (reason === "tool_calls" || reason === "length") {
+            await turn;
+            expect(executed).toBe(reason === "tool_calls" ? 1 : 0);
+            expect(finishLog.events.some((e) => e.type === "request/error")).toBe(false);
+          } else {
+            await expect(turn).rejects.toMatchObject({ name: "ProviderError", retryable: false });
+            expect(executed).toBe(0);
+            expect(finishCalls).toBe(1);
+            expect(finishLog.events.find((e) => e.type === "request/error")).toMatchObject({
+              kind: "stream",
+              ...(reason !== "unfinished" && { body: reason }),
+            });
+            expect(finishLog.events.some((e) => e.type === "assistant/message")).toBe(false);
+          }
+          await finishLog.checkpoint();
+          const request = finishLog.events.findIndex((e) => e.type === "request");
+          const recording = readRequestRecording(file, finishLog.events, request);
+          expect(recording?.attempts?.[0]?.response).toContain("Visible partial reply.");
+          expect(recording?.attempts?.[0]?.response).toContain(
+            reason === "unfinished" ? '"finish_reason":"stop"' : reason,
+          );
+        } finally {
+          finishLog.recording?.dispose();
+        }
+      }
+      finishReason = undefined;
+
       // 界面层:错误卡
       const log2 = new EventLog();
       const app = createTuiApp({
@@ -180,7 +260,6 @@ describe("request/error 事件与错误卡", () => {
       expect(app.inspector.isOpen()).toBe(true);
       app.stop();
 
-      const directory = testDirectory("clari-network-error-");
       for (const scenario of ["before", "empty", "partial"] as const) {
         disconnected = scenario;
         networkCalls = 0;

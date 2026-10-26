@@ -64,7 +64,7 @@ beforeAll(async () => {
         <pre><code class="language-ts">const x: number = 1;\n  if (x &lt; 2) {}</code></pre></main></body></html>`);
     } else if (url === "/cf") {
       hits.cf = (hits.cf ?? 0) + 1;
-      if (req.headers["user-agent"]?.includes("clari")) {
+      if (req.headers["user-agent"]?.includes("clarook")) {
         res.writeHead(403, { "cf-mitigated": "challenge", "content-type": "text/plain" });
         res.end("blocked");
       } else {

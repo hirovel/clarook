@@ -10,6 +10,7 @@ import { collectRequests, eventLines, toolLines, wireLines } from "../cli/inspec
 import { readRequestRecording } from "../cli/session-records.js";
 import { ReplyMarkdown } from "../cli/tui-render.js";
 import { clearToolResults, keepRecentTokens, llmSummarize } from "../src/compaction.js";
+import { DEFAULT_COMPACTION_SETTINGS, summaryPrompt } from "../src/compaction-presets.js";
 import type { AgentEvent } from "../src/events.js";
 import { exchangeRecorder } from "../src/exchange.js";
 import { EventLog } from "../src/log.js";
@@ -544,17 +545,16 @@ describe("策略请求的真实正文与策略名", () => {
       provider: recordingProvider(log, summarizer, { onRequest: (body) => captured.push(body) }),
       preservation: keepRecentTokens(10),
     });
-    expect(payload?.strategy).toBe("llmSummarize(structuredFull, replay)");
+    expect(payload?.strategy).toBe("llmSummarize(pi, replay)");
     const req = log.events.find((e) => e.type === "request");
     if (req?.type !== "request") throw new Error("应记 request");
     expect(req.reason).toBe("compaction");
+    expect(req.maxTokens).toBe(DEFAULT_COMPACTION_SETTINGS.compactionMaxTokens);
     const body = req.body;
     if (!body) throw new Error("应记 body");
     expect(body.tail).toHaveLength(1);
     expect(body.tail[0]?.role).toBe("user");
-    expect((body.tail[0] as { content: string }).content).toContain(
-      "Compress the conversation above",
-    );
+    expect((body.tail[0] as { content: string }).content).toBe(summaryPrompt("pi"));
     expect(body.prefixEvents).toBeGreaterThan(0);
     expect(captured).toHaveLength(1);
     expect(JSON.parse(captured[0] ?? "[]").at(-1)).toEqual(body.tail[0]);
@@ -659,6 +659,12 @@ describe("wire 层与实际发送一致", () => {
     expect(captured).toEqual([sentBody]);
     // 三个独立适配器都必须在每次重试边界记录实际序列化正文。
     for (const create of [openaiCompat, anthropic, openaiResponses]) {
+      const outputKey =
+        create === openaiResponses
+          ? "max_output_tokens"
+          : create === anthropic
+            ? "max_tokens"
+            : "max_completion_tokens";
       const sent: string[] = [];
       const captures: string[] = [];
       vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
@@ -679,20 +685,23 @@ describe("wire 层与实际发送一致", () => {
         apiKey: "fixture-auth-token",
         model: "m",
         baseUrl: "http://fixture",
+        maxTokens: 2000,
+        extraBody: { [outputKey]: 4000, ...(create === openaiCompat && { max_tokens: 6000 }) },
         retry: { maxRetries: 1, sleep: async () => {} },
       });
-      const dir = mkdtempSync(join(tmpdir(), "clari-http-record-"));
+      const dir = mkdtempSync(join(tmpdir(), "clarook-http-record-"));
       try {
         const file = join(dir, "s.jsonl");
         const log = new EventLog(file);
         const retries: number[] = [];
         await recordingProvider(log, provider).complete(messages, tools, {
+          maxTokens: 321,
           onRequest: (body) => captures.push(body),
           onRetry: (info) => retries.push(info.attempt),
         });
         const events = EventLog.load(file).events;
         const saved = readRequestRecording(file, events, 0);
-        expect(events[0]).toMatchObject({ type: "request", reason: "compaction" });
+        expect(events[0]).toMatchObject({ type: "request", reason: "compaction", maxTokens: 321 });
         expect(events.filter((e) => e.type === "retry")).toEqual([
           expect.objectContaining({ attempt: 1, status: 503 }),
         ]);
@@ -703,6 +712,12 @@ describe("wire 层与实际发送一致", () => {
         expect(saved?.input).toEqual({ messages, tools });
         expect(saved?.bodies).toEqual(sent);
         const wire = JSON.parse(sent[1] ?? "{}");
+        expect(wire[outputKey]).toBe(321);
+        if (create === openaiCompat) expect(wire.max_tokens).toBeUndefined();
+        const reconstructed = stripAnsi(
+          wireLines(provider, messages, tools, undefined, undefined, [], 321).join("\n"),
+        );
+        expect(reconstructed).toContain(`"${outputKey}": 321`);
         // 协议结构可以不同,每一条正文的字符必须保持原样,不能用 UI 文本替换。
         for (const text of [userInput, assistantInput, toolInput])
           expect(JSON.stringify(wire)).toContain(JSON.stringify(text));
@@ -737,13 +752,18 @@ describe("wire 层与实际发送一致", () => {
       }
       expect(captures).toEqual(sent);
       expect(captures).toHaveLength(2);
-      expect(captures[0]).toBe(JSON.stringify(provider.wire?.(messages, tools)));
+      expect(captures[0]).toBe(
+        JSON.stringify(provider.wire?.(messages, tools, { maxTokens: 321 })),
+      );
       expect(captures.join("\n")).not.toContain("fixture-auth-token");
+      await provider.complete(messages, tools);
+      expect(JSON.parse(sent[2] ?? "{}")[outputKey]).toBe(4000);
+      expect(sent[2]).toBe(JSON.stringify(provider.wire?.(messages, tools)));
     }
   });
 
   it("响应中断、主动取消和协议解析失败都保存已收到的原文并关闭流", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-partial-record-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-partial-record-"));
     try {
       for (const mode of ["network", "cancel", "malformed", "saving"] as const) {
         let pulls = 0;

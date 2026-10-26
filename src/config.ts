@@ -15,6 +15,7 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ApprovalConfig } from "./approval.js";
+import type { CompactionAcceptance } from "./compaction-presets.js";
 import { lockFile } from "./file-lock.js";
 import type { CompactionTrigger } from "./loop.js";
 import type { EffortLevel, Provider } from "./provider.js";
@@ -136,6 +137,14 @@ export type Preset = {
   compactionTrigger?: CompactionTrigger;
   /** 自动压缩阈值 = 窗口 − 这个余量;缺省 32000。 */
   compactionReserve?: number;
+  /** 提早触发压缩的窗口比例;0 = 关闭,开启建议 0.8。 */
+  compactionRatio?: number;
+  /** 内置摘要指令模板名或完整 Markdown 文件路径。 */
+  compactionPrompt?: string;
+  /** 仅覆盖摘要请求的输出额度;0 沿用供应商配置。 */
+  compactionMaxTokens?: number;
+  /** 完整摘要的应用规则;取消、截断与空结果始终不能应用。 */
+  compactionAcceptance?: CompactionAcceptance;
   /** 工具结果初始折叠;缺省 true,Ctrl+O 切换。 */
   fold?: boolean;
   /** 折叠时保留的结果行数;缺省 5。 */
@@ -191,7 +200,7 @@ export type KernelConfig = {
   defaults?: Preset;
   /** 命名预设。 */
   presets?: Record<string, Preset>;
-  /** 会话文件目录;缺省工作目录下的 sessions/。环境变量 CLARI_SESSIONS 优先。 */
+  /** 会话文件目录;缺省工作目录下的 sessions/。环境变量 CLAROOK_SESSIONS 优先。 */
   sessionsDir?: string;
   /** 审批规则:缺省只读工具放行、其余问人、cwd 之外必问。 */
   approval?: ApprovalConfig;
@@ -225,14 +234,14 @@ export type SubagentsConfig = {
   types?: Record<string, SubagentType>;
 };
 
-/** 用户目录:环境变量 CLARI_HOME 指定,否则 ~/.clari。 */
-export function clariHome(env = process.env): string {
-  return env.CLARI_HOME?.trim() || join(homedir(), ".clari");
+/** 用户目录:环境变量 CLAROOK_HOME 指定,否则 ~/.clarook。 */
+export function clarookHome(env = process.env): string {
+  return env.CLAROOK_HOME?.trim() || join(homedir(), ".clarook");
 }
 
-/** 配置文件路径;环境变量 CLARI_CONFIG 可改(多套配置、测试用)。 */
+/** 配置文件路径;环境变量 CLAROOK_CONFIG 可改(多套配置、测试用)。 */
 export const DEFAULT_CONFIG_PATH =
-  process.env.CLARI_CONFIG?.trim() || join(clariHome(), "config.json");
+  process.env.CLAROOK_CONFIG?.trim() || join(clarookHome(), "config.json");
 
 export const CONFIG_TEMPLATE: KernelConfig = {
   default: "deepseek-flash",
@@ -357,9 +366,9 @@ export function updateConfig(
   }
 }
 
-/** 凭据文件:~/.clari/credentials.json,环境变量 CLARI_CREDENTIALS 可改。key 只进这里,配置文件里不出现。 */
+/** 凭据文件:~/.clarook/credentials.json,环境变量 CLAROOK_CREDENTIALS 可改。key 只进这里,配置文件里不出现。 */
 export function credentialsPath(env = process.env): string {
-  return env.CLARI_CREDENTIALS?.trim() || join(clariHome(env), "credentials.json");
+  return env.CLAROOK_CREDENTIALS?.trim() || join(clarookHome(env), "credentials.json");
 }
 
 export type Credentials = Record<string, { apiKey: string }>;

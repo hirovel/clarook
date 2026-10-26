@@ -33,7 +33,7 @@ let tmp: string | undefined;
 afterEach(() => {
   if (tmp) rmSync(tmp, { recursive: true, force: true });
   tmp = undefined;
-  delete process.env.CLARI_SHELL;
+  delete process.env.CLAROOK_SHELL;
 });
 
 const base: KernelConfig = {
@@ -45,7 +45,7 @@ const base: KernelConfig = {
 
 describe("配置文件", () => {
   it("不存在就写模板并标 created;再读不标;坏 JSON 报路径;四种缺字段各自报错", () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-cfg-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-cfg-"));
     const path = join(tmp, "deep", "config.json");
     const first = loadConfig(path);
     expect(first.created).toBe(true);
@@ -75,7 +75,7 @@ describe("配置文件", () => {
   });
 
   it("setApiKey 写进凭据文件并去空白,配置不动,未知供应商报错列出选项;setDefaultModel 写回配置", () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-cfg-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-cfg-"));
     const path = join(tmp, "config.json");
     const creds = join(tmp, "credentials.json");
     expect(() => setApiKey(base, "nope", "k", creds)).toThrow(
@@ -203,9 +203,9 @@ describe("模型解析与 key", () => {
 
   it("key:环境变量 > 凭据文件 > 配置字段,都去空白;缺失时的提示指向 /login、环境变量与凭据文件", () => {
     const p = cfg.providers.deepseek as NonNullable<KernelConfig["providers"]["x"]>;
-    tmp = mkdtempSync(join(tmpdir(), "clari-cred-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-cred-"));
     const creds = join(tmp, "credentials.json");
-    const env = { CLARI_CREDENTIALS: creds };
+    const env = { CLAROOK_CREDENTIALS: creds };
     expect(resolveApiKey("deepseek", { ...p, apiKey: " k1 " }, env)).toBe("k1");
     saveCredential("deepseek", " k3 ", creds);
     expect(findApiKey("deepseek", { ...p, apiKey: "k1" }, env)).toEqual({
@@ -213,7 +213,7 @@ describe("模型解析与 key", () => {
       source: "credentials",
     });
     expect(resolveApiKey("deepseek", { ...p, apiKeyEnv: "K" }, { ...env, K: " k2 " })).toBe("k2");
-    const none = { CLARI_CREDENTIALS: join(tmp, "none.json") };
+    const none = { CLAROOK_CREDENTIALS: join(tmp, "none.json") };
     expect(findApiKey("deepseek", p, none)).toBeUndefined();
     expect(() => resolveApiKey("deepseek", { ...p, apiKeyEnv: "K" }, none)).toThrow(
       /Run \/login in the TUI, set env var K, or add it to .*none\.json/,
@@ -244,11 +244,11 @@ describe("模型解析与 key", () => {
 });
 
 describe("bash 工具的其它边界", () => {
-  it("CLARI_SHELL 指向不存在的程序 → 启动失败报错;非零退出带输出;无输出说明;截断落盘", async () => {
-    process.env.CLARI_SHELL = join(tmpdir(), "no-such-shell-xyz.exe");
+  it("CLAROOK_SHELL 指向不存在的程序 → 启动失败报错;非零退出带输出;无输出说明;截断落盘", async () => {
+    process.env.CLAROOK_SHELL = join(tmpdir(), "no-such-shell-xyz.exe");
     const broken = createBashTool();
     await expect(broken.execute({ command: "echo hi" }, ctx())).rejects.toThrow();
-    delete process.env.CLARI_SHELL;
+    delete process.env.CLAROOK_SHELL;
     const tool = createBashTool({ truncate: keepTail({ maxLines: 3 }) });
     await expect(tool.execute({ command: "echo out; exit 3" }, ctx())).rejects.toThrow(
       /out[\s\S]*exited with code 3/,
@@ -304,7 +304,7 @@ describe("bash 工具的其它边界", () => {
 
 describe("搜索工具的上限", () => {
   it("grep 的结果上限按整次搜索计算,文件路径可直接复用", async () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-search-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-search-"));
     mkdirSync(join(tmp, "src"));
     writeFileSync(join(tmp, "src", "a.ts"), "Needle here\nneedle again");
     const grep = createGrepTool({ maxResults: 1 });
@@ -317,7 +317,7 @@ describe("搜索工具的上限", () => {
   });
 
   it("glob 工具:无匹配说明;超过 500 条截断", async () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-glob-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-glob-"));
     for (let i = 0; i < 501; i++) writeFileSync(join(tmp, `f${i}.txt`), "");
     expect(await globTool.execute({ pattern: "*.md", path: tmp }, ctx())).toBe("(no matches)");
     let recorded = "";
@@ -342,7 +342,7 @@ describe("搜索工具的上限", () => {
 
 describe("参数解析的每个开关", () => {
   it("每个选项落到字段;非法值各自报错;-h", () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-args-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-args-"));
     const a = parseCommonArgs([
       "--resume",
       "s.jsonl",

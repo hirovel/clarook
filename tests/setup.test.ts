@@ -38,7 +38,7 @@ afterEach(() => {
 
 function fixture() {
   vi.spyOn(registry, "fetchRegistry").mockResolvedValue(undefined);
-  vi.stubEnv("CLARI_CREDENTIALS", join(dirname(DEFAULT_CONFIG_PATH), "no-credentials.json"));
+  vi.stubEnv("CLAROOK_CREDENTIALS", join(dirname(DEFAULT_CONFIG_PATH), "no-credentials.json"));
   mkdirSync(dirname(DEFAULT_CONFIG_PATH), { recursive: true });
   const config: KernelConfig = {
     default: "p/m",
@@ -61,7 +61,7 @@ describe("setup data and persistence", () => {
     const boot = fixture();
     delete boot.config.defaults?.systemPromptFile;
     const helper = resolve("tests/helpers/mcp-server.mjs");
-    const dir = mkdtempSync(join(tmpdir(), "clari-project-review-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-project-review-"));
     boot.config.sessionsDir = join(dir, "sessions");
     const templateSource = join(dirname(DEFAULT_CONFIG_PATH), "prompts");
     writeFileSync(templateSource, "This template source is a file instead of a directory.");
@@ -138,8 +138,8 @@ describe("setup data and persistence", () => {
   });
 
   it("子任务使用派发时的模型和工具,扩展与 MCP 归属子日志,续聊重建资源且不串 cwd", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-child-tools-"));
-    vi.stubEnv("CLARI_HOME", join(dir, "home"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-child-tools-"));
+    vi.stubEnv("CLAROOK_HOME", join(dir, "home"));
     const skillDir = join(dir, "home", "skills", "proof");
     mkdirSync(skillDir, { recursive: true });
     writeFileSync(
@@ -389,7 +389,7 @@ describe("setup data and persistence", () => {
     }
   });
   it("退出等候可操作:重复 Ctrl+C 不提前退出,强制退出保留未知和输入,清理卡住也能退出", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-exit-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-exit-"));
     try {
       for (const mode of [
         "approval",
@@ -532,7 +532,7 @@ describe("setup data and persistence", () => {
             term.feed("\r");
           } else {
             term.feed("\x03");
-            expect(host.app().dialogLines().join("\n")).toContain("Quit Clari");
+            expect(host.app().dialogLines().join("\n")).toContain("Quit Clarook");
             expect(host.app().agent.running).toBe(true);
             expect(exits).toBe(0);
             term.feed("\x1b[B");
@@ -642,7 +642,7 @@ describe("setup data and persistence", () => {
     }
   });
   it("实际会话切换:新建取当前组合,分叉取历史前缀,显示偏好保持,初始化失败保留会话与草稿", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-switch-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-switch-"));
     const config: KernelConfig = {
       default: "p/m",
       providers: { p: { protocol: "openai", baseUrl: "http://unused", models: ["m"] } },
@@ -651,6 +651,8 @@ describe("setup data and persistence", () => {
     };
     let block = false;
     let requests = 0;
+    let failTerminalStart = false;
+    let failedTerminal: VirtualTerminal | undefined;
     const choose = (name = "p/m") => ({
       model: name.replace(/^p\//, ""),
       providerName: "p",
@@ -688,7 +690,18 @@ describe("setup data and persistence", () => {
     const host = await startTuiSession({
       boot,
       args: boot.resolve(parseCommonArgs([])),
-      terminal: () => new VirtualTerminal(60, 24),
+      terminal: () => {
+        const terminal = new VirtualTerminal(60, 24);
+        if (failTerminalStart) {
+          failTerminalStart = false;
+          failedTerminal = terminal;
+          vi.spyOn(terminal, "start").mockImplementation(() => {
+            throw new Error("Terminal start failed");
+          });
+          vi.spyOn(terminal, "stop");
+        }
+        return terminal;
+      },
       onExit() {},
     });
     try {
@@ -797,7 +810,7 @@ describe("setup data and persistence", () => {
       expect(host.app().draft()).toBe("memory only");
       expect(existsSync(original.replace(/\.jsonl$/, ".inputs.json"))).toBe(false);
       await host.app().command("/settings saveInputs on");
-      const view = host.app();
+      let view = host.app();
       view.setDraft("keep this draft");
       view.flushInputs();
       const blockedSnapshot = original.replace(/\.jsonl$/, ".inputs.json");
@@ -845,6 +858,38 @@ describe("setup data and persistence", () => {
       legacy.append({ type: "session/start", at: "", model: "m", system: "old instructions" });
       legacy.recording?.flush();
       legacy.recording?.dispose();
+      const legacyInputs = legacyFile.replace(/\.jsonl$/, ".inputs.json");
+      const unchangedHistory = readFileSync(legacyFile, "utf8");
+      writeFileSync(legacyInputs, "{ broken input snapshot");
+      const corruptRestore = host.switchSession({
+        kind: "resume",
+        file: legacyFile,
+        source: "current",
+      });
+      await vi.waitFor(() =>
+        expect(host.app().dialogLines().join("\n")).toContain("preparation failed"),
+      );
+      host.app().dialogInput("\x1b");
+      await corruptRestore;
+      expect(readFileSync(legacyFile, "utf8")).toBe(unchangedHistory);
+      expect(host.app()).toBe(view);
+      expect(view.draft()).toBe("keep this draft");
+      rmSync(legacyInputs);
+      failTerminalStart = true;
+      const failedStart = host.switchSession({
+        kind: "resume",
+        file: legacyFile,
+        source: "current",
+      });
+      await vi.waitFor(() =>
+        expect(host.app().dialogLines().join("\n")).toContain("Terminal start failed"),
+      );
+      host.app().dialogInput("\x1b");
+      await failedStart;
+      expect(readFileSync(legacyFile, "utf8")).toBe(unchangedHistory);
+      expect(failedTerminal?.stop).toHaveBeenCalledOnce();
+      view = host.app();
+      expect(view.draft()).toBe("keep this draft");
       const restoring = host.switchSession({ kind: "resume", file: legacyFile });
       await vi.waitFor(() =>
         expect(view.dialogLines().join("\n")).toContain("Review session setup"),
@@ -921,7 +966,7 @@ describe("setup data and persistence", () => {
   });
 
   it("输入快照:重启保留草稿,已入日志去重,关闭保存仍保留内存,失败可重试", () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-inputs-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-inputs-"));
     const file = join(dir, "s.jsonl");
     const sidecar = join(dir, "s.inputs.json");
     try {
@@ -1045,6 +1090,14 @@ describe("setup data and persistence", () => {
       execution: "parallel",
       facts: { slow: false, date: false },
     });
+    boot.settings.saveSettings?.({ compactionPrompt: "codex", compactionMaxTokens: 0 });
+    expect(bootstrap().config.defaults).toMatchObject({
+      compactionPrompt: "codex",
+      compactionMaxTokens: 0,
+      steering: "turn",
+      execution: "parallel",
+      facts: { slow: false, date: false },
+    });
     boot.settings.savePreset?.("concurrent", { foldLines: 7 });
     expect(() => other.settings.savePreset?.("concurrent", { foldLines: 99 })).toThrow(
       "already exists",
@@ -1054,6 +1107,7 @@ describe("setup data and persistence", () => {
   it("保存的无上限和自动选项在 --preset 与界面载入中一致,显式命令行仍优先", () => {
     const boot = fixture();
     const snapshot = setupSnapshot(SETTINGS, (def) => getSetting(defaultPreset(), def.key));
+    snapshot.preservation = "auto";
     boot.settings.savePreset?.("automatic", snapshot);
     boot.settings.saveSetting?.("maxSteps", 21);
     boot.settings.saveSetting?.("effort", "high");
@@ -1063,7 +1117,7 @@ describe("setup data and persistence", () => {
     const args = restarted.resolve(parseCommonArgs(["--preset", "automatic"]));
     expect(args.maxSteps).toBeUndefined();
     expect(args.effort).toBeUndefined();
-    expect(args.preservation).toBeUndefined();
+    expect(args.preservation).toBe("auto");
     expect(args.model).toBeUndefined();
     expect(
       restarted.resolve(

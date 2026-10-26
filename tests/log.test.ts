@@ -44,7 +44,7 @@ const SESSION: AgentEvent[] = [
 
 describe("EventLog", () => {
   it("独立进程不能同时续写;释放后可恢复编辑,锁被接管后旧写入者不能污染文件", () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-owner-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-owner-"));
     const file = join(dir, "session.jsonl");
     const first = new EventLog(file);
     const run = () =>
@@ -113,7 +113,7 @@ describe("EventLog", () => {
     }
   });
   it("保存失败仍完成任务;修复后自动补写且不重跑工具;分叉独立保留原始输出", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-record-gate-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-record-gate-"));
     const file = join(dir, "s.jsonl");
     const backup = join(dir, "backup");
     const log = new EventLog(file);
@@ -223,7 +223,7 @@ describe("EventLog", () => {
     }
   });
   it("写入积压达到上限时停止当前工具,保存恢复前拒绝新任务且不重跑未知结果", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-record-full-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-record-full-"));
     const file = join(dir, "s.jsonl");
     const backup = join(dir, "backup");
     const log = new EventLog(file, 8192);

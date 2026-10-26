@@ -156,6 +156,8 @@ export type AgentEvent =
       reason: "turn" | "overflow-retry" | "compaction";
       /** 请求的强度级别;未设置时缺省,请求里也没有强度参数。 */
       effort?: string;
+      /** 本次调用显式覆盖的输出上限;未设置时沿用 provider 配置。 */
+      maxTokens?: number;
       /**
        * 正常步不记正文(它就是此前事件的投影)。策略自己发的请求(压缩摘要)发的不是纯投影,
        * 记下差异部分:前 prefixEvents 条事件的投影 + tail 里的消息 = 实际发出的全部消息。

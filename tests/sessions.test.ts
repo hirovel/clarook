@@ -1,4 +1,4 @@
-// 会话列表与清理:概要读首尾事件;清理按时间或条数,旁车同删,不加 apply 只算计划;子进程入口 clari sessions。
+// 会话列表与清理:概要读首尾事件;清理按时间或条数,旁车同删,不加 apply 只算计划;子进程入口 clarook sessions。
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,7 +39,7 @@ function session(
 
 describe("listSessions / pruneSessions", () => {
   it("列表新的在前,概要含模型、请求数、最后一条用户消息、旁车;坏行跳过", () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-sessions-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-sessions-"));
     session(tmp, "2026-09-01T10-00-00-000Z", "2026-09-01T10:00:00.000Z", { trace: true });
     session(tmp, "2026-09-03T10-00-00-000Z-fork", "2026-09-03T10:00:00.000Z", { mcp: true });
     const list = listSessions(tmp);
@@ -65,7 +65,7 @@ describe("listSessions / pruneSessions", () => {
   });
 
   it("按时间或条数选出要删的;不 apply 不动文件;apply 连旁车删", () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-sessions-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-sessions-"));
     const old = session(tmp, "a-old", "2026-07-01T00:00:00.000Z", { trace: true, mcp: true });
     writeFileSync(join(tmp, "a-old.inputs.json"), "{}");
     writeFileSync(join(tmp, "a-old.inputs.json.tmp"), "{}");
@@ -108,8 +108,8 @@ describe("listSessions / pruneSessions", () => {
     expect(() => parseAge("soon")).toThrow("--older-than");
   });
 
-  it("子进程入口:clari sessions 列表;prune 不带 --yes 只打印计划", async () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-sessions-"));
+  it("子进程入口:clarook sessions 列表;prune 不带 --yes 只打印计划", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "clarook-sessions-"));
     const now = Date.now();
     const day = 24 * 60 * 60 * 1000;
     session(tmp, "s1", new Date(now - 60 * day).toISOString());
@@ -133,7 +133,7 @@ describe("listSessions / pruneSessions", () => {
     const list = await run(["--dir", tmp as string]);
     expect(list.code, list.out).toBe(0);
     expect(list.out).toContain("2 sessions in");
-    expect(list.out).toContain("clari --resume");
+    expect(list.out).toContain("clarook --resume");
     const plan = await run(["prune", "--older-than", "30d", "--dir", tmp as string]);
     expect(plan.code, plan.out).toBe(0);
     expect(plan.out).toContain("would delete 1 sessions");

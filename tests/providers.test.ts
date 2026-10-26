@@ -11,6 +11,7 @@ import { deriveMessages, type Message } from "../src/messages.js";
 import { clampEffort, parseEffort } from "../src/provider.js";
 import {
   type AnthropicEvent,
+  anthropic,
   anthropicEffortParams,
   feedAnthropicEvent,
   finishAnthropicAcc,
@@ -24,7 +25,7 @@ describe("Anthropic 流式累积", () => {
   it("文本 + 工具调用分块累积,usage 来自 message_start 与 message_delta", () => {
     const acc = newAnthropicAcc();
     const events: AnthropicEvent[] = [
-      { type: "message_start", message: { usage: { input_tokens: 120 } } },
+      { type: "message_start", message: { usage: { input_tokens: 120, output_tokens: 7 } } },
       { type: "content_block_start", index: 0, content_block: { type: "text" } },
       { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "先看" } },
       { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "文件" } },
@@ -64,13 +65,25 @@ describe("Anthropic 流式累积", () => {
   it("max_tokens → length;aborted 丢弃调用保留文本", () => {
     const acc = newAnthropicAcc();
     feedAnthropicEvent(acc, {
+      type: "message_start",
+      message: { usage: { input_tokens: 120, output_tokens: 7 } },
+    });
+    feedAnthropicEvent(acc, {
       type: "content_block_delta",
       index: 0,
       delta: { type: "text_delta", text: "半" },
     });
     feedAnthropicEvent(acc, { type: "message_delta", delta: { stop_reason: "max_tokens" } });
     expect(finishAnthropicAcc(acc, false).stopReason).toBe("length");
-    expect(finishAnthropicAcc(acc, true)).toMatchObject({ text: "半", stopReason: "aborted" });
+    expect(finishAnthropicAcc(acc, true)).toMatchObject({
+      text: "半",
+      stopReason: "aborted",
+      usage: { inputTokens: 120, outputTokens: 7 },
+    });
+    feedAnthropicEvent(acc, { type: "message_delta", delta: {}, usage: {} });
+    expect(finishAnthropicAcc(acc, true).usage?.outputTokens).toBe(7);
+    feedAnthropicEvent(acc, { type: "message_delta", delta: {}, usage: { output_tokens: 0 } });
+    expect(finishAnthropicAcc(acc, true).usage?.outputTokens).toBe(0);
   });
 });
 
@@ -124,7 +137,7 @@ describe("config 解析", () => {
   it("key:环境变量 > 凭据文件 > 配置字段,都缺则指路;测试指向一个不存在的凭据文件,不碰本机的", () => {
     const p = CONFIG_TEMPLATE.providers.deepseek;
     if (!p) throw new Error("模板缺 deepseek");
-    const env = { CLARI_CREDENTIALS: "C:/nonexistent/clari-test-credentials.json" };
+    const env = { CLAROOK_CREDENTIALS: "C:/nonexistent/clarook-test-credentials.json" };
     expect(resolveApiKey("deepseek", { ...p, apiKey: " k1 " }, env)).toBe("k1");
     expect(resolveApiKey("deepseek", p, { ...env, DEEPSEEK_API_KEY: "k2" })).toBe("k2");
     expect(() => resolveApiKey("deepseek", p, env)).toThrow("DEEPSEEK_API_KEY");
@@ -185,6 +198,20 @@ describe("按模型的能力数据与强度映射", () => {
     expect(anthropicEffortParams("low", "budget", 8192)).toEqual({
       thinking: { type: "enabled", budget_tokens: 2048 },
     });
+    const provider = anthropic({
+      apiKey: "fixture",
+      model: "m",
+      maxTokens: 8192,
+      thinkingMode: "budget",
+    });
+    expect(provider.wire?.([], [], { effort: "high", maxTokens: 2048 })).toMatchObject({
+      max_tokens: 2048,
+      thinking: { type: "enabled", budget_tokens: 2047 },
+    });
+    expect(provider.wire?.([], [], { effort: "high" })).toMatchObject({
+      max_tokens: 8192,
+      thinking: { type: "enabled", budget_tokens: 8191 },
+    });
   });
 
   it("wire 层:强度参数与 extraBody 进入正文,extraBody 最后合并可覆盖一切", () => {
@@ -204,6 +231,10 @@ describe("按模型的能力数据与强度映射", () => {
     expect(body.temperature).toBe(0.2);
     const bare = p.wire?.([{ role: "user", content: "hi" }], []) as Record<string, unknown>;
     expect("reasoning_effort" in bare).toBe(false);
+    const summary = p.wire?.([], [], { maxTokens: 321 }) as Record<string, unknown>;
+    expect(summary.max_tokens).toBe(321);
+    expect(summary.max_completion_tokens).toBeUndefined();
+    expect(bare.max_tokens).toBeUndefined();
   });
 });
 

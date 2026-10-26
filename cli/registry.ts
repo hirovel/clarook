@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
-  clariHome,
+  clarookHome,
   type ModelConfig,
   type ModelPrice,
   modelConfig,
@@ -35,7 +35,7 @@ export type Registry = Record<
 >;
 
 export function registryCachePath(env = process.env): string {
-  return join(clariHome(env), "models.dev.json");
+  return join(clarookHome(env), "models.dev.json");
 }
 
 /**

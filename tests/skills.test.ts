@@ -1,5 +1,5 @@
-// 技能:frontmatter 四字段、四个发现目录、清单排除只许用户触发的、用户 /名 触发成用户消息、
-// allowed-tools 免审批、skill 工具(load = tool)、skills.mode = manual 不进系统提示词、/inspect skills 列表。
+// 技能:frontmatter、四个发现目录、清单排除只许用户触发的、用户 /名 触发成用户消息、
+// 统一审批、skill 工具(load = tool)、skills.mode = manual 不进系统提示词、/inspect skills 列表。
 import * as fs from "node:fs";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -46,8 +46,8 @@ Deploy to $1. Full args: $ARGUMENTS
 Run ./scripts/release.sh`;
 
 function project(): { home: string; proj: string } {
-  const home = testDirectory("clari-sk-home-");
-  const proj = testDirectory("clari-sk-proj-");
+  const home = testDirectory("clarook-sk-home-");
+  const proj = testDirectory("clarook-sk-proj-");
   mkdirSync(join(proj, ".git"));
   mkdirSync(join(home, "skills", "deploy"), { recursive: true });
   writeFileSync(join(home, "skills", "deploy", "SKILL.md"), DEPLOY);
@@ -60,14 +60,13 @@ function project(): { home: string; proj: string } {
 }
 
 describe("SKILL.md 解析与发现", () => {
-  it("四个字段、目录、正文;.claude/skills 也算;清单排除 user-only", () => {
+  it("技能字段、目录、正文;.claude/skills 也算;清单排除 user-only", () => {
     const s = parseSkill("/x/deploy/SKILL.md", DEPLOY);
     expect(s).toMatchObject({
       name: "deploy",
       description: "Ship a release",
       dir: "/x/deploy",
       disableModelInvocation: false,
-      allowedTools: ["bash", "read"],
       argumentHint: "<env>",
     });
     expect(s.body.startsWith("Deploy to $1.")).toBe(true);
@@ -81,7 +80,6 @@ describe("SKILL.md 解析与发现", () => {
       name: "review",
       description: "Review code changes and find defects.",
       disableModelInvocation: true,
-      allowedTools: ["read", "grep"],
       argumentHint: "<file:line>",
       body,
     });
@@ -92,12 +90,15 @@ describe("SKILL.md 解析与发现", () => {
     expect(
       parseSkill("/x/review/SKILL.md", "---\ndescription:\nname: review\n---\nbody").description,
     ).toBe("");
+    // 不支持的元数据与其它未知字段一样忽略,不会因数组写法挡住技能加载。
+    expect(
+      parseSkill("/x/review/SKILL.md", "---\nallowed-tools: [read, grep]\n---\nbody").body,
+    ).toBe("body");
     for (const invalid of [
       "name: [unclosed",
       "name: review\nname: duplicate",
       "- not a mapping",
       "disable-model-invocation: yes",
-      "allowed-tools: [read, grep]",
     ])
       expect(() => parseSkill("/x/broken/SKILL.md", `---\n${invalid}\n---\nbody`)).toThrow(
         "Invalid skill /x/broken/SKILL.md",
@@ -162,7 +163,7 @@ describe("SKILL.md 解析与发现", () => {
     const sources = {
       "./custom  skills": "on",
       ...DEFAULT_SKILL_SOURCES,
-      "user-clari": "off",
+      "user-clarook": "off",
       [custom]: "on",
     } as const;
     expect(skillDirectories(proj, { home, root: proj, sources })).toEqual([
@@ -172,7 +173,7 @@ describe("SKILL.md 解析与发现", () => {
       join(proj, ".claude", "skills"),
     ]);
     expect(skillSources(proj, { home, root: proj, sources })[1]).toMatchObject({
-      name: "user-clari",
+      name: "user-clarook",
       enabled: false,
       path: join(home, "skills"),
     });
@@ -293,6 +294,32 @@ describe("界面里的技能", () => {
       body: "Check the patch.",
     });
     const log = new EventLog();
+    log.append({
+      type: "session/start",
+      at: "2026-10-25T00:00:00.000Z",
+      model: "m",
+      system: "My exact base instructions.",
+    });
+    for (const [key, value] of Object.entries({
+      mode: "auto",
+      include: ["deploy"],
+      load: "tool",
+      sources: {},
+    }))
+      log.append({
+        type: "ext/event",
+        at: "2026-10-25T00:00:00.000Z",
+        source: "setup",
+        kind: "setting",
+        payload: { key: `prompt.skills.${key}`, value, scope: "session" },
+      });
+    // 恢复入口已明确选了当前组合,不能再被目标会话的旧设置覆盖。
+    const currentSkills = {
+      mode: "manual" as const,
+      include: "all" as const,
+      load: "read" as const,
+      sources: DEFAULT_SKILL_SOURCES,
+    };
     const term = new VirtualTerminal(60, 28);
     const requests: { system: string; tools: string[]; description: string }[] = [];
     let pending: Promise<void> | undefined;
@@ -317,9 +344,12 @@ describe("界面里的技能", () => {
       reserveTokens: 1000,
       info: { model: "m", providerName: "p", sessionFile: "s" },
       systemPrompt: "My exact base instructions.",
+      startupSettings: { prompt: { skills: currentSkills } },
       onExit: () => {},
       onSetupChange: (setup) => recordSessionSetup(log, setup),
     });
+    expect(app.setup().values.prompt?.skills).toEqual(currentSkills);
+    expect(restoreSessionSetup(log.events, {}).setup.values.prompt?.skills).toEqual(currentSkills);
     const tick = () => new Promise((r) => setTimeout(r, 5));
     const menu = () => app.dialogLines().map(plain).join("\n");
     await app.command("/settings prompt.skills.include");
@@ -441,15 +471,17 @@ describe("界面里的技能", () => {
     expect(JSON.stringify(deriveMessages(log.events))).toContain("User request:\\nstaging");
     app.stop();
   });
-  it("/deploy staging 变成一条用户消息;allowed-tools 免审批,turn 结束后恢复;/inspect skills 列表", async () => {
+  it("技能正文及排队要求进入实际请求,工具统一审批且保留明确的本会话放行", async () => {
     const { home, proj } = project();
     const skills = discoverSkills(proj, { home, root: proj });
-    const asked: string[] = [];
+    let bashRuns = 0;
+    let otherRuns = 0;
     const bash = defineTool({
       name: "bash",
       description: "",
       parameters: Type.Object({ command: Type.String() }),
       async execute() {
+        bashRuns++;
         return "ran";
       },
     });
@@ -458,6 +490,7 @@ describe("界面里的技能", () => {
       description: "",
       parameters: Type.Object({}),
       async execute() {
+        otherRuns++;
         return "x";
       },
     });
@@ -482,6 +515,21 @@ describe("界面里的技能", () => {
             stopReason: "tool",
           };
         }
+        if (step === 2) {
+          expect(messages.at(-1)?.content).toContain("User request:\nproduction");
+          expect(messages.filter((m) => m.role === "tool")).toMatchObject([
+            { name: "bash", isError: true },
+            { name: "other", isError: false },
+          ]);
+          return {
+            text: "",
+            toolCalls: [
+              { id: "3", name: "bash", args: { command: "y" } },
+              { id: "4", name: "other", args: {} },
+            ],
+            stopReason: "tool",
+          };
+        }
         return { text: "done", toolCalls: [], stopReason: "end" };
       },
     };
@@ -501,32 +549,45 @@ describe("界面里的技能", () => {
       onExit: () => {},
     });
     const run = app.command("/deploy staging");
-    // bash 在 allowed-tools 里不问;other 会弹审批,按 n 拒绝
-    await new Promise((r) => setTimeout(r, 30));
-    for (let i = 0; i < 20 && app.approvalLines().length === 0; i++)
-      await new Promise((r) => setTimeout(r, 10));
-    asked.push(plain(app.approvalLines().join("\n")));
-    expect(asked[0]).toContain("other");
-    expect(asked[0]).not.toContain("bash");
-    term.feed("4");
-    term.feed("\r");
-    await run;
-    const results = log.events.filter((e) => e.type === "tool/result");
-    expect(results.find((r) => r.name === "bash")).toMatchObject({
-      isError: false,
-      content: "ran",
-    });
-    const user = log.events.find((e) => e.type === "user/message");
-    expect(user?.type === "user/message" && user.text).toContain('Skill "deploy"');
-    expect(user?.type === "user/message" && user.text).toContain("User request:\nstaging");
-    expect(plain(app.lines(110).join("\n"))).toContain("skill /deploy");
+    try {
+      await vi.waitFor(() => expect(plain(app.approvalLines().join("\n"))).toContain("bash"));
+      expect(bashRuns).toBe(0);
+      await app.command("/deploy production");
+      expect(app.agent.queued).toBe(1);
+      expect(plain(app.approvalLines().join("\n"))).toContain("bash");
+      term.feed("4"); // 拒绝本次bash;技能声明不绕过审批。
+      term.feed("\r");
+      await vi.waitFor(() => expect(plain(app.approvalLines().join("\n"))).toContain("other"));
+      term.feed("2"); // 明确的本会话放行仍在后续调用生效。
+      term.feed("\r");
+      await vi.waitFor(() => expect(plain(app.approvalLines().join("\n"))).toContain("bash"));
+      expect(bashRuns).toBe(0);
+      term.feed("1");
+      term.feed("\r");
+      await run;
+      expect(bashRuns).toBe(1);
+      expect(otherRuns).toBe(2);
+      expect(app.agent.queued).toBe(0);
+      expect(log.events.filter((e) => e.type === "tool/result")).toMatchObject([
+        { name: "bash", isError: true },
+        { name: "other", isError: false },
+        { name: "bash", isError: false, content: "ran" },
+        { name: "other", isError: false },
+      ]);
+      const user = log.events.find((e) => e.type === "user/message");
+      expect(user?.type === "user/message" && user.text).toContain('Skill "deploy"');
+      expect(user?.type === "user/message" && user.text).toContain("User request:\nstaging");
+      expect(plain(app.lines(110).join("\n"))).toContain("skill /deploy");
 
-    await app.command("/inspect skills");
-    const doc = plain(app.lines(110).join("\n"));
-    expect(doc).toContain("/deploy");
-    expect(doc).toContain("allowed-tools: bash read");
-    expect(doc).toContain("/secret");
-    expect(doc).toContain("user-only");
-    app.stop();
+      await app.command("/inspect skills");
+      const doc = plain(app.lines(110).join("\n"));
+      expect(doc).toContain("/deploy");
+      expect(doc).toContain("/secret");
+      expect(doc).toContain("user-only");
+    } finally {
+      app.agent.interrupt();
+      await run;
+      app.stop();
+    }
   });
 });

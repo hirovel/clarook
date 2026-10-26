@@ -174,6 +174,26 @@ describe("会话对照", () => {
       request(3, 400),
     ];
     expect(byId(events).E).toMatchObject({ status: "pass" });
+    // 完整摘要可由用户选择保留，即使更长；报告不能沿用旧的强制缩小规则。
+    const growing = structuredClone(events);
+    const summary = growing[6];
+    if (summary?.type !== "compaction") throw new Error("Missing summary fixture");
+    summary.summary = "Detailed handoff. ".repeat(700);
+    const reviewed = (acceptance: string): AgentEvent[] => [
+      ...growing.slice(0, 6),
+      {
+        type: "ext/event",
+        at,
+        source: "setup",
+        kind: "setting",
+        payload: { key: "compactionAcceptance", value: acceptance, scope: "session" },
+      },
+      ...growing.slice(6),
+    ];
+    expect(byId(reviewed("complete")).E).toMatchObject({ status: "pass" });
+    expect(byId(reviewed("complete")).E?.detail).toContain("complete permits");
+    expect(byId(reviewed("smaller")).E).toMatchObject({ status: "fail" });
+    expect(byId(growing).E).toMatchObject({ status: "skip" });
   });
 
   it("有毛病的会话:估算差额跳变、压缩无进展、失败没恢复、工具错误率高", () => {

@@ -14,7 +14,6 @@ import {
   buildTools,
   loadExtensions,
   memoryFiles,
-  parsePreservation,
   resolveToolPrompts,
 } from "./bootstrap.js";
 import { connectMcpServers, type McpBridge } from "./mcp/bridge.js";
@@ -45,13 +44,7 @@ export async function prepareSessionRuntime(options: {
 }) {
   const { boot, args, log } = options;
   const choice = options.allowUnavailable ? boot.chooseOrNone(args.model) : boot.choose(args.model);
-  const compaction = await buildCompaction(
-    args.compaction,
-    choice.contextWindow,
-    args.compactionReserve,
-    args.compactionTrigger,
-  );
-  if (args.preservation) compaction.preservation = parsePreservation(args.preservation).policy;
+  const compaction = await buildCompaction(args, choice.contextWindow);
   const memory = args.memory ? memoryFiles() : undefined;
   const skills = discoverSkills(process.cwd(), {
     ...(args.skillsSources && { sources: args.skillsSources }),
@@ -88,7 +81,7 @@ export async function prepareSessionRuntime(options: {
   if (review?.servers.length && !projectMcpTrusted(review)) {
     if (!options.confirmProjectMcp)
       throw new Error(
-        `Project MCP is not trusted: ${review.file}. Open Clari TUI to review and approve it; no project MCP command was started.`,
+        `Project MCP is not trusted: ${review.file}. Open Clarook TUI to review and approve it; no project MCP command was started.`,
       );
     useProjectMcp = await options.confirmProjectMcp(review);
     if (useProjectMcp) {

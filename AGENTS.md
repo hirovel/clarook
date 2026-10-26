@@ -1,6 +1,6 @@
-# clari · 给在这个仓库里工作的 agent
+# clarook · 给在这个仓库里工作的 agent
 
-clari 是一个从零手写的 coding-agent 内核与终端界面(TypeScript)。会话事实维护在一个追加式事件数组中;模型消息、对话历史、上下文统计与压缩对照从它投影。事件入库形成独立 JSON 快照,文件格式与恢复归 Recording;草稿、焦点、连接和写入队列各有生命周期,不能当成第二份会话事实。当前模块地图与设计裁决在 `docs/architecture.html`(内部文档,不推送)。
+clarook 是一个从零手写的 coding-agent 内核与终端界面(TypeScript)。会话事实维护在一个追加式事件数组中;模型消息、对话历史、上下文统计与压缩对照从它投影。事件入库形成独立 JSON 快照,文件格式与恢复归 Recording;草稿、焦点、连接和写入队列各有生命周期,不能当成第二份会话事实。当前模块地图与设计裁决在 `docs/architecture.html`(内部文档,不推送)。
 
 ## 命令
 
@@ -21,7 +21,7 @@ pnpm replay sessions/<文件>.jsonl                     # 按请求组织地打�
 
 - 查 pi 实现优先读取本地 `C:/AIwork/pi`,先核对本地版本;只有需要本地没有的内容或核验最新变化时才联网。
 - 界面文案、模型看到的固定文本一律英文;给用户的解释与代码注释用中文。
-- 技术细节写原因,不写来源;代码、提示词、文案里永远不出现"某家怎么做"或论文编号。证据链只存在于 `docs/architecture.html` 的裁决表。
+- 技术细节写原因,不泛用品牌作背书。用户要求的压缩参考组合需在设置中明确标注参考项目、模板和未移植行为;来源放在组合元数据、许可文件和 `docs/architecture.html`,不放进模型提示词。其他文案不堆砌来源或论文编号。
 - 每个可选项都进配置,并且登记在 `src/settings.ts`:配置模板的 `defaults`、`/settings` 屏、Ctrl+K 条目都从这张表生成;`tests/settings.test.ts` 逐项核对命令行解析认得每个键。
 - 真正可权衡的才做成槽或选项;有明确更优解就直接采用。加一个新机制先问用户,用户选了一个选项不等于批准了塞在里面的细节。
 - 明确的基础缺陷直接修复并验证,不逐项请求确认;涉及根本设计、运行模型或新增机制的取舍,先说明问题、最简方案、是否新增持久状态及验证方法,讨论确认后实施。检查和临时复现可先做。用户已授权需要时自动进行真实 API 验收,沿用已确认模型和累计预算,不逐次询问;超预算或扩大敏感数据范围须另确认。
@@ -43,8 +43,8 @@ pnpm replay sessions/<文件>.jsonl                     # 按请求组织地打�
 
 ## 安全
 
-- 永远不读、不打印、不粘贴 API key:不 cat `~/.clari/config.json` 或 `~/.clari/credentials.json`,测试输出里出现 `sk-…` 一律遮掉。key 只经过 TUI 的 `/login` 对话框一个入口。
-- 测试进程由 `tests/helpers/setup.ts` 把用户目录指到临时目录;涉及凭据的测试必须设 `CLARI_CREDENTIALS` 指向不存在的文件。
+- 永远不读、不打印、不粘贴 API key:不 cat `~/.clarook/config.json` 或 `~/.clarook/credentials.json`,测试输出里出现 `sk-…` 一律遮掉。key 只经过 TUI 的 `/login` 对话框一个入口。
+- 测试进程由 `tests/helpers/setup.ts` 把用户目录指到临时目录;涉及凭据的测试必须设 `CLAROOK_CREDENTIALS` 指向不存在的文件。
 - 日志、trace、检视器的线路 JSON 按设计不含 key;改供应商层时保持这一点。
 
 ## 汇报

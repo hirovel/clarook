@@ -106,7 +106,7 @@ export async function startTuiSession(options: {
     };
     return { values, tools: [], descriptions: boot.config.toolPrompts?.descriptions ?? {} };
   };
-  const makeView = (session: Session, args: CommonArgs, runtime?: Runtime): TuiApp => {
+  const prepareView = (session: Session, args: CommonArgs, runtime?: Runtime): (() => TuiApp) => {
     const choice = runtime?.choice ?? first;
     const templateErrors: string[] = [];
     const templates = discoverTemplates(process.cwd(), undefined, (error) =>
@@ -121,87 +121,96 @@ export async function startTuiSession(options: {
       } else if (savedInputs.saving !== (args.saveInputs ?? true))
         savedInputs.configure(args.saveInputs ?? true);
     }
-    const view = createTuiApp({
-      ...(savedInputs && { inputs: savedInputs }),
-      saveInputs: args.saveInputs ?? true,
-      terminal: options.terminal(),
-      log: session.log,
-      provider: choice.provider,
-      tools: runtime?.tools ?? [],
-      compaction: runtime?.compaction ?? {
-        strategy: async () => null,
-        window: choice.contextWindow,
-      },
-      reserveTokens: args.compactionReserve ?? RESERVE,
-      info: {
-        model: choice.model,
-        providerName: choice.providerName,
-        sessionFile: session.sessionFile,
-        resumed: session.resumed,
-        contextWindow: choice.contextWindow,
-        ...(choice.capabilitySource && { capabilitySource: choice.capabilitySource }),
-      },
-      settings: { ...boot.settings, settingLayers: () => ({ defaults: boot.config.defaults }) },
-      startupSettings: {
-        ...settingsFromArgs(args),
-        extensions: args.extensions,
-        ...(args.systemPromptFile && { systemPromptFile: args.systemPromptFile }),
-        ...(args.appendSystemPromptFile && { appendSystemPromptFile: args.appendSystemPromptFile }),
-      },
-      fold: args.fold,
+    const snapshot = savedInputs?.read(session.log.events);
+    const terminal = options.terminal();
+    return () => {
+      const view = createTuiApp(
+        {
+          ...(savedInputs && { inputs: savedInputs }),
+          saveInputs: args.saveInputs ?? true,
+          terminal,
+          log: session.log,
+          provider: choice.provider,
+          tools: runtime?.tools ?? [],
+          compaction: runtime?.compaction ?? {
+            strategy: async () => null,
+            window: choice.contextWindow,
+          },
+          reserveTokens: args.compactionReserve ?? RESERVE,
+          info: {
+            model: choice.model,
+            providerName: choice.providerName,
+            sessionFile: session.sessionFile,
+            resumed: session.resumed,
+            contextWindow: choice.contextWindow,
+            ...(choice.capabilitySource && { capabilitySource: choice.capabilitySource }),
+          },
+          settings: { ...boot.settings, settingLayers: () => ({ defaults: boot.config.defaults }) },
+          startupSettings: {
+            ...settingsFromArgs(args),
+            extensions: args.extensions,
+            ...(args.systemPromptFile && { systemPromptFile: args.systemPromptFile }),
+            ...(args.appendSystemPromptFile && {
+              appendSystemPromptFile: args.appendSystemPromptFile,
+            }),
+          },
+          fold: args.fold,
 
-      ...(args.foldLines !== undefined && { foldLines: args.foldLines }),
-      ...(args.foldSteps !== undefined && { foldSteps: args.foldSteps }),
-      ...(args.statusStyle && { statusStyle: args.statusStyle }),
-      ...(args.statusWidgets && { statusWidgets: args.statusWidgets }),
-      showCostEstimate: args.showCostEstimate ?? false,
-      ...(args.results && { results: args.results }),
-      ...(args.facts && { facts: args.facts }),
-      ...(args.planReminder !== undefined && { planReminder: args.planReminder }),
-      ...(args.disabledTools && { disabledTools: args.disabledTools }),
-      ...(args.mcpReconnect && { mcpReconnect: args.mcpReconnect }),
-      ...(args.screen && { screen: args.screen }),
-      ...(args.notify && { notify: args.notify }),
-      approve: resolveApproval(args, boot.config),
-      compactionName: args.compaction,
-      ...(args.preservation && { preservationSpec: args.preservation }),
-      ...(args.effort && { effort: args.effort }),
-      ...(choice.effortLevels && { effortLevels: choice.effortLevels }),
-      ...(choice.price && { price: choice.price }),
-      ...(runtime
-        ? {
-            slots: runtime.slots,
-            mcp: runtime.mcp,
-            skills: runtime.skills,
-            toolPrompts: runtime.toolPrompts,
-            ...(runtime.memory && { memory: runtime.memory }),
-            ...(choice.unavailable && { unavailable: choice.unavailable }),
-            onSetupChange: (setup: SessionSetup) => recordSessionSetup(session.log, setup),
-          }
-        : {
-            readOnlyReason:
-              "History is open for review. Choose /session resume to prepare its setup before running.",
-          }),
-      templates,
-      sessionsDir: dir,
-      switchSession: (target) => {
-        void switchSession(target).catch((error) =>
-          current.view.note(`Session switch failed: ${errorMessage(error)}`),
-        );
-      },
-      onExit: () => {
-        if (exitRequested) return;
-        exitRequested = true;
-        void close()
-          .then(exit)
-          .catch((error) => {
-            exitRequested = false;
-            current.view.note(`Could not close: ${errorMessage(error)}`);
-          });
-      },
-    });
-    for (const error of templateErrors) view.note(error);
-    return view;
+          ...(args.foldLines !== undefined && { foldLines: args.foldLines }),
+          ...(args.foldSteps !== undefined && { foldSteps: args.foldSteps }),
+          ...(args.statusStyle && { statusStyle: args.statusStyle }),
+          ...(args.statusWidgets && { statusWidgets: args.statusWidgets }),
+          showCostEstimate: args.showCostEstimate ?? false,
+          ...(args.results && { results: args.results }),
+          ...(args.facts && { facts: args.facts }),
+          ...(args.planReminder !== undefined && { planReminder: args.planReminder }),
+          ...(args.disabledTools && { disabledTools: args.disabledTools }),
+          ...(args.mcpReconnect && { mcpReconnect: args.mcpReconnect }),
+          ...(args.screen && { screen: args.screen }),
+          ...(args.notify && { notify: args.notify }),
+          approve: resolveApproval(args, boot.config),
+          compactionName: args.compaction,
+          ...(args.preservation && { preservationSpec: args.preservation }),
+          ...(args.effort && { effort: args.effort }),
+          ...(choice.effortLevels && { effortLevels: choice.effortLevels }),
+          ...(choice.price && { price: choice.price }),
+          ...(runtime
+            ? {
+                slots: runtime.slots,
+                mcp: runtime.mcp,
+                skills: runtime.skills,
+                toolPrompts: runtime.toolPrompts,
+                ...(runtime.memory && { memory: runtime.memory }),
+                ...(choice.unavailable && { unavailable: choice.unavailable }),
+                onSetupChange: (setup: SessionSetup) => recordSessionSetup(session.log, setup),
+              }
+            : {
+                readOnlyReason:
+                  "History is open for review. Choose /session resume to prepare its setup before running.",
+              }),
+          templates,
+          sessionsDir: dir,
+          switchSession: (target) => {
+            void switchSession(target).catch((error) =>
+              current.view.note(`Session switch failed: ${errorMessage(error)}`),
+            );
+          },
+          onExit: () => {
+            if (exitRequested) return;
+            exitRequested = true;
+            void close()
+              .then(exit)
+              .catch((error) => {
+                exitRequested = false;
+                current.view.note(`Could not close: ${errorMessage(error)}`);
+              });
+          },
+        },
+        snapshot,
+      );
+      for (const error of templateErrors) view.note(error);
+      return view;
+    };
   };
   async function prepare(
     session: Session,
@@ -227,7 +236,7 @@ export async function startTuiSession(options: {
       confirmProjectMcp: async (review: ProjectMcpReview) => {
         let view = current?.view;
         if (!view) {
-          trustView = makeView(session, args);
+          trustView = prepareView(session, args)();
           view = trustView;
           current = { session, args, view };
         }
@@ -365,6 +374,7 @@ export async function startTuiSession(options: {
             );
             return;
           }
+          const showView = prepareView(session, args, prepared.runtime);
           old.view.flushInputs();
           for (const log of [
             old.session.log,
@@ -377,6 +387,7 @@ export async function startTuiSession(options: {
           old.view.stop();
           prepared.runtime.activate();
           try {
+            const view = showView();
             if (prompt) {
               const target = session.log.events.findIndex((e) => e.type === "session/start");
               if (target >= 0)
@@ -396,12 +407,11 @@ export async function startTuiSession(options: {
                   text: prompt.preamble.map((p) => p.text).join("\n\n"),
                 });
             }
-            const view = makeView(session, args, prepared.runtime);
             prepared.binding.view = view;
             current = { session, args, view, runtime: prepared.runtime, binding: prepared.binding };
           } catch (error) {
             old.runtime?.activate();
-            old.view = makeView(old.session, old.args, old.runtime);
+            old.view = prepareView(old.session, old.args, old.runtime)();
             if (old.binding) old.binding.view = old.view;
             old.view.setDraft(draft);
             throw error;
@@ -596,7 +606,7 @@ export async function startTuiSession(options: {
       ? openSession(options.args, dir)
       : beginSession(options.args, first, process.cwd(), dir);
   if (session.resumed) {
-    current = { session, args: options.args, view: makeView(session, options.args) };
+    current = { session, args: options.args, view: prepareView(session, options.args)() };
     void switchSession({ kind: "resume", file: session.sessionFile }).catch((error) =>
       current.view.note(errorMessage(error)),
     );
@@ -635,7 +645,7 @@ export async function startTuiSession(options: {
       trustView?.stop();
       if (closed) throw new Error("Session closed during MCP review");
       ready.runtime.activate();
-      const view = makeView(session, options.args, ready.runtime);
+      const view = prepareView(session, options.args, ready.runtime)();
       ready.binding.view = view;
       current = {
         session,

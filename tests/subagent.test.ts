@@ -162,7 +162,7 @@ describe("createTaskTool", () => {
   });
 
   it("scope 参数由父模型选择:fork 让子看到父历史", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-fork-records-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-fork-records-"));
     const parent = new EventLog(join(dir, "parent.jsonl"));
     for (const event of parentLog().events) parent.append(event);
     let childLog: EventLog | undefined;

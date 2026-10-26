@@ -152,7 +152,7 @@ describe("/slots 与切换命令", () => {
 
     await app.command("/set compaction ./does-not-exist.mjs");
     expect(text()).toContain("✗");
-    const dir = mkdtempSync(join(tmpdir(), "clari-slot-values-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-slot-values-"));
     let restoredApp: ReturnType<typeof createTuiApp> | undefined;
     try {
       const path = join(dir, "keep · trigger recent.mjs");
@@ -182,10 +182,8 @@ describe("/slots 与切换命令", () => {
       if (!saved.values.compaction || !saved.values.preservation)
         throw new Error("Restored strategy values are missing");
       const compaction = await buildCompaction(
-        saved.values.compaction,
+        { ...saved.values, compactionReserve: 1000 },
         100000,
-        1000,
-        saved.values.compactionTrigger,
       );
       compaction.preservation = parsePreservation(saved.values.preservation).policy;
       restoredApp = createTuiApp({
@@ -214,7 +212,7 @@ describe("/slots 与切换命令", () => {
         provider: scripted([]),
         tools: [],
         compaction: {
-          ...(await buildCompaction("clear", 100000, 1000)),
+          ...(await buildCompaction({ compaction: "clear", compactionReserve: 1000 }, 100000)),
           preservation: parsePreservation("tokens 3000").policy,
         },
         reserveTokens: 1000,

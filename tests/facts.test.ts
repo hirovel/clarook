@@ -249,6 +249,9 @@ describe("计划复述", () => {
     expect(state?.every((i) => i.status === "done")).toBe(true);
     expect(stepsSincePlan(log.events)).toBe(5);
     expect(planText(state ?? [])).toContain("[x] 3. test");
+    log.append({ type: "user/message", at: "t", text: "[plan] this is ordinary user text" });
+    expect(stepsSincePlan(log.events)).toBe(5);
+    expect(stepsSincePlan(log.events.slice(0, idx + 1))).toBe(0);
     // 缺省关闭:超过旧的八步阈值也不插入提醒。
     const log2 = newLog();
     await runTurn({
@@ -283,6 +286,58 @@ describe("计划复述", () => {
     expect(i).toBeGreaterThan(0);
     expect(log.events[i]).toMatchObject({ reason: "compacted" });
     expect(log.events[i - 1]?.type).toBe("compaction");
+
+    for (const withPlan of [true, false]) {
+      const manualLog = newLog();
+      await runTurn({
+        log: manualLog,
+        provider: scripted([
+          ...(withPlan ? [plan("p1", [{ text: "finish verification", status: "pending" }])] : []),
+          { text: "Older findings. ".repeat(80), toolCalls: [], stopReason: "end" },
+        ]),
+        tools: [planTool],
+        facts: { date: false },
+      });
+      await runTurn({
+        log: manualLog,
+        provider: scripted([{ text: "unused", toolCalls: [], stopReason: "end" }]),
+        tools: [],
+        manualCompaction: "",
+        compaction: {
+          strategy: async ({ events }) => ({
+            summary: "Task summary without the plan.",
+            coversFrom: 2,
+            coversUpTo: events.length,
+          }),
+          window: 100000,
+          trigger: "manual",
+        },
+      });
+      expect(manualLog.events.some((event) => event.type === "compaction")).toBe(true);
+      manualLog.append({ type: "user/message", at: "t", text: "Continue." });
+      let nextInput: Message[] = [];
+      await runTurn({
+        log: manualLog,
+        provider: {
+          model: "fake",
+          async complete(messages) {
+            nextInput = messages;
+            return { text: "ok", toolCalls: [], stopReason: "end" };
+          },
+        },
+        tools: [],
+        facts: { date: false },
+      });
+      expect(
+        nextInput
+          .filter((message) => message.content.startsWith("[plan]"))
+          .map((message) => message.content),
+      ).toEqual(
+        withPlan
+          ? ["[plan] 1 step · 0 done · 0 in progress · 1 pending\n[ ] 1. finish verification"]
+          : [],
+      );
+    }
   });
 });
 

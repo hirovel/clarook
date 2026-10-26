@@ -38,7 +38,8 @@ describe("extras:供应商元数据原样保存", () => {
       system_fingerprint: "fp_x",
       finish_reason: "stop",
     });
-    expect(finishAcc(newAcc(), false)).not.toHaveProperty("extras");
+    expect(() => finishAcc(newAcc(), false)).toThrow("stream ended without finish_reason");
+    expect(finishAcc(newAcc(), true)).not.toHaveProperty("extras");
   });
 
   it("Anthropic:message.id、model、stop_reason 原文、stop_sequence", () => {

@@ -127,11 +127,23 @@ export function sanitizeName(s: string): string {
   return s.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
-/** 桥接后的工具名:mcp__server__tool;超过 128 就截断并附 sha1 前 12 位。 */
+/** 无损短名保持可读;清洗、分隔或截断会混淆身份时,用原始二元组稳定消歧。 */
 export function bridgedName(server: string, tool: string): string {
-  const full = `mcp__${sanitizeName(server)}__${sanitizeName(tool)}`;
-  if (full.length <= MAX_NAME) return full;
-  const hash = createHash("sha1").update(`${server}/${tool}`).digest("hex").slice(0, 12);
+  const safeServer = sanitizeName(server);
+  const safeTool = sanitizeName(tool);
+  const full = `mcp__${safeServer}__${safeTool}`;
+  if (
+    full.length <= MAX_NAME &&
+    safeServer === server &&
+    safeTool === tool &&
+    !server.includes("__") &&
+    !server.endsWith("_")
+  )
+    return full;
+  const hash = createHash("sha1")
+    .update(JSON.stringify([server, tool]))
+    .digest("hex")
+    .slice(0, 12);
   return `${full.slice(0, MAX_NAME - 13)}_${hash}`;
 }
 
@@ -282,50 +294,60 @@ export async function connectMcpServers(
         const definitions = connection.definitions.filter((d) =>
           toolAllowed(d.name, server.config.enabledTools, server.config.disabledTools),
         );
-        const fresh: Tool[] = definitions.map((definition) => ({
-          name: bridgedName(server.name, definition.name),
-          description: definition.description ?? definition.title ?? "",
-          parameters: (definition.inputSchema ?? { type: "object" }) as unknown as TSchema,
-          concurrency: "sequential",
-          async execute(args, ctx) {
-            if (closed) throw new Error("This MCP session is closed");
-            const result = await connection
-              .call(
-                opts.log,
-                definition.name,
-                args,
-                ctx.signal,
-                server.config.toolTimeoutMs ?? 60000,
-              )
-              .catch((error: unknown) => {
-                if (error instanceof McpOutcomeUnknownError)
-                  throw new ToolOutcomeUnknownError(error.message, { cause: error });
-                throw error;
+        const occupied = new Set(
+          opts.tools.filter((tool) => !before.includes(tool.name)).map((tool) => tool.name),
+        );
+        const fresh: Tool[] = definitions.map((definition) => {
+          const name = bridgedName(server.name, definition.name);
+          if (occupied.has(name))
+            throw new Error(`mcp ${server.name}: duplicate tool name ${name} (${definition.name})`);
+          occupied.add(name);
+          return {
+            name,
+            description: definition.description ?? definition.title ?? "",
+            parameters: (definition.inputSchema ?? { type: "object" }) as unknown as TSchema,
+            concurrency: "sequential",
+            async execute(args, ctx) {
+              if (closed) throw new Error("This MCP session is closed");
+              const result = await connection
+                .call(
+                  opts.log,
+                  definition.name,
+                  args,
+                  ctx.signal,
+                  server.config.toolTimeoutMs ?? 60000,
+                )
+                .catch((error: unknown) => {
+                  if (error instanceof McpOutcomeUnknownError)
+                    throw new ToolOutcomeUnknownError(error.message, { cause: error });
+                  throw error;
+                });
+              ctx.output?.write(JSON.stringify(result));
+              let text = contentToText(result.content, {
+                ...(opts.artifactsDir && { dir: opts.artifactsDir }),
+                ...(ctx.callId && { callId: ctx.callId }),
               });
-            ctx.output?.write(JSON.stringify(result));
-            let text = contentToText(result.content, {
-              ...(opts.artifactsDir && { dir: opts.artifactsDir }),
-              ...(ctx.callId && { callId: ctx.callId }),
-            });
-            if (result.structuredContent !== undefined && !text.trim())
-              text = JSON.stringify(result.structuredContent, null, 2);
-            const max = opts.mcp?.maxResultChars ?? 100000;
-            if (text.length > max) {
-              const length = text.length;
-              const end = /[\uD800-\uDBFF]/.test(text[max - 1] ?? "") ? max - 1 : max;
-              const original = ctx.output?.path;
-              const location =
-                ctx.output?.ref.missingFrom !== undefined
-                  ? `; raw recording incomplete from byte ${ctx.output.ref.missingFrom}; available prefix: ${original}`
-                  : original
-                    ? `; full raw MCP result: ${original}`
-                    : "";
-              text = `${text.slice(0, end)}\n[truncated to ${end} chars of ${length}${location}]`;
-            }
-            if (result.isError) throw new Error(text || "tool reported an error without a message");
-            return text;
-          },
-        }));
+              if (result.structuredContent !== undefined && !text.trim())
+                text = JSON.stringify(result.structuredContent, null, 2);
+              const max = opts.mcp?.maxResultChars ?? 100000;
+              if (text.length > max) {
+                const length = text.length;
+                const end = /[\uD800-\uDBFF]/.test(text[max - 1] ?? "") ? max - 1 : max;
+                const original = ctx.output?.path;
+                const location =
+                  ctx.output?.ref.missingFrom !== undefined
+                    ? `; raw recording incomplete from byte ${ctx.output.ref.missingFrom}; available prefix: ${original}`
+                    : original
+                      ? `; full raw MCP result: ${original}`
+                      : "";
+                text = `${text.slice(0, end)}\n[truncated to ${end} chars of ${length}${location}]`;
+              }
+              if (result.isError)
+                throw new Error(text || "tool reported an error without a message");
+              return text;
+            },
+          };
+        });
         for (let i = opts.tools.length - 1; i >= 0; i--)
           if (before.includes(opts.tools[i]?.name ?? "")) opts.tools.splice(i, 1);
         for (const name of before) names.delete(name);

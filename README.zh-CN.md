@@ -1,12 +1,14 @@
-# Clari
+# Clarook
 
-Clari 是一个简洁、可配置的终端 AI agent。
+**看清上下文，决定下一步。**
+
+Clarook 是一个终端 AI agent，让你查看 API 来回内容、编辑上下文，并配置 agent 的工作方式。
 
 - **看清模型看到什么。** 查看请求正文、响应、返回的思考内容和工具结果。
 - **决定下一次发送什么。** 在终端里编辑或排除上下文，保留原始历史。
 - **组装自己的 agent。** 选择模型、工具、技能和策略，将组合保存为预设。
 
-![Clari 组合设置：独立配置各个组件](assets/clari-setup.png)
+![Clarook 组合设置：独立配置各个组件](assets/clarook-setup.png)
 
 在 `/settings` 独立调整各个组件，应用于当前会话或保存为默认值。
 
@@ -14,10 +16,10 @@ Clari 是一个简洁、可配置的终端 AI agent。
 
 ## 开始使用
 
-安装 Clari：
+安装 Clarook：
 
 ```sh
-npm install -g @hirovel/clari@latest
+npm install -g clarook@latest
 ```
 
 需要 Node.js 22.19+。
@@ -25,34 +27,32 @@ npm install -g @hirovel/clari@latest
 在项目目录启动：
 
 ```sh
-clari
+clarook
 ```
 
 首次启动时，选择供应商，输入 API key，再选择模型及其作用域。
 
 输入任务，按 Enter 发送。Esc 中断当前轮，`/quit` 退出。
 
-进入 Clari 后，输入 `/help` 查看命令与快捷键，`/settings` 修改配置。
+进入 Clarook 后，输入 `/help` 查看命令与快捷键，`/settings` 修改配置。
 
 菜单用方向键选择、Enter 确认、Esc 返回。设置页的操作显示在列表下方，用 ←→ 选择。
 
-运行 `clari --help` 查看启动参数。
+运行 `clarook --help` 查看启动参数。
 
-更新到最新发布版本，先退出 Clari，再运行：
+更新到最新发布版本，先退出 Clarook，再运行：
 
 ```sh
-npm install -g @hirovel/clari@latest
+npm install -g clarook@latest
 ```
 
-从 GitHub 0.1.0 或 0.1.1 包升级时，先运行 `npm uninstall -g clari`，再安装新版。配置和会话保留。
+无需全局安装时，可用 `npx clarook@latest`。
 
-无需全局安装时，可用 `npx @hirovel/clari@latest`。
+[GitHub Releases](https://github.com/hirovel/clarook/releases) 也提供预构建包：`npm install -g https://github.com/hirovel/clarook/releases/latest/download/clarook.tgz`。
 
-[GitHub Releases](https://github.com/hirovel/clari/releases) 也提供预构建包：`npm install -g https://github.com/hirovel/clari/releases/latest/download/clari.tgz`。
+Clarook 启动后检查新版，显示手动更新命令。可在 `/settings checkUpdates` 的已保存默认值中关闭检查，或启动时加 `--no-check-updates`。`/help update` 查看更新说明。
 
-Clari 启动后检查新版，显示手动更新命令。可在 `/settings checkUpdates` 的已保存默认值中关闭检查，或启动时加 `--no-check-updates`。`/help update` 查看更新说明。
-
-## 使用 Clari
+## 使用 Clarook
 
 ### 查看 API 来回内容
 
@@ -62,13 +62,19 @@ Ctrl+R 按顺序列出每次请求。在主屏用 Shift+PgUp/PgDn 选中请求�
 
 ### 编辑上下文
 
-Ctrl+E 打开下一次请求的上下文。编号之间的日志记录折叠显示，选中后按 Enter 逐条查看。在内部编辑器修改系统指令、消息和工具结果，可以排除消息、恢复编辑前的原文，也可以将上下文回退到之前的步骤。原文与修改记录保留，可查看对照。每项操作说明是影响下一次输入、立即发送请求，还是创建会话文件。
+Ctrl+R 查看历史请求，Ctrl+E 检查下一次请求的上下文。在内部编辑器修改系统指令、消息和工具结果，可以排除消息、恢复编辑前的原文，也可以将上下文回退到之前的步骤。原文与修改记录保留，可查看对照。
+
+每项操作说明是影响下一次输入、立即发送请求，还是创建会话文件。发送后，在 Ctrl+R 查看捕获的请求，核对实际发出的内容。消息之间的其他运行记录折叠为日志行，选中后按 Enter 查看记录。
 
 ### 配置组合
 
 `/settings` 分开当前会话与已保存默认值。勾选工具和自动技能范围，配置技能目录、模型思考强度和上下文策略。状态栏提供布局预览与组件开关，组合可保存为命名预设，随时加载。
 
-技能默认手动调用：`/名称 你的要求`，也可开启自动选择。MCP 工具与 JavaScript/TypeScript 扩展可以添加能力或替换策略。
+技能默认手动调用：`/名称 你的要求`，也可开启自动选择。工具统一遵循会话审批规则，技能元数据不授予权限。MCP 工具与 JavaScript/TypeScript 扩展可以添加能力或替换策略。
+
+上下文管理提供 Pi、Codex、ZCode 和 OpenCode 参考组合，新组合默认采用 Pi 参考。选定后可分别调整触发时机、近期保留量、摘要模板、输出上限和应用条件。详情展示实际提示词、摘要格式及与来源实现的差异；自定义提示词可使用 `.md` 文件。这些文本方案共用 Clarook 的压缩流程，已保存的显式设置优先。
+
+比例压缩可在 `/settings compactionRatio` 调整：`0` 关闭，开启建议从 `0.8` 开始。上下文长度会影响信息利用，提早摘要可能改善关注度，也可能丢失细节并增加请求。现有预留量可能更早触发。仍可用 `/compact` 手动控制。
 
 ### 执行任务与恢复会话
 
@@ -90,11 +96,11 @@ Esc 请求取消。Windows 下执行 `taskkill` 后结束本地等待，不再�
 
 ## 开发
 
-克隆仓库，安装依赖，从源码运行 Clari：
+克隆仓库，安装依赖，从源码运行 Clarook：
 
 ```sh
-git clone https://github.com/hirovel/clari.git
-cd clari
+git clone https://github.com/hirovel/clarook.git
+cd clarook
 pnpm install
 pnpm tui
 ```
@@ -105,6 +111,19 @@ pnpm tui
 pnpm check
 ```
 
+在源码目录用真实 API 比较配置：
+
+```sh
+pnpm evaluate validate evals/tool-descriptions.json
+pnpm evaluate run evals/tool-descriptions.json .preview/evaluations/run-01
+```
+
+实验文件设置模型、基线、候选、任务与重复次数。结果包含独立产物验收、会话记录、CSV 和 HTML 报告。`pnpm evaluate report <结果目录>` 不调用 API，只重建报告。每轮使用新输出目录。结论限定于测试的模型和任务，不自动采用配置。
+
 ## 许可证
 
 [MIT](LICENSE)
+
+改编的摘要模板保留[第三方许可声明](THIRD_PARTY_NOTICES.md)。
+
+曾用名 Clari。

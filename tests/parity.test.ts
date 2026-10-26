@@ -272,12 +272,12 @@ describe("提示词模板", () => {
     const home = testDirectory("ak-home-");
     const proj = testDirectory("ak-proj-");
     mkdirSync(join(home, "prompts"), { recursive: true });
-    mkdirSync(join(proj, ".clari", "prompts"), { recursive: true });
+    mkdirSync(join(proj, ".clarook", "prompts"), { recursive: true });
     mkdirSync(join(proj, ".git"));
     writeFileSync(join(home, "prompts", "a.md"), "用户级 A");
     writeFileSync(join(home, "prompts", "b.md"), "用户级 B");
-    writeFileSync(join(proj, ".clari", "prompts", "a.md"), "项目级 A");
-    const unreadable = join(proj, ".clari", "prompts", "unreadable.md");
+    writeFileSync(join(proj, ".clarook", "prompts", "a.md"), "项目级 A");
+    const unreadable = join(proj, ".clarook", "prompts", "unreadable.md");
     writeFileSync(unreadable, "Must be skipped without losing normal templates.");
     const read = fs.readFileSync;
     const spy = vi.spyOn(fs, "readFileSync").mockImplementation((...args) => {
@@ -302,8 +302,8 @@ describe("提示词模板", () => {
     writeFileSync(join(badHome, "prompts"), "Expected a directory, not this file.");
     warnings.length = 0;
     const validProject = testDirectory("ak-template-project-");
-    mkdirSync(join(validProject, ".clari", "prompts"), { recursive: true });
-    writeFileSync(join(validProject, ".clari", "prompts", "ok.md"), "Still works.");
+    mkdirSync(join(validProject, ".clarook", "prompts"), { recursive: true });
+    writeFileSync(join(validProject, ".clarook", "prompts", "ok.md"), "Still works.");
     expect(
       discoverTemplates(validProject, badHome, (error) => warnings.push(error.message)),
     ).toMatchObject([{ name: "ok", body: "Still works." }]);
@@ -514,6 +514,10 @@ describe("自动压缩阈值", () => {
     const { compactionThreshold } = await import("../src/loop.js");
     expect(compactionThreshold(131072, 32000)).toBe(99072);
     expect(compactionThreshold(8000, 32000)).toBe(4000);
-    expect(compactionThreshold(50000)).toBe(25000);
+    expect(compactionThreshold(50000)).toBe(33616);
+    expect(compactionThreshold(1000000, 32000, 0.8)).toBe(800000);
+    expect(compactionThreshold(1000000, 32000, 0)).toBe(968000);
+    expect(compactionThreshold(128000, 32000, 0.8)).toBe(96000);
+    expect(compactionThreshold(8000, 32000, 0.4)).toBe(3200);
   });
 });

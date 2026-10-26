@@ -8,6 +8,11 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import {
+  COMPACTION_REFERENCES,
+  DEFAULT_COMPACTION_SETTINGS,
+  SUMMARY_TEMPLATES,
+} from "../src/compaction-presets.js";
 import type { Preset } from "../src/config.js";
 import {
   DEFAULT_SKILL_SOURCES,
@@ -30,21 +35,36 @@ import {
 } from "../src/setup.js";
 import { STATUS_WIDGETS, type StatusStyle } from "../src/status-bar.js";
 import { skillSources } from "./prompt.js";
+import { loadSummaryPrompt } from "./strategies.js";
 import { c, G, selectedText } from "./theme.js";
 import type { TuiContext } from "./tui-context.js";
 import { printableInput } from "./tui-format.js";
-import { type SettingChange, settingTiming, setupRead, sourceOf } from "./tui-settings.js";
+import {
+  changeCompactionReference,
+  type SettingChange,
+  settingTiming,
+  setupRead,
+  sourceOf,
+} from "./tui-settings.js";
 
 type Choice = { label: string; value: unknown; note?: string };
 type BrowsingMode =
   | { kind: "browse" }
+  | { kind: "references" }
   | { kind: "choices"; def: SettingDef; items: Choice[] }
   | { kind: "members"; def: SettingDef; names: string[] };
 type Mode =
   | BrowsingMode
   | { kind: "text"; def?: SettingDef; text: string; purpose: "value" | "save" | "source" }
   | { kind: "restore"; def: SettingDef }
-  | { kind: "info"; def: SettingDef; offset: number; from: BrowsingMode; index: number }
+  | {
+      kind: "info";
+      def?: SettingDef;
+      promptText?: string;
+      offset: number;
+      from: BrowsingMode;
+      index: number;
+    }
   | { kind: "presets" }
   | { kind: "presetReview"; name: string; values: Preset; offset: number };
 
@@ -77,7 +97,9 @@ export class SetupView implements Component {
     const section = SETUP_SECTIONS.findIndex((s) => s.keys.includes(key));
     if (section < 0) return false;
     this.section = section;
-    this.index = SETUP_SECTIONS[section]?.keys.indexOf(key) ?? 0;
+    this.index =
+      (SETUP_SECTIONS[section]?.keys.indexOf(key) ?? 0) +
+      (SETUP_SECTIONS[section]?.id === "context" ? 1 : 0);
     this.mode = { kind: "browse" };
     return true;
   }
@@ -124,6 +146,17 @@ export class SetupView implements Component {
     return { title: setupGuide(def).title, value: this.value(def), def, run: () => this.edit(def) };
   }
 
+  private currentReference(): (typeof COMPACTION_REFERENCES)[number] | undefined {
+    return COMPACTION_REFERENCES.find((reference) =>
+      Object.keys(DEFAULT_COMPACTION_SETTINGS).every((key) => {
+        const def = settingDef(key);
+        return (
+          def && sameSetting(this.read(def), reference.values[key as keyof typeof reference.values])
+        );
+      }),
+    );
+  }
+
   private summary(i: number): string {
     const section = SETUP_SECTIONS[i];
     if (!section) return "";
@@ -139,7 +172,7 @@ export class SetupView implements Component {
       case "tools":
         return `${this.scope === "session" ? `${this.deps.ctx.defs().length} offered` : value("tools.disable")} · delegation ${value("subagent")}`;
       case "context":
-        return `${value("compaction")} · keep ${value("preservation")}`;
+        return `${this.currentReference()?.label ?? "Custom"} · ${value("compaction")} · keep ${value("preservation")}`;
       case "execution":
         return `${value("approve")} · ${value("execution")}`;
       case "display":
@@ -154,6 +187,22 @@ export class SetupView implements Component {
   private rows(): Row[] {
     const { ctx } = this.deps;
     const m = this.mode;
+    if (m.kind === "references")
+      return COMPACTION_REFERENCES.map((reference) => ({
+        title: reference.label,
+        value: this.currentReference()?.id === reference.id ? "Current" : "",
+        note: reference.summary,
+        run: () => {
+          void this.run(async () => {
+            const result = await changeCompactionReference(ctx, reference.values, this.scope);
+            if (result.ok) {
+              this.mode = { kind: "browse" };
+              this.index = this.returnIndex;
+            }
+            return result;
+          });
+        },
+      }));
     if (m.kind === "choices")
       return m.items.map((item) => ({
         title: item.label,
@@ -328,6 +377,25 @@ export class SetupView implements Component {
     const section = SETUP_SECTIONS[this.section];
     if (!section) return [];
     return [
+      ...(section.id === "context"
+        ? [
+            {
+              title: "Reference composition",
+              value: this.currentReference()?.label ?? "Custom",
+              note: "Choose a complete starting composition, then adjust its parts below.",
+              run: () => {
+                this.returnIndex = this.index;
+                this.mode = { kind: "references" };
+                this.index = Math.max(
+                  0,
+                  COMPACTION_REFERENCES.findIndex(
+                    (reference) => reference.id === this.currentReference()?.id,
+                  ),
+                );
+              },
+            },
+          ]
+        : []),
       ...section.keys.flatMap((key) => {
         const def = settingDef(key);
         return def ? [this.settingRow(def)] : [];
@@ -350,9 +418,24 @@ export class SetupView implements Component {
   /** 可见动作只属于当前焦点;不混入设置值或保存到配置。 */
   private actions(): Row[] {
     const m = this.mode;
-    if (m.kind !== "browse" && m.kind !== "choices" && m.kind !== "members") return [];
+    if (
+      m.kind !== "browse" &&
+      m.kind !== "choices" &&
+      m.kind !== "members" &&
+      m.kind !== "references"
+    )
+      return [];
     if (this.searching && m.kind === "browse") return [];
     const def = "def" in m ? m.def : this.rows()[this.index]?.def;
+    if (m.kind === "references")
+      return [
+        {
+          title: "Details",
+          run: () => {
+            this.mode = { kind: "info", offset: 0, from: m, index: this.index };
+          },
+        },
+      ];
     if (!def) return [];
     return [
       ...(m.kind === "choices" && ["number", "text"].includes(def.type)
@@ -362,7 +445,25 @@ export class SetupView implements Component {
         title: "Details",
         run: () => {
           this.returnIndex = m.kind === "browse" ? this.index : this.returnIndex;
-          this.mode = { kind: "info", def, offset: 0, from: m, index: this.index };
+          const info: Extract<Mode, { kind: "info" }> = {
+            kind: "info",
+            def,
+            offset: 0,
+            from: m,
+            index: this.index,
+          };
+          const value = String(m.kind === "choices" ? m.items[this.index]?.value : this.read(def));
+          if (def.key === "compactionPrompt" && !Object.hasOwn(SUMMARY_TEMPLATES, value)) {
+            void this.run(async () => {
+              info.promptText = await loadSummaryPrompt(value);
+              this.mode = info;
+              return {
+                ok: true,
+                message:
+                  "Preview reads the current file. Reapply this setting to load file changes.",
+              };
+            });
+          } else this.mode = info;
         },
       },
       ...(m.kind === "browse"
@@ -537,7 +638,7 @@ export class SetupView implements Component {
       this.index = 7;
       return {
         ok: true,
-        message: `Preset ${name} saved. Load it here for future starts, or launch clari --preset ${name}.`,
+        message: `Preset ${name} saved. Load it here for future starts, or launch clarook --preset ${name}.`,
       };
     });
   }
@@ -693,16 +794,68 @@ export class SetupView implements Component {
     this.deps.onChange();
   }
 
+  private templateDetail(value: string, fileText?: string): string[] {
+    const template = Object.hasOwn(SUMMARY_TEMPLATES, value)
+      ? SUMMARY_TEMPLATES[value as keyof typeof SUMMARY_TEMPLATES]
+      : undefined;
+    const lines = (text: string) => text.split("\n").map((line) => c.soft(line));
+    if (template)
+      return [
+        "",
+        c.bold(c.ink("Prompt sent to summarizer")),
+        ...lines(template.instructions),
+        "",
+        c.bold(c.ink("Summary format (model instructions)")),
+        ...(template.format ? lines(template.format) : [c.soft("No fixed headings.")]),
+      ];
+    return [
+      "",
+      c.bold(c.ink("Prompt sent to summarizer")),
+      c.faint(`File: ${value}`),
+      c.faint("Current file preview; reapply the setting to load file changes."),
+      ...(fileText === undefined
+        ? [c.soft("Open Details to read the complete file. Loading does not call the model.")]
+        : lines(fileText)),
+    ];
+  }
+
   private detail(row: Row | undefined, compact = false, previewWidth = 70): string[] {
     const m = this.mode;
     const { ctx } = this.deps;
+    const browsing = m.kind === "info" ? m.from : m;
+    const index = m.kind === "info" ? m.index : this.index;
+    if (browsing.kind === "references") {
+      const reference = COMPACTION_REFERENCES[index];
+      if (!reference) return [];
+      return [
+        c.bold(c.ink(reference.label)),
+        c.jin(reference.summary),
+        "",
+        ...Object.entries(reference.values).map(([key, value]) => {
+          const def = settingDef(key);
+          return c.soft(
+            `${def ? setupGuide(def).title : key}: ${def ? setupValue(def, value) : String(value)}`,
+          );
+        }),
+        "",
+        c.jin(
+          this.scope === "defaults"
+            ? "Applies to saved defaults only; current session stays unchanged."
+            : "Applies while idle, to the next compaction check. No request sent.",
+        ),
+        c.soft("You can change each part afterwards. Original history stays available."),
+        ...this.templateDetail(reference.values.compactionPrompt),
+        "",
+        c.bold(c.ink("Reference and differences")),
+        ...(reference.source ? [c.faint(reference.source)] : []),
+        ...reference.differences.map((line) => c.soft(line)),
+      ];
+    }
     const def = "def" in m ? m.def : row?.def;
     if (def) {
       const guide = setupGuide(def);
       const current = setupRead(ctx, def, "session");
       const saved = setupRead(ctx, def, "defaults");
-      const browsing = m.kind === "info" ? m.from : m;
-      const index = m.kind === "info" ? m.index : this.index;
       const choice = browsing.kind === "choices" ? browsing.items[index] : undefined;
       const memberName = browsing.kind === "members" ? browsing.names[index] : undefined;
       const member =
@@ -787,6 +940,12 @@ export class SetupView implements Component {
         ...skillPlacement.map((line) => c.jin(line)),
         ...(memberNote ? [c.soft(memberNote)] : []),
         ...statusPreview,
+        ...(def.key === "compactionPrompt"
+          ? this.templateDetail(
+              String(choice?.value ?? this.read(def)),
+              m.kind === "info" ? m.promptText : undefined,
+            )
+          : []),
         c.jin(`Applies: ${settingTiming(ctx, def, this.scope)}`),
         ...(choice || member ? [c.faint("── Current state ──"), ...state] : []),
         ...(!compact
@@ -807,6 +966,22 @@ export class SetupView implements Component {
             : ["", c.soft(guide.effect)]),
       ];
     }
+    if (
+      this.section !== undefined &&
+      SETUP_SECTIONS[this.section]?.id === "context" &&
+      this.index === 0
+    )
+      return [
+        c.bold(c.ink("Reference composition")),
+        c.soft(`Current: ${this.currentReference()?.label ?? "Custom"}`),
+        "",
+        c.soft(
+          "Choose a reference composition to preview its trigger, preservation and actual summary instructions. Each part remains editable.",
+        ),
+        c.faint(
+          "Only context settings change. Model, tools and conversation history stay unchanged.",
+        ),
+      ];
     if (m.kind === "presetReview") {
       const target = (def: SettingDef) =>
         configuredValue(def, m.values) ??
@@ -905,11 +1080,13 @@ export class SetupView implements Component {
     const section = this.section === undefined ? undefined : SETUP_SECTIONS[this.section];
     const trail = this.searching
       ? "Search"
-      : m.kind === "presets" || m.kind === "presetReview"
-        ? "Presets"
-        : "def" in m && m.def
-          ? setupGuide(m.def).title
-          : section?.title;
+      : m.kind === "references" || (m.kind === "info" && m.from.kind === "references")
+        ? "Reference composition"
+        : m.kind === "presets" || m.kind === "presetReview"
+          ? "Presets"
+          : "def" in m && m.def
+            ? setupGuide(m.def).title
+            : section?.title;
     const head = [
       pad(
         `${c.bold(c.ink("Agent setup"))}${trail ? c.soft(` / ${trail}`) : c.faint("  /settings")}`,
@@ -958,7 +1135,7 @@ export class SetupView implements Component {
           ? "↑↓ scroll · PgUp/PgDn · Esc back"
           : m.kind === "presetReview"
             ? "↑↓ scroll review · Enter use defaults · Esc cancel"
-            : m.kind === "choices"
+            : m.kind === "choices" || m.kind === "references"
               ? "↑↓ choose · Enter apply · ←→ actions · Esc back"
               : m.kind === "members"
                 ? `↑↓ move · Enter ${m.def.type === "map" && m.def.key !== "prompt.skills.sources" ? "cycle" : "toggle"}${m.def.key === "prompt.skills.sources" ? " · Del remove" : ""} · ←→ actions · Esc back`
@@ -1066,7 +1243,7 @@ export class SetupView implements Component {
     const body: string[] = [];
     const clippedDetails = (available: number) => {
       const lines = details.slice(0, available);
-      if (activeDef && details.length > available && available > 0)
+      if ((activeDef || m.kind === "references") && details.length > available && available > 0)
         lines[available - 1] = c.faint(
           actions.some((a) => a.title === "Details") ? "… [Details] shows full text" : "…",
         );

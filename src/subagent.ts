@@ -316,7 +316,7 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
   const cwd = opts.cwd ?? process.cwd();
   let counter = 0;
   /** 已派出的子,按 id;结束后日志留在这里供续聊,进程结束才释放。 */
-  const children = new Map<string, { log: EventLog; info: ChildInfo; running: boolean }>();
+  const children = new Map<string, { log: EventLog; running: boolean }>();
 
   const list = (names: string[], reg: Record<string, { description: string }>, def: string) =>
     names
@@ -467,7 +467,7 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
         state: { status: "running" },
         ...(ctx.callId && { callId: ctx.callId }),
       };
-      const record = { log, info, running: true };
+      const record = { log, running: true };
       children.set(id, record);
       let res: SubagentResult;
       try {

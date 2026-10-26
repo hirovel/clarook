@@ -26,6 +26,7 @@ export type AnthropicEvent =
         model?: string;
         usage?: {
           input_tokens?: number;
+          output_tokens?: number;
           cache_creation_input_tokens?: number;
           cache_read_input_tokens?: number;
         };
@@ -116,6 +117,7 @@ export function feedAnthropicEvent(acc: AnthropicAcc, ev: AnthropicEvent): strin
       if (ev.message.model) acc.extras.model = ev.message.model;
       // Anthropic 的 input_tokens 不含缓存部分;占用窗口的是三者之和。
       const u = ev.message.usage;
+      if (u?.output_tokens !== undefined) acc.outputTokens = u.output_tokens;
       if (
         u &&
         (u.input_tokens ?? u.cache_read_input_tokens ?? u.cache_creation_input_tokens) !== undefined
@@ -238,7 +240,7 @@ export const ANTHROPIC_FIELDS: FieldTable = {
     "messages[].content 块:text / tool_use{id, name, input} / tool_result{tool_use_id, content, is_error};最后一块挂 cache_control",
     "tools[{name, description, input_schema}]",
     "thinking{type: adaptive|enabled+budget_tokens|disabled} + output_config.effort:按强度级别与 thinkingMode",
-    "extraBody 里的任何键,逐字合并",
+    "extraBody merged unchanged; explicit per-call maxTokens overrides max_tokens without changing extraBody.thinking",
   ],
   reads: [
     "message_start.message.usage:input_tokens + cache_creation_input_tokens + cache_read_input_tokens → inputTokens;后两项单列",
@@ -437,9 +439,10 @@ export function anthropic(opts: AnthropicOptions): Provider {
   };
   const wire = (messages: Message[], tools: ToolDef[], w: WireOptions = {}) => {
     const body = toAnthropicWire(messages, { model: opts.model, cache });
+    const outputTokens = w.maxTokens ?? maxTokens;
     return {
       model: opts.model,
-      max_tokens: maxTokens,
+      max_tokens: outputTokens,
       ...(body.system && { system: body.system }),
       messages: body.messages,
       ...(tools.length > 0 && {
@@ -453,9 +456,10 @@ export function anthropic(opts: AnthropicOptions): Provider {
       ...anthropicEffortParams(
         w.effort && clampEffort(w.effort, opts.effortLevels),
         opts.thinkingMode ?? "adaptive",
-        maxTokens,
+        outputTokens,
       ),
       ...opts.extraBody,
+      ...(w.maxTokens !== undefined && { max_tokens: w.maxTokens }),
     };
   };
   const mode = opts.thinkingMode ?? "adaptive";
@@ -468,9 +472,14 @@ export function anthropic(opts: AnthropicOptions): Provider {
     async complete(
       messages: Message[],
       tools: ToolDef[],
-      { onDelta, onReasoning, signal, onRetry, onRaw, onRequest, record, effort } = {},
+      { onDelta, onReasoning, signal, onRetry, onRaw, onRequest, record, effort, maxTokens } = {},
     ) {
-      const body = JSON.stringify(wire(messages, tools, effort ? { effort } : {}));
+      const body = JSON.stringify(
+        wire(messages, tools, {
+          ...(effort && { effort }),
+          ...(maxTokens !== undefined && { maxTokens }),
+        }),
+      );
 
       return withRetry(
         async () => {

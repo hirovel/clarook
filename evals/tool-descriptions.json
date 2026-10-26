@@ -1,0 +1,35 @@
+{
+  "name": "tool-descriptions",
+  "hypothesis": "Brief tool descriptions may reduce repeated input tokens without lowering artifact correctness on these tasks. Timing is descriptive; this experiment does not test general capability or total monetary cost.",
+  "model": "deepseek/deepseek-flash",
+  "config": "deepseek.json",
+  "repetitions": 3,
+  "baseline": { "id": "explain", "settings": { "toolPrompts": "explain" } },
+  "candidates": [{ "id": "brief", "settings": { "toolPrompts": "brief" } }],
+  "tasks": [
+    {
+      "id": "grade-school",
+      "fixture": "tasks/grade-school",
+      "reference": "references/grade-school.js",
+      "output": "grade-school.js",
+      "tests": 10,
+      "prompt": "Implement grade-school.js according to .docs/instructions.md. Inspect the project, complete the implementation, run npm test, and report the result. Modify only grade-school.js."
+    },
+    {
+      "id": "phone-number",
+      "fixture": "tasks/phone-number",
+      "reference": "references/phone-number.js",
+      "output": "phone-number.js",
+      "tests": 18,
+      "prompt": "Implement phone-number.js according to .docs/instructions.md. Inspect the project, complete the implementation, run npm test, and report the result. Modify only phone-number.js."
+    },
+    {
+      "id": "transpose",
+      "fixture": "tasks/transpose",
+      "reference": "references/transpose.js",
+      "output": "transpose.js",
+      "tests": 13,
+      "prompt": "Implement transpose.js according to .docs/instructions.md. Inspect the project, complete the implementation, run npm test, and report the result. Modify only transpose.js."
+    }
+  ]
+}

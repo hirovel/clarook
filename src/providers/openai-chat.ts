@@ -46,6 +46,7 @@ export type SseChunk = {
   choices?: {
     delta?: {
       content?: string | null;
+      refusal?: string | null;
       reasoning_content?: string | null;
       tool_calls?: {
         index?: number;
@@ -91,10 +92,8 @@ export function feedChunk(acc: StreamAcc, chunk: SseChunk): string {
   if (chunk.system_fingerprint && acc.extras.system_fingerprint === undefined)
     acc.extras.system_fingerprint = chunk.system_fingerprint;
   if (choice?.finish_reason) acc.extras.finish_reason = choice.finish_reason;
-  if (choice?.delta?.content) {
-    delta = choice.delta.content;
-    acc.text += delta;
-  }
+  delta = (choice?.delta?.content ?? "") + (choice?.delta?.refusal ?? "");
+  acc.text += delta;
   if (choice?.delta?.reasoning_content) acc.reasoning += choice.delta.reasoning_content;
   for (const tc of choice?.delta?.tool_calls ?? []) {
     // 有些中转站不带 index(整段一次发完):带 id 的当新调用,不带的续写最后一个。
@@ -127,6 +126,21 @@ export function feedChunk(acc: StreamAcc, chunk: SseChunk): string {
 }
 
 export function finishAcc(acc: StreamAcc, aborted: boolean): AssistantTurn {
+  if (!aborted) {
+    if (!acc.finishReason) {
+      // 流没有报告结束时不生成完整助手消息;已显示内容时禁止重试。
+      throw new ProviderError("stream ended without finish_reason", {
+        retryable: !acc.text && !acc.reasoning,
+      });
+    }
+    if (!["stop", "length", "tool_calls"].includes(acc.finishReason)) {
+      // 完整参数不代表调用获准执行;异常或未知结束理由必须留在错误路径。
+      throw new ProviderError(`provider stream ended with finish_reason=${acc.finishReason}`, {
+        retryable: false,
+        body: acc.finishReason,
+      });
+    }
+  }
   const toolCalls: ToolCall[] = acc.toolCalls.map((tc) => ({
     id: tc.id,
     name: tc.name,
@@ -163,20 +177,20 @@ export const OPENAI_COMPAT_FIELDS: FieldTable = {
     "tools[{type: function, function{name, description, parameters}}]",
     "reasoning_effort(openai 方言;off → none)/ thinking{type} + reasoning_effort(deepseek 方言)",
     "max_completion_tokens(openai 方言)/ max_tokens(其余):配置了 maxTokens 才发",
-    "extraBody 里的任何键,逐字合并",
+    "extraBody merged unchanged; explicit per-call maxTokens overrides both output-limit fields using the current dialect",
   ],
   reads: [
-    "choices[0].delta.content → text",
+    "choices[0].delta.content / refusal → text",
     "choices[0].delta.reasoning_content → reasoning(全文,可编辑)",
     "choices[0].delta.tool_calls[{index, id, function{name, arguments}}] → toolCalls",
-    "choices[0].finish_reason → stopReason(length → 截断)",
+    "choices[0].finish_reason → stopReason(length → 截断;异常或未知值 → ProviderError)",
     "usage.prompt_tokens / completion_tokens → inputTokens / outputTokens",
     "usage.prompt_cache_hit_tokens 或 prompt_tokens_details.cached_tokens → cacheReadTokens",
     "usage.completion_tokens_details.reasoning_tokens → reasoningTokens",
     "id · model · system_fingerprint · finish_reason 原文 → extras(不解释,原样存)",
   ],
   ignores: [
-    "choices[].delta.refusal、logprobs、created",
+    "logprobs、created",
     "GPT 在此协议上不返回任何推理内容,只有 reasoning_tokens 一个数字;要看推理摘要用 openai-responses 协议",
   ],
 };
@@ -255,24 +269,33 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
     authorization: `Bearer ${opts.apiKey}`,
     ...opts.extraHeaders,
   };
-  const wire = (messages: Message[], tools: ToolDef[], w: WireOptions = {}) => ({
-    model: opts.model,
-    messages: messages.map((m) => toWire(m, opts.reasoningField)),
-    ...(tools.length > 0 && {
-      tools: tools.map((t) => ({
-        type: "function",
-        function: { name: t.name, description: t.description, parameters: t.parameters },
-      })),
-    }),
-    stream: true,
-    stream_options: { include_usage: true },
-    ...(opts.maxTokens !== undefined &&
-      (dialect === "openai"
-        ? { max_completion_tokens: opts.maxTokens }
-        : { max_tokens: opts.maxTokens })),
-    ...openaiEffortParams(w.effort && clampEffort(w.effort, opts.effortLevels), dialect),
-    ...opts.extraBody,
-  });
+  const wire = (messages: Message[], tools: ToolDef[], w: WireOptions = {}) => {
+    const body: Record<string, unknown> = {
+      model: opts.model,
+      messages: messages.map((m) => toWire(m, opts.reasoningField)),
+      ...(tools.length > 0 && {
+        tools: tools.map((t) => ({
+          type: "function",
+          function: { name: t.name, description: t.description, parameters: t.parameters },
+        })),
+      }),
+      stream: true,
+      stream_options: { include_usage: true },
+      ...(opts.maxTokens !== undefined &&
+        (dialect === "openai"
+          ? { max_completion_tokens: opts.maxTokens }
+          : { max_tokens: opts.maxTokens })),
+      ...openaiEffortParams(w.effort && clampEffort(w.effort, opts.effortLevels), dialect),
+      ...opts.extraBody,
+    };
+    if (w.maxTokens !== undefined) {
+      // 每次调用的显式额度优先;只发当前方言的一个字段,不影响下一次请求。
+      delete body.max_tokens;
+      delete body.max_completion_tokens;
+      body[dialect === "openai" ? "max_completion_tokens" : "max_tokens"] = w.maxTokens;
+    }
+    return body;
+  };
   return {
     model: opts.model,
     fields: OPENAI_COMPAT_FIELDS,
@@ -283,9 +306,14 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
     async complete(
       messages,
       tools,
-      { onDelta, onReasoning, signal, onRetry, onRaw, onRequest, record, effort } = {},
+      { onDelta, onReasoning, signal, onRetry, onRaw, onRequest, record, effort, maxTokens } = {},
     ) {
-      const body = JSON.stringify(wire(messages, tools, effort ? { effort } : {}));
+      const body = JSON.stringify(
+        wire(messages, tools, {
+          ...(effort && { effort }),
+          ...(maxTokens !== undefined && { maxTokens }),
+        }),
+      );
 
       return withRetry(
         async () => {
@@ -328,12 +356,6 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
               if (onReasoning && acc.reasoning.length > before) {
                 onReasoning(acc.reasoning.slice(before));
               }
-            }
-            if (!acc.finishReason) {
-              // 没收到终止事件就结束 = 流被截断;尚未向 UI 吐字时可重试,吐过字就不能(会重复)。
-              throw new ProviderError("stream ended without finish_reason", {
-                retryable: !acc.text && !acc.reasoning,
-              });
             }
             return finishAcc(acc, false);
           } catch (err) {

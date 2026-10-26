@@ -6,6 +6,7 @@ import {
   estimateAfter,
   type PreservationPolicy,
 } from "./compaction.js";
+import { type CompactionAcceptance, DEFAULT_COMPACTION_SETTINGS } from "./compaction-presets.js";
 import { type AgentEvent, now, type ToolCall } from "./events.js";
 import { completeRecorded, recordEvent, toolOutput } from "./exchange.js";
 import { annotateResult, DEFAULT_FACTS, dateNote, type FactsConfig } from "./facts.js";
@@ -113,7 +114,11 @@ export type CompactionConfig = {
    * 余量的用途:装下一次模型输出 + 摘要调用的开销,不随窗口变大而变大。
    */
   reserveTokens?: number;
+  /** 额外的窗口比例触发线;0 或未设置表示关闭,与余量线取较早者。 */
+  ratio?: number;
   preservation?: PreservationPolicy;
+  /** complete 接受完整摘要;其它模式还要求组合后的上下文变小。 */
+  acceptance?: CompactionAcceptance;
   /**
    * 什么时候压:threshold(缺省)= 每次请求前占用超阈值就压;manual = 只在 /compact 时压;
    * remind = 不自动压,界面到阈值提示一行。三档下溢出恢复都会强制压缩一次。
@@ -123,14 +128,19 @@ export type CompactionConfig = {
   isOverflow?: (err: Error) => boolean;
 };
 
-const DEFAULT_RESERVE = 32000;
+const DEFAULT_RESERVE = DEFAULT_COMPACTION_SETTINGS.compactionReserve;
 
 /**
  * 自动压缩阈值 = window − reserve,但余量不许吃掉超过一半窗口:小窗口(或演示用的假窗口)下
- * 阈值否则会变成负数,每一步都触发压缩。
+ * 阈值否则会变成负数,每一步都触发压缩。显式比例线可更早触发,两者取较早者。
  */
-export function compactionThreshold(window: number, reserveTokens = DEFAULT_RESERVE): number {
-  return Math.max(Math.floor(window / 2), window - reserveTokens);
+export function compactionThreshold(
+  window: number,
+  reserveTokens = DEFAULT_RESERVE,
+  ratio = 0,
+): number {
+  const reserveThreshold = Math.max(Math.floor(window / 2), window - reserveTokens);
+  return ratio > 0 ? Math.min(reserveThreshold, Math.floor(window * ratio)) : reserveThreshold;
 }
 
 const defaultIsOverflow = (err: Error): boolean => isContextOverflow(err);
@@ -162,6 +172,7 @@ export function recordingProvider(
         estimatedTokens: contextTokens(log.events),
         ...(opts.threshold !== undefined && { threshold: opts.threshold }),
         reason: "compaction",
+        ...(callOpts.maxTokens !== undefined && { maxTokens: callOpts.maxTokens }),
         body: describeRequestBody(log.events, messages),
       });
       return completeRecorded(log, provider, messages, tools, {
@@ -173,16 +184,19 @@ export function recordingProvider(
   };
 }
 
-/** 达到阈值时运行策略并落盘压缩事件。返回是否取得实际进展。 */
+type CompactionOutcome = { applied: boolean; reduced: boolean };
+
+/** 应用摘要和腾出空间是两件事;溢出恢复只能依赖后者。 */
 async function compactIfNeeded(
   deps: TurnDeps,
   cfg: CompactionConfig,
   force: boolean,
   instructions?: string,
-): Promise<boolean> {
-  const threshold = compactionThreshold(cfg.window, cfg.reserveTokens);
+): Promise<CompactionOutcome> {
+  const threshold = compactionThreshold(cfg.window, cfg.reserveTokens, cfg.ratio);
   // 触发用实测优先的口径;进展门两边都用估算,口径一致才可比。
-  if (!force && contextTokens(deps.log.events) <= threshold) return false;
+  if (!force && contextTokens(deps.log.events) <= threshold)
+    return { applied: false, reduced: false };
   const before = estimateAfter(deps.log.events);
   const noProgress = (reason: "no-result" | "no-gain") => {
     deps.log.append({
@@ -192,7 +206,7 @@ async function compactIfNeeded(
       reason,
       images: deriveMessages(deps.log.events).some((m) => m.role === "user" && !!m.images?.length),
     });
-    return false;
+    return { applied: false, reduced: false };
   };
   let payload: Awaited<ReturnType<CompactionStrategy>>;
   try {
@@ -210,16 +224,17 @@ async function compactIfNeeded(
       ...(deps.signal && { signal: deps.signal }),
     });
   } catch (err) {
-    if (deps.signal?.aborted) return false;
+    if (deps.signal?.aborted) return { applied: false, reduced: false };
     throw err;
   }
-  if (deps.signal?.aborted) return false;
+  if (deps.signal?.aborted) return { applied: false, reduced: false };
   if (!payload) return noProgress("no-result");
-  // 进展门:压缩必须真的变小,否则不落盘也不许重试。
-  if (estimateAfter(deps.log.events, payload) >= before) return noProgress("no-gain");
+  const reduced = estimateAfter(deps.log.events, payload) < before;
+  if (!reduced && (!payload.summary?.trim() || (cfg.acceptance ?? "complete") !== "complete"))
+    return noProgress("no-gain");
   deps.log.append({ type: "compaction", at: now(), ...payload });
   await deps.log.checkpoint(deps.signal);
-  return true;
+  return { applied: true, reduced };
 }
 
 const LENGTH_NOTICE =
@@ -248,8 +263,9 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   if (deps.manualCompaction !== undefined) {
     if (!deps.compaction) throw new Error("Compaction is not configured");
     if (signal?.aborted) return "aborted";
-    await compactIfNeeded(deps, deps.compaction, true, deps.manualCompaction);
+    const compacted = await compactIfNeeded(deps, deps.compaction, true, deps.manualCompaction);
     if (signal?.aborted) return "aborted";
+    if (compacted.applied) restatePlan(log, "compacted", steps);
     const queued = drainQueue("turn");
     if (queued.length === 0) return "idle";
     inject(log, "turn", queued);
@@ -257,6 +273,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   }
 
   let overflowRecovered = false;
+  let requestReason: "turn" | "overflow-retry" = "turn";
   while (true) {
     if (signal?.aborted) return "aborted";
     // 自动压缩检查:每次模型请求前,占用超阈值即压;manual 与 remind 不在这里动手,溢出时另有兜底。
@@ -267,7 +284,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     ) {
       const compacted = await compactIfNeeded(deps, deps.compaction, false);
       if (signal?.aborted) return "aborted";
-      if (compacted) restatePlan(log, "compacted", steps);
+      if (compacted.applied) restatePlan(log, "compacted", steps);
     }
     skipAutoCompaction = false;
     // 日期变了就说一句;和其它注入一样只追加到末尾。
@@ -303,11 +320,12 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       messages: messages.length,
       tools: defs.map((d) => d.name),
       estimatedTokens: contextTokens(log.events),
-      ...(cfg && { threshold: compactionThreshold(cfg.window, cfg.reserveTokens) }),
-      reason: overflowRecovered ? "overflow-retry" : "turn",
+      ...(cfg && { threshold: compactionThreshold(cfg.window, cfg.reserveTokens, cfg.ratio) }),
+      reason: requestReason,
       ...(effort && { effort }),
       ...(body && (body.tail.length > 0 || body.prefixEvents !== log.events.length) && { body }),
     });
+    requestReason = "turn";
     const startedAt = Date.now();
 
     let turn: AssistantTurn;
@@ -328,8 +346,9 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       overflowRecovered = true;
       const progressed = await compactIfNeeded(deps, cfg, true);
       if (signal?.aborted) return "aborted";
-      if (!progressed) throw err;
+      if (!progressed.reduced) throw err;
       restatePlan(log, "compacted", steps);
+      requestReason = "overflow-retry";
       continue;
     }
     log.append({

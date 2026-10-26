@@ -96,7 +96,8 @@ describe("系统提示词组装", () => {
       git: false,
     });
     expect(env.text).toContain("working directory: ");
-    expect(env.text).toContain("shell: /bin/zsh");
+    expect(env.text).toContain("host shell: /bin/zsh");
+    expect(env.text).toContain("built-in bash tool executes Bash commands");
     expect(env.text).toContain("date: 2026-09-02");
 
     const full = buildSystemPrompt({

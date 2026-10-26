@@ -251,7 +251,7 @@ describe("步数上限与续聊", () => {
     );
 
     // 重建工具等价于恢复父会话:新子不能把自己的起始事件写进旧子的文件。
-    const dir = mkdtempSync(join(tmpdir(), "clari-child-resume-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-child-resume-"));
     try {
       const parent = new Log(join(dir, "parent.jsonl"));
       for (const event of parentLog().events) parent.append(event);

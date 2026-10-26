@@ -183,13 +183,62 @@ describe("会话恢复", () => {
     const custom = await loadCompactionStrategy(file);
     const out = await custom({ events: [], window: 1, targetTokens: 1 });
     expect(out?.strategy).toBe("mine(0)");
-    const cfg = await buildCompaction("clear", 1000, 100);
-    expect(cfg).toMatchObject({ window: 1000, reserveTokens: 100 });
+    const cfg = await buildCompaction(
+      {
+        compaction: "clear",
+        compactionReserve: 100,
+        compactionTrigger: "remind",
+        compactionRatio: 0.8,
+      },
+      1000,
+    );
+    expect(cfg).toMatchObject({ window: 1000, reserveTokens: 100, trigger: "remind", ratio: 0.8 });
     await expect(loadCompactionStrategy("zip")).rejects.toThrow("unknown compaction strategy");
     writeFileSync(join(tmp, "bad.mjs"), "export const nothing = 1;\n");
     await expect(loadCompactionStrategy(join(tmp, "bad.mjs"))).rejects.toThrow(
       "must default-export a function",
     );
+    // 文件模板、输出上限和保留策略必须真的送进摘要调用，不只是设置展示。
+    const template = join(tmp, "summary.md");
+    const instructions = "Keep exact paths.\n\n## Next action\nWrite the next step.";
+    writeFileSync(template, instructions);
+    const configured = await buildCompaction(
+      { compactionPrompt: template, compactionMaxTokens: 73, preservation: "tokens 1" },
+      100000,
+    );
+    const log = new EventLog();
+    log.append({ type: "session/start", at: "t", model: "m", system: "Work on code." });
+    log.append({ type: "user/message", at: "t", text: "Keep the goal." });
+    log.append({ type: "user/message", at: "t", text: "Older findings. ".repeat(80) });
+    log.append({ type: "user/message", at: "t", text: "More findings. ".repeat(80) });
+    log.append({ type: "user/message", at: "t", text: "Continue." });
+    const provider: Provider = {
+      model: "m",
+      wire: (messages) => ({ messages }),
+      async complete(messages, tools, opts) {
+        expect(messages.at(-1)).toEqual({ role: "user", content: instructions });
+        expect(tools).toEqual([]);
+        expect(opts?.maxTokens).toBe(73);
+        return { text: "Next: verify the code.", toolCalls: [], stopReason: "end" };
+      },
+    };
+    expect(
+      await configured.strategy({
+        events: log.events,
+        window: configured.window,
+        targetTokens: 50000,
+        ...(configured.preservation && { preservation: configured.preservation }),
+        provider,
+      }),
+    ).toMatchObject({ summary: "Next: verify the code." });
+    writeFileSync(template, " ");
+    await expect(buildCompaction({ compactionPrompt: template }, 100000)).rejects.toThrow("empty");
+    await expect(buildCompaction({ compactionPrompt: "typo" }, 100000)).rejects.toThrow(
+      "Unknown summary template",
+    );
+    await expect(
+      buildCompaction({ compaction: "clear", compactionPrompt: "missing.md" }, 100000),
+    ).resolves.toHaveProperty("strategy");
   });
 
   it("新会话的系统提示词带分段构成(名称、来源、字符数)", () => {
@@ -271,5 +320,7 @@ describe("配置里的可选项:命令行 > 预设 > defaults > 内置缺省", (
     expect(parsePreservation("tokens 5000").label).toBe("keepRecentTokens(5000)");
     expect(parsePreservation("ratio 0.25").label).toBe("keepRatio(0.25)");
     expect(() => parsePreservation("ratio 3")).toThrow("between 0 and 1");
+    for (const spec of ["ratio .", "ratio 0.0.1", `tokens ${"9".repeat(310)}`])
+      expect(() => parseCommonArgs(["--preservation", spec])).toThrow("finite number");
   });
 });

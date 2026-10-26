@@ -56,7 +56,7 @@ export function clampEffort(level: EffortLevel, supported?: readonly EffortLevel
   return lowest ?? level;
 }
 
-export type WireOptions = { effort?: EffortLevel };
+export type WireOptions = { effort?: EffortLevel; maxTokens?: number };
 
 export type CompleteOptions = {
   /** 宿主提供的会话记录,独立于 UI 与调试观察回调。 */
@@ -73,6 +73,8 @@ export type CompleteOptions = {
   onRequest?: (body: string) => void;
   /** 本次请求的强度级别;缺省不传。 */
   effort?: EffortLevel;
+  /** 本次请求的输出上限;不修改 provider 的后续默认值。 */
+  maxTokens?: number;
 };
 
 /**

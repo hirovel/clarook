@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   addModel,
-  clariHome,
+  clarookHome,
   createProvider,
   DEFAULT_CONFIG_PATH,
   findApiKey,
@@ -184,6 +184,16 @@ export function bootstrap(): Bootstrap {
         return { ...current, defaults: setSetting(current.defaults, key, value) };
       });
     },
+    saveSettings: (values) => {
+      config = updateConfig((current) => {
+        let defaults = current.defaults ?? {};
+        for (const [key, value] of Object.entries(values)) {
+          if (key === "model" && value != null) resolveModel(current, String(value));
+          defaults = setSetting(defaults, key, value);
+        }
+        return { ...current, defaults };
+      });
+    },
     listPresets: () =>
       Object.entries(config.presets ?? {}).map(([name, values]) => ({
         name,
@@ -226,7 +236,7 @@ export function bootstrap(): Bootstrap {
       return capabilityNote(await registry(), providerName, p, modelId);
     },
   };
-  // 登记簿:启动时同步用缓存或内置快照,后台每天刷新一次;刷新失败退回旧的。
+  // 启动先用缓存或内置快照,后台检查 24 小时有效期;本次启动只请求一次,失败沿用旧数据。
   let registryNow: Registry = loadRegistrySync();
   let registryOnce: Promise<Registry | undefined> | undefined;
   const registry = () => {
@@ -249,8 +259,8 @@ export function bootstrap(): Bootstrap {
   };
 }
 
-/** 记忆文件:项目级 = git 根(或 cwd)的 AGENTS.md;用户级 = ~/.clari/AGENTS.md。 */
-export function memoryFiles(cwd = process.cwd(), home = clariHome()): MemoryFiles {
+/** 记忆文件:项目级 = git 根(或 cwd)的 AGENTS.md;用户级 = ~/.clarook/AGENTS.md。 */
+export function memoryFiles(cwd = process.cwd(), home = clarookHome()): MemoryFiles {
   const projectRoot = findGitRoot(cwd) ?? resolve(cwd);
   return { project: join(projectRoot, "AGENTS.md"), user: join(home, "AGENTS.md") };
 }

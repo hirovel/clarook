@@ -24,7 +24,7 @@ export async function executeUserShell(
   onPreview?: (text: string) => void,
 ): Promise<{ content: string; isError: boolean; status: string }> {
   const shell = findBash();
-  if (!shell) throw new Error("bash not found. Install Git for Windows or set CLARI_SHELL.");
+  if (!shell) throw new Error("bash not found. Install Git for Windows or set CLAROOK_SHELL.");
   const result = await run(shell, command, ctx.signal, {
     cwd,
     timeoutMs: DEFAULT_TIMEOUT_S * 1000,
@@ -88,7 +88,7 @@ export function createBashTool(
       const shell = findBash();
       if (!shell) {
         throw new Error(
-          "bash not found. Options: 1. install Git for Windows; 2. set CLARI_SHELL to a bash executable.",
+          "bash not found. Options: 1. install Git for Windows; 2. set CLAROOK_SHELL to a bash executable.",
         );
       }
       const timeoutS = args.timeout ?? defaultTimeout;
@@ -125,7 +125,7 @@ export function createBashTool(
 /** 目录标记:命令跑完后打印 $PWD(Git Bash 下取 Windows 形态的路径),退出码照旧。命令自己 exit 就没有标记,目录视为没变。 */
 const CWD_MARK = "";
 function withCwdMarker(command: string): string {
-  return `${command}\n__clari_rc=$?\nprintf '\\n${CWD_MARK}%s' "$(pwd -W 2>/dev/null || pwd)"\nexit $__clari_rc`;
+  return `${command}\n__clarook_rc=$?\nprintf '\\n${CWD_MARK}%s' "$(pwd -W 2>/dev/null || pwd)"\nexit $__clarook_rc`;
 }
 
 /** 同一个目录的两种写法算同一个:进程目录是反斜杠的 Windows 形态,pwd -W 给的是正斜杠;Windows 上不分大小写。 */
@@ -174,7 +174,7 @@ function applyTruncation(
 }
 
 function findBash(): string | null {
-  if (process.env.CLARI_SHELL) return process.env.CLARI_SHELL;
+  if (process.env.CLAROOK_SHELL) return process.env.CLAROOK_SHELL;
   if (process.platform !== "win32") return "bash";
   const gitBash = join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "bin", "bash.exe");
   if (existsSync(gitBash)) return gitBash;

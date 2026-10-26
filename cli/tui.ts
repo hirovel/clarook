@@ -89,7 +89,7 @@ try {
         controller
           ?.app()
           .note(
-            `Update available · ${release.current} → ${release.latest}\nExit Clari, then run:\n${UPDATE_COMMAND}\n/settings checkUpdates to configure · /help update for instructions`,
+            `Update available · ${release.current} → ${release.latest}\nExit Clarook, then run:\n${UPDATE_COMMAND}\n/settings checkUpdates to configure · /help update for instructions`,
           );
     });
   }

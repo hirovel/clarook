@@ -1,13 +1,42 @@
 # Changelog
 
-All notable changes to clari. The format follows Keep a Changelog; versions follow semver.
+All notable changes to Clarook. The format follows Keep a Changelog; versions follow semver.
 Design decisions behind each entry are recorded, with reasons and alternatives, in the internal architecture document.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-26
+
+### Added
+
+- Add editable Pi, Codex, ZCode and OpenCode text-compaction reference compositions. New defaults use the Pi reference; explicit saved settings keep precedence. Show each composition's values, full prompt, summary format and implementation differences in setup.
+- Configure summary templates, output limits and application conditions independently. Record per-call output limits for request reconstruction. Keep truncation and cancellation checks, and retry overflow only after context reduction.
+
+- Add a source-checkout evaluation module for fixed-model configuration comparisons, independent artifact checks and recorded sessions. Export per-task results, paired resource differences and filterable evidence to HTML and CSV. Report missing data and invalid runs separately; never adopt a configuration automatically.
+- Configure early compaction with `compactionRatio` in setup, presets or `--compaction-ratio`. Keep it off by default; offer 0.8 as an adjustable starting point. Use the earlier of the ratio and context reserve, and explain summary loss and additional requests.
+
 ### Fixed
 
+- Keep skill settings aligned with the selected session composition. Old setting events no longer override current startup values or subsequent skill changes.
+- Count plan reminders from recorded plan decisions instead of treating ordinary user text starting with `[plan]` as a reminder.
+- Reject exceptional or unknown Chat completion reasons before executing tools, and preserve visible Chat refusal text. Retain output usage reported at Anthropic stream start.
+- Parse complete SSE events across LF, CRLF and CR boundaries, including multiline data. Complete MCP requests as soon as their matching result arrives; report malformed responses instead of ignoring them.
+- Keep MCP tool identities distinct after name sanitization and validate a refreshed catalog before replacing its tools. Correct recursive glob patterns such as `**` and `src/**`.
+- Calculate preservation budgets and old-tool clearing from the current context projection, including edits, exclusions and previous compactions. Mark only the actual overflow retry as `overflow-retry`.
+- Prepare saved input and start the new interface before committing a session switch. Corrupt input snapshots or terminal startup failures preserve the target context and the previous draft; failed views release their subscriptions and terminal.
+- Restore unfinished plans to the next model input after manual compaction, matching automatic compaction.
+- Reject non-finite preservation budgets, unknown saved compaction methods and invalid summary-template selections before changing settings. Saving an external strategy path does not execute it.
+- Check compaction growth against the application condition recorded at that point in the session. Do not treat a permitted complete summary as a failed size-reduction check or infer missing history from current defaults.
 - Preserve visible Responses refusal text in streamed replies and completed responses. Merge complete snapshots without repeating text, and retain the existing message, usage and stop behavior.
+- Recheck the reference implementation when evaluation cannot grade an artifact. Count artifact loading failures separately from an unavailable verifier, preserve both reports, and do not rerun the model.
+- Distinguish the host shell from the built-in Bash tool in environment instructions so a PowerShell host does not imply that tool commands use PowerShell syntax.
+- Keep the compaction threshold in the status bar aligned with the current reserve setting. Restore automatic preservation without freezing the previous model's window; changing models recalculates the built-in tail budget.
+
+### Changed
+
+- Rename the project, command and package to Clarook / `clarook`. Use `.clarook`, `CLAROOK_*`, `user-clarook` and `clarook-detailed` for new setups. Remove old entry points without compatibility aliases or migration code. Preserve historical session content.
+- Remove skill-specific tool preapproval. Manual and automatic skills use the session's existing approval rules; `allowed-tools` metadata no longer changes permissions. Keep skill queuing and explicit session-wide tool approval.
+- Center the English and Chinese READMEs on context visibility and control. Explain how to review the next input, edit it, and check the captured request after sending.
 
 ## [0.1.3] - 2026-10-08
 

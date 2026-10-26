@@ -11,6 +11,7 @@ import { predictedCache, unchangedPrefix } from "./cards.js";
 import { collectCompactions } from "./inspector-compactions.js";
 import { fmtMs, fmtTok } from "./inspector-format.js";
 import { collectRequests, messagesFor } from "./inspector-requests.js";
+import { restoreSessionSetup } from "./session-setup.js";
 
 export type CheckupRow = {
   n: number;
@@ -230,23 +231,30 @@ export function analyze(events: readonly AgentEvent[], recording?: ResponseCover
 
   // E 在压缩事件的两侧用同一投影口径比较;相邻请求之间可能新增大量工具结果。
   {
-    const pairs = compactions.map((cmp) => ({
-      before: estimateAfter(events.slice(0, cmp.index)),
-      after: estimateAfter(events.slice(0, cmp.index + 1)),
-    }));
-    const bad = pairs.filter((p) => p.after >= p.before);
+    const pairs = compactions.map((cmp) => {
+      const prefix = events.slice(0, cmp.index);
+      const before = estimateAfter(prefix);
+      const after = estimateAfter(events.slice(0, cmp.index + 1));
+      if (after < before) return { before, after, status: "pass", note: "" };
+      // 不能用今天的默认值推断旧会话的决定；摘要增长与框架故障分开。
+      const acceptance = restoreSessionSetup(prefix, {}).setup.values.compactionAcceptance;
+      if (!cmp.event.summary?.trim() || acceptance === "smaller" || acceptance === "reduced")
+        return { before, after, status: "fail", note: " (no drop)" };
+      return acceptance === "complete"
+        ? { before, after, status: "pass", note: " (no drop; complete permits this)" }
+        : { before, after, status: "skip", note: " (no drop; application condition not recorded)" };
+    });
     add(
       "E",
-      "projected context decreases at compaction",
-      pairs.length === 0 ? "skip" : bad.length === 0 ? "pass" : "fail",
+      "compaction growth matches its recorded application condition",
+      pairs.some((p) => p.status === "fail")
+        ? "fail"
+        : pairs.length === 0 || pairs.some((p) => p.status === "skip")
+          ? "skip"
+          : "pass",
       pairs.length === 0
         ? "no compaction"
-        : pairs
-            .map(
-              (p) =>
-                `${fmtTok(p.before)} → ${fmtTok(p.after)}${p.after >= p.before ? " (no drop)" : ""}`,
-            )
-            .join(" · "),
+        : pairs.map((p) => `${fmtTok(p.before)} → ${fmtTok(p.after)}${p.note}`).join(" · "),
     );
   }
 

@@ -45,7 +45,17 @@ export const SETUP_SECTIONS: readonly SetupSection[] = [
     id: "context",
     title: "Context management",
     description: "When history is shortened and what is preserved.",
-    keys: ["compaction", "compactionTrigger", "compactionReserve", "preservation", "planReminder"],
+    keys: [
+      "compaction",
+      "compactionTrigger",
+      "compactionRatio",
+      "compactionReserve",
+      "preservation",
+      "compactionPrompt",
+      "compactionMaxTokens",
+      "compactionAcceptance",
+      "planReminder",
+    ],
     action: { label: "Open context workbench", command: "/inspect context" },
   },
   {
@@ -153,7 +163,7 @@ export const SETUP_GUIDE: Readonly<Record<string, Guide>> = {
     reason:
       "Keep useful defaults, or exclude directories you do not want discovered. This does not restrict the read tool or remove instructions already loaded in history.",
     example:
-      "user-clari follows CLARI_HOME; project sources follow the project root. Custom relative paths start at the project root; ~/ starts at the parent of CLARI_HOME (normally the user home).",
+      "user-clarook follows CLAROOK_HOME; project sources follow the project root. Custom relative paths start at the project root; ~/ starts at the parent of CLAROOK_HOME (normally the user home).",
   },
   "prompt.skills.include": {
     title: "Automatic skill range",
@@ -216,12 +226,21 @@ export const SETUP_GUIDE: Readonly<Record<string, Guide>> = {
     reason:
       "Automatic keeps long conversations moving without requiring you to watch the budget. Manual gives you direct timing control.",
   },
+  compactionRatio: {
+    title: "Early compaction ratio",
+    effect:
+      "Token usefulness can vary with context length, position and task. Earlier summaries may improve focus, but can lose details, add API calls and rebuild the cache. Quality is not guaranteed.",
+    reason:
+      "Off by default. Start with 0.8 when enabling, then adjust for your model and tasks. The earlier of this ratio and the context reserve sets the threshold. Manual and Remind retain their timing controls.",
+    example:
+      "0.8 starts by 800k in a 1M window. In a 128k window with a 32k reserve, the reserve starts earlier at 96k. 0 disables only the ratio; /compact remains available.",
+  },
   compactionReserve: {
     title: "Context reserve",
     effect:
-      "Reserves tokens before the context limit. The trigger never falls below half the window. This is an estimate, not a tokenizer guarantee.",
+      "Reserves tokens before the context limit. This reserve alone never triggers below half the window; an enabled early ratio can trigger sooner. This is an estimate, not a tokenizer guarantee.",
     reason:
-      "32,000 tokens leave room for output and summarization. Smaller windows cap the reserve at half their size.",
+      "16,384 tokens by default leave room for output and summarization. Smaller windows cap the reserve at half their size. Summary output has its own limit.",
   },
   preservation: {
     example:
@@ -230,7 +249,32 @@ export const SETUP_GUIDE: Readonly<Record<string, Guide>> = {
     effect:
       "Keeps a recent tail verbatim during summarization, with tool calls and their results kept together.",
     reason:
-      "Automatic uses the smaller of 20,000 tokens and a quarter of the model window. A fixed budget or ratio gives you direct control.",
+      "The default keeps about 20,000 recent tokens. Auto uses the smaller of 20,000 and a quarter of the model window. More preserved text leaves less room for a summary.",
+  },
+  compactionPrompt: {
+    title: "Summary template",
+    effect:
+      "The instruction sent with older history to produce a continuation summary. Choose a built-in template or a UTF-8 .md file. Details show the full text.",
+    reason:
+      "A concise handoff costs fewer tokens; structured sections can retain more task state. Neither guarantees that every detail survives. Applies to Summary and Pipeline.",
+    example:
+      "Choose Pi checkpoint for six sections, Codex handoff for brief content guidance, or ./summary.md for your own instruction and format.",
+  },
+  compactionMaxTokens: {
+    title: "Summary output limit",
+    effect:
+      "Overrides the output token limit only for summary calls. Zero uses the provider configuration. The request inspector shows the actual limit sent.",
+    reason:
+      "A larger allowance can retain more detail but consumes context and generation time. Choose a limit supported by your model. Truncated responses are never applied.",
+    example:
+      "13,107 is the Pi reference allowance. It is independent of context reserve. Ordinary replies keep their existing limit.",
+  },
+  compactionAcceptance: {
+    title: "Summary application",
+    effect:
+      "Complete applies a nonempty, normally completed summary. Smaller also requires a smaller next context. Reduced additionally requires more than 10% reduction of the covered text. Cancellation and truncated output never apply.",
+    reason:
+      "Complete follows the reference behavior without discarding a valid handoff for its size. Smaller and Reduced save context at the risk of paying for an unused summary. Overflow retries still require a reduction.",
   },
   planReminder: {
     title: "Stale-plan reminder",
@@ -288,7 +332,7 @@ export const SETUP_GUIDE: Readonly<Record<string, Guide>> = {
   screen: {
     title: "Terminal screen",
     effect:
-      "Alternate screen uses Clari's own scrolling. Main screen keeps terminal scrollback. Changes require a restart.",
+      "Alternate screen uses Clarook's own scrolling. Main screen keeps terminal scrollback. Changes require a restart.",
     reason: "Alternate screen keeps navigation and selection inside the workspace.",
   },
   fold: {
@@ -341,7 +385,7 @@ export const SETUP_GUIDE: Readonly<Record<string, Guide>> = {
     effect:
       "Controls notifications when a turn ends or approval is needed. Delivery depends on your terminal.",
     reason:
-      "Notify only while unfocused so Clari can call you back without interrupting active work.",
+      "Notify only while unfocused so Clarook can call you back without interrupting active work.",
   },
   checkUpdates: {
     title: "Update notifications",
@@ -365,6 +409,8 @@ export function setupGuide(def: SettingDef): Guide {
 
 /** 展示名称只用于 UI;配置与命令仍使用同一组稳定的键和值。 */
 export function setupValue(def: SettingDef, value: unknown): string {
+  if (def.key === "compactionRatio")
+    return value ? `${Math.round(Number(value) * 1000) / 10}% of window` : "Off";
   if (def.key === "prompt.skills.sources") {
     const sources = Object.values((value ?? {}) as Record<string, string>);
     return `${sources.filter((v) => v === "on").length}/${sources.length} enabled`;

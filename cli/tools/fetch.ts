@@ -23,7 +23,7 @@ const DEFAULTS = {
   maxBytes: 5 * 1024 * 1024,
   maxRedirects: 5,
   cacheTtlMs: 15 * 60 * 1000,
-  userAgent: "Mozilla/5.0 (compatible; clari/0.1; +https://github.com/hirovel/clari)",
+  userAgent: "Mozilla/5.0 (compatible; clarook/0.1; +https://github.com/hirovel/clarook)",
 };
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";

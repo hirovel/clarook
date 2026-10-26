@@ -101,7 +101,7 @@ export function clearMemory(file: string): number {
 export type MemoryFiles = {
   /** 项目级:git 根(或 cwd)下的 AGENTS.md。 */
   project?: string;
-  /** 用户级:~/.clari/AGENTS.md。 */
+  /** 用户级:~/.clarook/AGENTS.md。 */
   user: string;
 };
 

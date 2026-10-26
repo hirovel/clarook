@@ -53,7 +53,7 @@ describe("备用屏", () => {
     const screen = await term.screen();
     const joined = screen.join("\n");
     expect(term.raw.join("")).toContain("\x1b[?1049h"); // 进了备用缓冲区
-    expect(screen[0]).toContain("clari");
+    expect(screen[0]).toContain("clarook");
     expect(joined).toContain("hello there");
     // 编辑器的横线在最后几行
     const last = screen.slice(-3).join("\n");
@@ -124,10 +124,10 @@ describe("通知、标题、剪贴板、链接", () => {
     term.feed("\x1b[O"); // 失焦
     await app.submit("two");
     const out = term.raw.join("");
-    expect(out).toContain("\x1b]777;notify;clari;turn finished\x07");
-    expect(out).toContain("\x1b]9;clari: turn finished\x07");
-    expect(titles.some((t) => t.startsWith("clari · running"))).toBe(true);
-    expect(titles.at(-1)).toBe("clari · m");
+    expect(out).toContain("\x1b]777;notify;clarook;turn finished\x07");
+    expect(out).toContain("\x1b]9;clarook: turn finished\x07");
+    expect(titles.some((t) => t.startsWith("clarook · running"))).toBe(true);
+    expect(titles.at(-1)).toBe("clarook · m");
     term.feed("\x1b[I");
     app.stop();
     expect(term.raw.join("")).toContain("\x1b[?1004l");

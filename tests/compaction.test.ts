@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   clearToolResults,
   estimateAfter,
+  keepRatio,
   keepRecentTokens,
   legalizeCut,
   llmSummarize,
   pipeline,
 } from "../src/compaction.js";
+import { summaryPrompt } from "../src/compaction-presets.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
@@ -126,10 +128,47 @@ describe("legalizeCut / keepRecentTokens", () => {
     expect(legalizeCut([BASE[0] as AgentEvent, notice, BASE[2] as AgentEvent], 1)).toBe(1);
   });
 
-  it("keepRecentTokens 从尾部累计预算并合法化", () => {
+  it("固定与比例预算按当前投影累计,保留合法尾部", () => {
     const cut = keepRecentTokens(50)(BASE);
     expect(cut).toBeGreaterThan(1);
     expect(BASE[cut]?.type === "tool/result").toBe(false);
+
+    // 保留预算应按当前内容计算,不能因修改前的长正文而少留近期原文。
+    const original = ev([
+      { type: "session/start", system: "s" },
+      { type: "user/message", text: "task" },
+      {
+        type: "assistant/message",
+        text: "old history ".repeat(10000),
+        toolCalls: [],
+        stopReason: "end",
+      },
+      { type: "user/message", text: "u".repeat(40000) },
+      { type: "assistant/message", text: "a".repeat(40000), toolCalls: [], stopReason: "end" },
+      { type: "user/message", text: "next" },
+    ]);
+    const edited = ev([
+      ...original,
+      { type: "context/edit", target: 4, field: "text", value: "short" },
+    ]);
+    const shortened = original.map((event, i) =>
+      i === 4 ? ({ ...event, text: "short" } as AgentEvent) : event,
+    );
+    for (const policy of [keepRecentTokens(), keepRatio(0.5)]) {
+      expect(policy(edited)).toBe(3);
+      expect(policy(edited)).toBe(policy(shortened));
+    }
+    const dropped = ev([...original, { type: "context/drop", target: 4 }]);
+    expect(keepRecentTokens()(dropped)).toBe(3);
+
+    // 清除结果只占占位文本预算;合法化仍保留它对应的调用。
+    const cleared = ev([...BASE, { type: "compaction", cleared: [3, 5] }]);
+    expect(keepRecentTokens(100)(cleared)).toBe(1);
+    const summarized = ev([
+      ...original,
+      { type: "compaction", summary: "short history", coversFrom: 2, coversUpTo: 5 },
+    ]);
+    expect(keepRecentTokens(100)(summarized)).toBe(1);
   });
 });
 
@@ -160,6 +199,20 @@ describe("clearToolResults", () => {
       targetTokens: 500,
     });
     expect(p).toMatchObject({ cleared: [5] });
+
+    // 已排除或改短的结果不能凭旧文本触发清除,也不占近期结果名额。
+    const revised = ev([
+      ...BASE,
+      { type: "context/drop", target: 2 },
+      { type: "context/edit", target: 5, field: "content", value: "short" },
+    ]);
+    expect(
+      await clearToolResults({ keepRecent: 0, clearAtLeast: 10 })({
+        events: revised,
+        window: 1000,
+        targetTokens: 500,
+      }),
+    ).toBeNull();
   });
 });
 
@@ -190,8 +243,31 @@ describe("llmSummarize", () => {
     // 最后一条是摘要指令,其前是前缀投影
     const last = capture.messages?.at(-1);
     expect(last?.role).toBe("user");
-    expect(last?.content).toContain("Compress the conversation above");
+    expect(last?.content).toBe(summaryPrompt("pi"));
     expect(capture.messages?.[0]?.role).toBe("system");
+    // 小窗口不能暗中缩减默认保留预算,让本来很短的历史又被摘要。
+    const shortCapture: { messages?: Message[] } = {};
+    const short = ev([
+      ...BASE.slice(0, 5),
+      {
+        type: "tool/result",
+        at: "t",
+        callId: "c2",
+        name: "bash",
+        isError: false,
+        content: "x".repeat(12000),
+      },
+      ...BASE.slice(6),
+    ]);
+    expect(
+      await llmSummarize()({
+        events: short,
+        window: 4000,
+        targetTokens: 2000,
+        provider: fakeProvider("unused", shortCapture),
+      }),
+    ).toBeNull();
+    expect(shortCapture.messages).toBeUndefined();
   });
 
   it("手动指示拼进提示词", async () => {
@@ -277,7 +353,7 @@ describe("llmSummarize", () => {
     ]);
   });
 
-  it("安全阀:未完整结束拒绝应用;摘要不比被覆盖内容小,返回 null", async () => {
+  it("完整性不可关闭;旧收益条件只在显式 reduced 策略下生效", async () => {
     for (const stopReason of ["length", "tool", "aborted"] as const) {
       await expect(
         llmSummarize()({
@@ -294,7 +370,7 @@ describe("llmSummarize", () => {
         }),
       ).rejects.toThrow(`Summary did not finish (${stopReason})`);
     }
-    const p = await llmSummarize()({
+    const p = await llmSummarize({ acceptance: "reduced" })({
       events: BASE,
       window: 100000,
       targetTokens: 50000,
@@ -309,7 +385,16 @@ describe("llmSummarize", () => {
       { type: "context/edit", target: 5, field: "content", value: "short" },
     ]);
     expect(
-      await llmSummarize()({
+      await llmSummarize({ acceptance: "reduced" })({
+        events: revised,
+        window: 100000,
+        targetTokens: 50000,
+        provider: fakeProvider("s".repeat(200)),
+        preservation: () => 7,
+      }),
+    ).toBeNull();
+    expect(
+      await llmSummarize({ acceptance: "smaller" })({
         events: revised,
         window: 100000,
         targetTokens: 50000,
@@ -386,16 +471,18 @@ describe("循环触发", () => {
       tools: [],
       compaction: {
         strategy: clearToolResults({ keepRecent: 0, clearAtLeast: 10 }),
-        window: 300, // 极小窗口,必然超阈值
+        window: 3000, // 余量线 2900 不触发;比例线 150 触发。
         reserveTokens: 100,
+        ratio: 0.05,
       },
     });
     const types = l.events.map((e) => e.type);
     expect(types).toContain("compaction");
     expect(types.indexOf("compaction")).toBeLessThan(types.lastIndexOf("assistant/message"));
+    expect(l.events.filter((e) => e.type === "request").at(-1)).toMatchObject({ threshold: 150 });
   });
 
-  it("溢出恢复:压缩取得进展则重试一次,再溢出直接抛", async () => {
+  it("溢出恢复:压缩取得进展才重试,后续工具续做标记普通请求", async () => {
     const l = log();
     let calls = 0;
     const provider: Provider = {
@@ -403,7 +490,13 @@ describe("循环触发", () => {
       async complete() {
         calls++;
         if (calls === 1) throw new Error("maximum context length exceeded");
-        return { text: "恢复了", toolCalls: [], stopReason: "end" };
+        return calls === 2
+          ? {
+              text: "继续核实",
+              toolCalls: [{ id: "check", name: "missing", args: {} }],
+              stopReason: "tool",
+            }
+          : { text: "恢复了", toolCalls: [], stopReason: "end" };
       },
     };
     const outcome = await runTurn({
@@ -417,8 +510,13 @@ describe("循环触发", () => {
       },
     });
     expect(outcome).toBe("idle");
-    expect(calls).toBe(2);
+    expect(calls).toBe(3);
     expect(l.events.some((e) => e.type === "compaction")).toBe(true);
+    expect(l.events.filter((e) => e.type === "request").map((e) => e.reason)).toEqual([
+      "turn",
+      "overflow-retry",
+      "turn",
+    ]);
   });
 
   it("溢出但压缩无进展:原样抛出", async () => {
@@ -441,5 +539,80 @@ describe("循环触发", () => {
         },
       }),
     ).rejects.toThrow("maximum context length");
+  });
+
+  it("应用条件控制是否保留候选;完整但变长的摘要不能触发溢出重发", async () => {
+    const events = ev([
+      { type: "session/start", model: "m", system: "system" },
+      { type: "user/message", text: "Keep this request" },
+      { type: "assistant/message", text: "x".repeat(2000), toolCalls: [], stopReason: "end" },
+      { type: "assistant/message", text: "x".repeat(2000), toolCalls: [], stopReason: "end" },
+      { type: "user/message", text: "Continue" },
+    ]);
+    for (const acceptance of ["reduced", "smaller", "complete"] as const) {
+      for (const length of [3800, 4500]) {
+        const log = new EventLog();
+        for (const event of events) log.append(event);
+        let calls = 0;
+        await runTurn({
+          log,
+          provider: {
+            model: "summary",
+            async complete(_messages, _tools, options) {
+              calls++;
+              expect(options?.maxTokens).toBe(512);
+              return { text: "s".repeat(length), toolCalls: [], stopReason: "end" };
+            },
+          },
+          tools: [],
+          manualCompaction: "",
+          compaction: {
+            strategy: llmSummarize({ acceptance, maxTokens: 512 }),
+            acceptance,
+            window: 100000,
+            preservation: () => 4,
+          },
+        });
+        expect(calls).toBe(1);
+        const applied = acceptance === "complete" || (acceptance === "smaller" && length === 3800);
+        expect(log.events.some((event) => event.type === "compaction")).toBe(applied);
+        expect(log.events.find((event) => event.type === "request")).toMatchObject({
+          reason: "compaction",
+          maxTokens: 512,
+        });
+        expect(log.events.slice(0, events.length)).toEqual(events);
+      }
+    }
+
+    const log = new EventLog();
+    for (const event of events) log.append(event);
+    let calls = 0;
+    await expect(
+      runTurn({
+        log,
+        provider: {
+          model: "m",
+          async complete(_messages, _tools, options) {
+            calls++;
+            if (calls === 1) throw new Error("maximum context length exceeded");
+            // 显式 0 继承 provider,不能恢复为内置摘要上限。
+            expect(options?.maxTokens).toBeUndefined();
+            return { text: "s".repeat(4500), toolCalls: [], stopReason: "end" };
+          },
+        },
+        tools: [],
+        compaction: {
+          strategy: llmSummarize({ maxTokens: 0 }),
+          acceptance: "complete",
+          window: 100000,
+          preservation: () => 4,
+        },
+      }),
+    ).rejects.toThrow("maximum context length");
+    expect(calls).toBe(2);
+    expect(log.events.some((event) => event.type === "compaction")).toBe(true);
+    expect(
+      log.events.filter((event) => event.type === "request").map((event) => event.reason),
+    ).toEqual(["turn", "compaction"]);
   });
 });

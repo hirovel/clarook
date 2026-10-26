@@ -45,6 +45,18 @@ describe("只读工具", () => {
         { signal: new AbortController().signal },
       ),
     ).toBe("(no matches)");
+    expect(
+      await globTool.execute(
+        { pattern: "**", path: root },
+        { signal: new AbortController().signal },
+      ),
+    ).toBe(".gitignore\n.hidden.ts\nREADME.md\nsrc/a.ts\nsrc/deep/b.ts");
+    expect(
+      await globTool.execute(
+        { pattern: "src/**", path: root },
+        { signal: new AbortController().signal },
+      ),
+    ).toBe("src/a.ts\nsrc/deep/b.ts");
   });
 
   it("grep 返回可交给 read 的路径,支持文件过滤和大小写选项", async () => {

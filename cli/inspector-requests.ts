@@ -234,6 +234,9 @@ export function summaryLines(rec: RequestRecord, messages: Message[]): string[] 
     row("model", r.model),
     row("reason", REASONS[r.reason]),
     row("effort", r.effort ?? "not set (omitted; provider default)"),
+    ...(r.maxTokens !== undefined
+      ? [row("output limit", `${r.maxTokens} tokens (this request)`)]
+      : []),
     row(
       "sent",
       `${r.messages} messages · ${r.tools.length} tools · estimated ${r.estimatedTokens} tok`,
@@ -545,6 +548,7 @@ export function wireLines(
   effort?: string,
   recording?: RequestRecording,
   missing: string[] = [],
+  maxTokens?: number,
 ): string[] {
   const warnings = recording?.error ? [c.zhu(recording.error)] : [];
   if (recording?.bodies.length)
@@ -582,7 +586,10 @@ export function wireLines(
     ];
   }
   const level = effort ? parseEffort(effort) : undefined;
-  const body = provider.wire(messages, defs, level ? { effort: level } : {});
+  const body = provider.wire(messages, defs, {
+    ...(level && { effort: level }),
+    ...(maxTokens !== undefined && { maxTokens }),
+  });
   const json = JSON.stringify(body, null, 2);
   return [
     ...warnings,

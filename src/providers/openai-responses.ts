@@ -390,7 +390,7 @@ export const OPENAI_RESPONSES_FIELDS: FieldTable = {
     "tools[{type: function, name, description, parameters}](扁平,不套 function 层)",
     "reasoning{effort, summary}:强度级别(off → none)与摘要档位;缺省只发 summary",
     "max_output_tokens:配置了 maxTokens 才发",
-    "extraBody 里的任何键,逐字合并",
+    "extraBody merged unchanged; explicit per-call maxTokens overrides max_output_tokens",
   ],
   reads: [
     "response.output_item.added / done:item.type = message | function_call | reasoning;done 时以 item 全量为准",
@@ -440,6 +440,7 @@ export function openaiResponses(opts: OpenAIResponsesOptions): Provider {
       ...(Object.keys(reasoning).length > 0 && { reasoning }),
       ...(opts.maxTokens !== undefined && { max_output_tokens: opts.maxTokens }),
       ...opts.extraBody,
+      ...(w.maxTokens !== undefined && { max_output_tokens: w.maxTokens }),
     };
   };
   return {
@@ -451,9 +452,14 @@ export function openaiResponses(opts: OpenAIResponsesOptions): Provider {
     async complete(
       messages,
       tools,
-      { onDelta, onReasoning, signal, onRetry, onRaw, onRequest, record, effort } = {},
+      { onDelta, onReasoning, signal, onRetry, onRaw, onRequest, record, effort, maxTokens } = {},
     ) {
-      const body = JSON.stringify(wire(messages, tools, effort ? { effort } : {}));
+      const body = JSON.stringify(
+        wire(messages, tools, {
+          ...(effort && { effort }),
+          ...(maxTokens !== undefined && { maxTokens }),
+        }),
+      );
       return withRetry(
         async () => {
           const acc = newResponsesAcc();

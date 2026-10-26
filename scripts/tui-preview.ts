@@ -134,5 +134,5 @@ shots.push(...divider("详情 · 6 接收"), ...app.inspector.lines(100));
 app.inspector.close();
 app.stop();
 
-writeFileSync(out, ansiToHtmlDocument([...app.lines(100), ...shots], "clari TUI 预览"), "utf8");
+writeFileSync(out, ansiToHtmlDocument([...app.lines(100), ...shots], "clarook TUI 预览"), "utf8");
 console.log(`已写入 ${out}`);

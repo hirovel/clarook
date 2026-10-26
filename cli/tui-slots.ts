@@ -15,10 +15,12 @@ import {
   describeApproval,
   policyApprove,
 } from "../src/approval.js";
-import { DEFAULT_CONFIG_PATH, updateConfig } from "../src/config.js";
+import { DEFAULT_COMPACTION_SETTINGS } from "../src/compaction-presets.js";
+import { DEFAULT_CONFIG_PATH, type Preset, updateConfig } from "../src/config.js";
 import { now, type ToolCall } from "../src/events.js";
 import { type ApprovePolicy, allowAll, queueToTurnEnd, steer } from "../src/loop.js";
-import { isCompactionTrigger, loadCompactionStrategy, parsePreservation } from "./bootstrap.js";
+import { isCompactionTrigger, parsePreservation } from "./bootstrap.js";
+import { buildCompaction } from "./strategies.js";
 import { c, G, selectedText } from "./theme.js";
 import {
   applyToolPrompts,
@@ -201,7 +203,6 @@ export function initialApproval(approve: TuiAppDeps["approve"]): ApprovalState {
     cfg: structuredClone(typeof approve === "object" ? approve : DEFAULT_APPROVAL),
     mode: approve === undefined ? "all" : typeof approve === "string" ? approve : "policy",
     alwaysAllow: new Set(),
-    skillAllow: new Set(),
     overlay: undefined,
     prompt: undefined,
   };
@@ -216,7 +217,7 @@ export function askApproval(
 ): Promise<ApproveDecision> {
   const a = ctx.approval;
   if (signal?.aborted) return Promise.resolve(false);
-  if (a.alwaysAllow.has(call.name) || a.skillAllow.has(call.name)) return Promise.resolve(true);
+  if (a.alwaysAllow.has(call.name)) return Promise.resolve(true);
   return new Promise((resolve) => {
     let settled = false;
     const finish = (decision?: ApprovalChoice) => {
@@ -311,19 +312,54 @@ export function recordSlot(ctx: TuiContext, slot: string, value: string): void {
   ctx.log.append({ type: "session/slot", at: now(), slot, value });
 }
 
+/** 组合名称由这些实际值匹配;不另存一份会影响运行的预设状态。 */
+export function currentCompactionSettings(ctx: TuiContext): Preset {
+  const initial = { ...DEFAULT_COMPACTION_SETTINGS, ...ctx.setupBase };
+  return {
+    compaction: ctx.slots.state.compaction ?? initial.compaction,
+    compactionTrigger: ctx.compaction.trigger ?? initial.compactionTrigger,
+    compactionReserve: ctx.compaction.reserveTokens ?? initial.compactionReserve,
+    compactionRatio: ctx.compaction.ratio ?? initial.compactionRatio,
+    preservation:
+      ctx.slots.state.preservation ||
+      initial.preservation ||
+      DEFAULT_COMPACTION_SETTINGS.preservation,
+    compactionPrompt: ctx.slots.state.compactionPrompt ?? initial.compactionPrompt,
+    compactionMaxTokens:
+      ctx.slots.state.compactionMaxTokens === undefined
+        ? initial.compactionMaxTokens
+        : Number(ctx.slots.state.compactionMaxTokens),
+    compactionAcceptance: ctx.compaction.acceptance ?? initial.compactionAcceptance,
+  };
+}
+
 /** 设置与命令共用实际修改;失败抛异常,不把显示文案当作结果协议。 */
 export async function applySlotValue(ctx: TuiContext, slot: string, value: string): Promise<void> {
   if (ctx.agent.running) throw new Error("Cannot switch a slot while running; press Esc first.");
   switch (slot) {
     case "compaction":
-      ctx.compaction.strategy = await loadCompactionStrategy(value);
+    case "compactionPrompt":
+    case "compactionMaxTokens":
+    case "compactionAcceptance": {
+      const next = await buildCompaction(
+        {
+          ...currentCompactionSettings(ctx),
+          [slot]: slot === "compactionMaxTokens" ? Number(value) : value,
+        },
+        ctx.compaction.window,
+      );
+      if (ctx.agent.running)
+        throw new Error("Cannot switch a slot while running; press Esc first.");
+      delete ctx.compaction.preservation;
+      Object.assign(ctx.compaction, next);
       break;
+    }
     case "compactionTrigger":
       if (!isCompactionTrigger(value)) throw new Error("Unknown compaction trigger");
       ctx.compaction.trigger = value;
       break;
     case "preservation":
-      ctx.compaction.preservation = parsePreservation(value).policy;
+      ctx.compaction.preservation = parsePreservation(value, ctx.compaction.window).policy;
       break;
     case "execution":
       if (value !== "sequential" && value !== "parallel")
@@ -361,7 +397,10 @@ function setToolPromptStyle(ctx: TuiContext, value: string): string[] {
 function slotDescription(ctx: TuiContext, slot: string, value: string): string {
   if (slot === "compaction") return `${value} · trigger ${ctx.compaction.trigger ?? "threshold"}`;
   if (slot === "preservation")
-    return value ? parsePreservation(value).label : "keepRecentTokens (min(20000, window/4))";
+    return parsePreservation(
+      value || DEFAULT_COMPACTION_SETTINGS.preservation,
+      ctx.compaction.window,
+    ).label;
   return value;
 }
 
@@ -502,7 +541,7 @@ function toolPromptsSlot(ctx: TuiContext, v: string): string {
       c.faint(
         edited.length > 0
           ? `  edited by you: ${edited.join(" ")}  (reset <tool> to drop; save to keep across sessions)`
-          : "  edit <tool> edits the description here; save writes style and edits to ~/.clari/config.json",
+          : "  edit <tool> edits the description here; save writes style and edits to ~/.clarook/config.json",
       ),
     ].join("\n");
   }

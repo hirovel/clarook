@@ -1,15 +1,15 @@
-// `clari sessions`:列出会话目录,或按时间 / 条数清理。不加 --yes 只打印将要删什么。
-// 用法:clari sessions [--dir D]
-//       clari sessions prune (--older-than 30d | --keep 20) [--dir D] [--yes]
+// `clarook sessions`:列出会话目录,或按时间 / 条数清理。不加 --yes 只打印将要删什么。
+// 用法:clarook sessions [--dir D]
+//       clarook sessions prune (--older-than 30d | --keep 20) [--dir D] [--yes]
 import { loadConfig } from "../src/config.js";
 import { SESSIONS_DIR, sessionsDir } from "./bootstrap.js";
 import { listSessions, parseAge, pruneSessions, sessionRows } from "./sessions.js";
 
 const argv = process.argv.slice(2);
 const USAGE_SESSIONS = `Usage
-  clari sessions [--dir D]                                 list session files, newest first
-  clari sessions prune --older-than 30d [--dir D] [--yes]  delete sessions started more than 30 days ago (12h = hours)
-  clari sessions prune --keep 20 [--dir D] [--yes]         keep only the 20 most recent
+  clarook sessions [--dir D]                                 list session files, newest first
+  clarook sessions prune --older-than 30d [--dir D] [--yes]  delete sessions started more than 30 days ago (12h = hours)
+  clarook sessions prune --keep 20 [--dir D] [--yes]         keep only the 20 most recent
   Without --yes, prune only prints what it would delete. Trace files and .mcp folders go with their session.`;
 
 function flag(name: string): string | undefined {
@@ -63,7 +63,7 @@ try {
     } else {
       console.log(`${list.length} sessions in ${dir}/ (newest first)`);
       for (const line of sessionRows(list, 120)) console.log(`  ${line}`);
-      console.log("resume one with: clari --resume <file>");
+      console.log("resume one with: clarook --resume <file>");
     }
   } else {
     throw new Error(`unknown sessions command "${sub}"\n${USAGE_SESSIONS}`);

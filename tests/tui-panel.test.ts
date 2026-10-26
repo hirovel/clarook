@@ -230,7 +230,7 @@ describe("上下文面板的动作与后果", () => {
 
 describe("面板动作菜单", () => {
   it("compare / restore / rewind 落到事件;内部编辑保留草稿,应用前不改上下文", async () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-panel-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-panel-"));
     let lastInput: Message[] = [];
     const provider: Provider = {
       model: "m",
@@ -317,7 +317,7 @@ describe("面板动作菜单", () => {
     app.tui.renderNow(true);
     terminal.feed("\x03");
     terminal.feed("\x03");
-    expect(plain(app.dialogLines().join("\n"))).toContain("Quit Clari");
+    expect(plain(app.dialogLines().join("\n"))).toContain("Quit Clarook");
     expect(log.events).toHaveLength(before);
     terminal.feed("\x1b");
     expect(plain(app.dialogLines().join("\n"))).toContain("中文 34 EDITED");
@@ -431,7 +431,7 @@ describe("面板动作菜单", () => {
 
 describe("/retry 与面板的 drop、fork", () => {
   it("/retry:运行中拒绝;空闲时丢掉最后一步重问;上下文面板的 drop 与 fork 动作", async () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-tui-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-tui-"));
     const { app, log, term } = bootB(
       scriptedB([
         { text: "first answer", toolCalls: [], stopReason: "end" },

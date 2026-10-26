@@ -122,7 +122,7 @@ function bootB(provider: Provider, over: Partial<TuiAppDeps> = {}, log = new Eve
 
 describe("命令:帮助、设置、检视器入口、强度、模型、审批", () => {
   it("用户终端入口:真实命令无 API,范围进入实际请求,忙时保留输入,取消与恢复不重跑", async () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-user-shell-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-user-shell-"));
     const file = join(tmp, "shell.jsonl");
     const log = new EventLog(file);
     const sent: string[] = [];
@@ -359,28 +359,29 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     app.stop();
   });
 
-  it("/model:列表选择器、按名切换、default 落盘", async () => {
+  it("/model:列表、切换与默认落盘;阈值和默认保留量跟随当前组合", async () => {
     const calls: string[] = [];
     const settings: ModelSettings = {
       listModels: () => ["fake/fake-model", "other/big-model"],
       switchModel: (name) => {
         calls.push(`switch:${name}`);
+        const model = name.endsWith("small-model") ? "small-model" : "big-model";
         return {
           provider: {
-            model: "big-model",
+            model,
             async complete() {
-              throw new Error("x");
+              return { text: "Short summary.", toolCalls: [], stopReason: "end" };
             },
           },
-          model: "big-model",
+          model,
           providerName: "other",
-          contextWindow: 200000,
+          contextWindow: model === "small-model" ? 8000 : 200000,
         };
       },
       setKey: (p, k) => calls.push(`key:${p}:${k}`),
       setDefault: (m) => calls.push(`default:${m}`),
     };
-    const { app, term } = boot(scripted([]), settings);
+    const { app, term, log } = boot(scripted([]), settings);
 
     await app.command("/model");
     // 无参数:弹列表选择器,当前模型带 ›;Esc 关闭
@@ -405,6 +406,56 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     expect(() => term.feed("\x0b")).not.toThrow();
     expect(app.draft()).toBe("keep despite picker failure");
     expect(app.dialogLines()).toEqual([]);
+
+    await app.submit("warm up");
+    expect(text(app)).toContain("auto-compact ~168k");
+    await app.command("/settings compactionReserve 64000");
+    expect(text(app)).toContain("auto-compact ~136k");
+    await app.submit("continue");
+    expect(log.events.filter((e) => e.type === "request").at(-1)).toMatchObject({
+      threshold: 136000,
+    });
+    await app.command("/settings compactionRatio 0.5");
+    expect(text(app)).toContain("auto-compact ~100k");
+    expect(app.setup().values.compactionRatio).toBe(0.5);
+    await app.submit("use the earlier threshold");
+    expect(log.events.filter((e) => e.type === "request").at(-1)).toMatchObject({
+      threshold: 100000,
+    });
+    await app.command("/settings compactionRatio 0");
+    expect(text(app)).toContain("auto-compact ~136k");
+
+    await app.command("/set preservation tokens 500");
+    await app.command("/settings preservation");
+    app.dialogInput("\x1b[D");
+    app.dialogInput("\r");
+    expect(app.dialogLines().map(stripAnsi).join("\n")).toContain("Restore recommended");
+    app.dialogInput("\r");
+    await tick();
+    expect(app.setup().values.preservation).toBe("tokens 20000");
+    app.dialogInput("\x1b");
+    app.dialogInput("\x1b");
+    await app.command("/set preservation auto");
+    await app.command("/model other/small-model");
+    const older = log.events.length;
+    log.append({
+      type: "assistant/message",
+      at: "",
+      text: "Older findings. ".repeat(1000),
+      toolCalls: [],
+      stopReason: "end",
+    });
+    const recent = "Recent request. ".repeat(250);
+    log.append({ type: "user/message", at: "", text: recent });
+    await app.command("/set compaction llm");
+    await app.command("/compact");
+    expect(log.events.filter((e) => e.type === "compaction").at(-1)).toMatchObject({
+      coversUpTo: older + 1,
+    });
+    expect(deriveMessages(log.events).some((m) => m.content === recent)).toBe(true);
+    expect(deriveMessages(log.events).some((m) => m.content.includes("Older findings."))).toBe(
+      false,
+    );
     app.stop();
   });
 
@@ -676,7 +727,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     expect(prompt).toContain("2. Allow this tool for this session");
     expect(prompt).toContain("4. Deny");
     app.tui.renderNow(true);
-    expect((await term.screen()).join("\n")).toContain("Quit Clari");
+    expect((await term.screen()).join("\n")).toContain("Quit Clarook");
     term.feed("y");
     expect(app.approvalLines().length).toBeGreaterThan(0);
     expect(app.agent.running).toBe(true);
@@ -765,7 +816,7 @@ describe("按键", () => {
     expect(plain(app.dialogLines().join("\n"))).toContain("No images attached");
     term.feed("\x1b");
     expect(app.draft()).toBe("draft?");
-    const imageDir = mkdtempSync(join(tmpdir(), "clari-paste-"));
+    const imageDir = mkdtempSync(join(tmpdir(), "clarook-paste-"));
     try {
       const imageFile = join(imageDir, "pasted image.png");
       writeFileSync(imageFile, Buffer.from(testImage.data, "base64"));
@@ -809,7 +860,7 @@ describe("按键", () => {
     term.feed("\x03");
     try {
       expect(exits).toEqual([]);
-      expect(plain(app.dialogLines().join("\n"))).toContain("Quit Clari");
+      expect(plain(app.dialogLines().join("\n"))).toContain("Quit Clarook");
       term.feed("\x03");
       term.feed("\x16");
       expect(exits).toEqual([]);
@@ -852,7 +903,7 @@ describe("按键", () => {
 
 describe("提交", () => {
   it("长粘贴的占位符只用于显示，保存恢复和 Alt+Enter 提交均使用完整正文", async () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-paste-draft-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-paste-draft-"));
     const file = join(tmp, "s.jsonl");
     const content = Array.from({ length: 20 }, (_, i) => `第 ${i + 1} 行：保留完整粘贴正文。`).join(
       "\n",
@@ -884,7 +935,7 @@ describe("提交", () => {
     }
   });
   it("@路径附件:完整附入带空格路径;二进制与非法 UTF-8 提示跳过", async () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-tui-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-tui-"));
     writeFileSync(join(tmp, "a.txt"), "hello");
     writeFileSync(join(tmp, "a.bin"), Buffer.from([0, 1, 2, 3]));
     const content = "\uFEFF中文 🙂\r\n  保留缩进\n";
@@ -992,7 +1043,7 @@ describe("提交", () => {
 
 describe("命令的分支", () => {
   it("/raw 用法与越界;/sessions 空目录与有会话;/mcp 无与有;/fields 无表与有表", async () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-tui-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-tui-"));
     const withFields: Provider = {
       ...scriptedB([{ text: "ok", toolCalls: [], stopReason: "end" }]),
       fields: {
@@ -1065,7 +1116,7 @@ describe("命令的分支", () => {
   });
 
   it("/prompt 段构成与 instructions-as user 的提示;/compact 失败;/fork 的三种参数;未知命令与模板", async () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-tui-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-tui-"));
     const resumed: string[] = [];
     const log = new EventLog();
     log.append({
@@ -1102,7 +1153,6 @@ describe("命令的分支", () => {
             path: "review/SKILL.md",
             dir: "review",
             disableModelInvocation: false,
-            allowedTools: [],
           },
         ],
       },
@@ -1158,7 +1208,7 @@ describe("命令的分支", () => {
   });
 
   it("/memory:关着时说明;开着时列出、forget N、越界、clear", async () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-tui-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-tui-"));
     const project = join(tmp, "AGENTS.md");
     const user = join(tmp, "home", "AGENTS.md");
     mkdirSync(join(tmp, "home"));

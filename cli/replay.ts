@@ -121,7 +121,7 @@ if (flags.includes("--messages")) {
 }
 
 console.log(`\n${"─".repeat(72)}`);
-const b = contextBreakdown(log.events, Number(process.env.CLARI_CONTEXT_WINDOW ?? 131072));
+const b = contextBreakdown(log.events, Number(process.env.CLAROOK_CONTEXT_WINDOW ?? 131072));
 console.log(
   `breakdown (est. ${b.estimatedTokens} tok, ${Math.round(b.usedShare * 100)}% of window):`,
 );

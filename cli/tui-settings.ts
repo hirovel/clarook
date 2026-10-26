@@ -1,7 +1,8 @@
 import type { SessionSetup } from "./session-setup.js";
+
 // 设置的读写语义与终端布局分离。运行值来自现有状态;保存值来自配置;变化进入事件日志。
 
-import { keepRecentTokens } from "../src/compaction.js";
+import { DEFAULT_COMPACTION_SETTINGS } from "../src/compaction-presets.js";
 import type { Preset, ResultView, SkillsConfig } from "../src/config.js";
 import { now } from "../src/events.js";
 import { DEFAULT_PLAN_REMINDER } from "../src/plan.js";
@@ -15,6 +16,7 @@ import {
   SETTINGS,
   type SettingDef,
   type SettingLayers,
+  setSetting,
   settingDef,
   settingSource,
 } from "../src/settings.js";
@@ -23,10 +25,11 @@ import { parsePreservation } from "./args.js";
 import { DEFAULT_RESULT_VIEWS } from "./cards.js";
 import { automaticSkills, discoverSkills, skillsSection } from "./prompt.js";
 import { replaceSystemSection } from "./prompt-sections.js";
+import { buildCompaction, loadSummaryPrompt, validateCompactionName } from "./strategies.js";
 import { applyToolPrompts } from "./tool-prompts.js";
 import { createSkillTool, skillCatalog } from "./tools/skill.js";
 import type { TuiContext } from "./tui-context.js";
-import { applySlotValue } from "./tui-slots.js";
+import { applySlotValue, currentCompactionSettings } from "./tui-slots.js";
 
 /** 模型切换只更新实际运行值;显示和保存默认值由各入口负责。 */
 export function switchModel(ctx: TuiContext, name: string): void {
@@ -44,26 +47,16 @@ export function switchModel(ctx: TuiContext, name: string): void {
   ctx.model.effortLevels = choice.effortLevels;
   ctx.model.contextWindow = choice.contextWindow;
   ctx.compaction.window = choice.contextWindow;
+  if (currentCompactionSettings(ctx).preservation === "auto")
+    ctx.compaction.preservation = parsePreservation("auto", choice.contextWindow).policy;
   ctx.updateHeader();
   ctx.updateStatus();
 }
 
 export function effectiveSetting(ctx: TuiContext, def: SettingDef): unknown {
-  const initial = () => getSetting(ctx.setupInitial, def.key) ?? def.builtin;
-  if (def.key.startsWith("prompt.skills.")) {
-    for (let i = ctx.log.events.length - 1; i >= 0; i--) {
-      const e = ctx.log.events[i];
-      if (
-        e?.type === "ext/event" &&
-        e.source === "setup" &&
-        e.kind === "setting" &&
-        e.payload.scope === "session" &&
-        e.payload.key === def.key
-      )
-        return e.payload.value;
-    }
-    return initial();
-  }
+  const baseValue = () => getSetting(ctx.setupBase, def.key) ?? def.builtin;
+  if (Object.hasOwn(DEFAULT_COMPACTION_SETTINGS, def.key))
+    return getSetting(currentCompactionSettings(ctx), def.key);
   switch (def.key) {
     case "saveInputs":
       return ctx.deps.inputs?.saving ?? ctx.deps.saveInputs ?? true;
@@ -89,8 +82,6 @@ export function effectiveSetting(ctx: TuiContext, def: SettingDef): unknown {
       return ctx.view.results;
     case "notify":
       return ctx.deps.notify ?? "unfocused";
-    case "compactionReserve":
-      return ctx.compaction.reserveTokens ?? def.builtin;
     case "facts.repeats":
     case "facts.slow":
     case "facts.date": {
@@ -109,12 +100,6 @@ export function effectiveSetting(ctx: TuiContext, def: SettingDef): unknown {
       return ctx.slots.toolPrompts.style ?? "explain";
     case "approve":
       return ctx.approval.mode;
-    case "compaction":
-      return ctx.slots.state.compaction ?? initial();
-    case "compactionTrigger":
-      return ctx.compaction.trigger ?? "threshold";
-    case "preservation":
-      return ctx.slots.state.preservation || undefined;
     case "execution":
       return ctx.agent.slots.execution ?? "sequential";
     case "steering":
@@ -122,7 +107,7 @@ export function effectiveSetting(ctx: TuiContext, def: SettingDef): unknown {
     case "effort":
       return ctx.agent.effort;
     default:
-      return initial();
+      return baseValue();
   }
 }
 
@@ -162,6 +147,9 @@ const SLOT_SETTINGS = new Set([
   "approve",
   "compaction",
   "compactionTrigger",
+  "compactionPrompt",
+  "compactionMaxTokens",
+  "compactionAcceptance",
   "preservation",
   "execution",
   "steering",
@@ -195,7 +183,18 @@ export function settingTiming(ctx: TuiContext, def: SettingDef, scope: SetupScop
   if (def.key === "effort") return "Used by the next model request.";
   if (def.key.startsWith("prompt.skills."))
     return "Used by the next request. Loaded instructions stay in history. New files are discovered at session startup.";
-  if (["compaction", "compactionTrigger", "compactionReserve", "preservation"].includes(def.key))
+  if (
+    [
+      "compaction",
+      "compactionTrigger",
+      "compactionReserve",
+      "compactionRatio",
+      "compactionPrompt",
+      "compactionMaxTokens",
+      "compactionAcceptance",
+      "preservation",
+    ].includes(def.key)
+  )
     return "Used by the next compaction check; existing history stays unchanged.";
   return "Used by the next turn. An in-flight request keeps its current settings.";
 }
@@ -244,6 +243,7 @@ export async function applySettingNow(
       if (edit) ctx.log.append(edit);
       if (skills !== ctx.skills) ctx.skills.splice(0, ctx.skills.length, ...skills);
       ctx.tools.splice(0, ctx.tools.length, ...tools);
+      ctx.setupBase = setSetting(ctx.setupBase, def.key, structuredClone(value));
       ctx.applyTools?.();
       for (const message of warnings)
         ctx.log.append({
@@ -303,6 +303,10 @@ export async function applySettingNow(
       ctx.compaction.reserveTokens = value as number;
       ctx.updateStatus();
       return;
+    case "compactionRatio":
+      ctx.compaction.ratio = value as number;
+      ctx.updateStatus();
+      return;
     case "facts.repeats":
     case "facts.slow":
     case "facts.date":
@@ -331,13 +335,16 @@ export async function applySettingNow(
     case "toolPrompts":
     case "approve":
     case "compaction":
+    case "compactionPrompt":
+    case "compactionMaxTokens":
+    case "compactionAcceptance":
     case "compactionTrigger":
     case "execution":
     case "steering":
       return applySlotValue(ctx, def.key, String(value));
     case "preservation":
       if (value === undefined) {
-        ctx.compaction.preservation = keepRecentTokens(Math.min(20000, ctx.compaction.window / 4));
+        delete ctx.compaction.preservation;
         ctx.slots.state.preservation = "";
         return;
       }
@@ -352,6 +359,61 @@ export async function applySettingNow(
 }
 
 export type SettingChange = { ok: boolean; message: string };
+
+/** 先准备完整策略再替换八个组成项,避免组合只切换了一半。 */
+export async function changeCompactionReference(
+  ctx: TuiContext,
+  values: Preset,
+  scope: SetupScope,
+): Promise<SettingChange> {
+  try {
+    const ensureIdle = () => {
+      if (scope === "session" && ctx.agent.running)
+        throw new Error(
+          "This composition cannot change mid-turn. Wait, or press Esc to interrupt.",
+        );
+    };
+    ensureIdle();
+    const entries = Object.keys(DEFAULT_COMPACTION_SETTINGS).map((key) => {
+      const def = settingDef(key);
+      if (!def) throw new Error(`Unknown compaction setting: ${key}`);
+      const value = getSetting(values, key);
+      validate(def, value);
+      return [key, value] as const;
+    });
+    const next = await buildCompaction(values, ctx.compaction.window);
+    ensureIdle();
+    if (scope === "defaults") {
+      if (!ctx.deps.settings?.saveSettings)
+        throw new Error("Saving this composition is not available here. Use This session.");
+      await ctx.deps.settings.saveSettings(Object.fromEntries(entries));
+    } else {
+      delete ctx.compaction.preservation;
+      Object.assign(ctx.compaction, next);
+      for (const key of ["compaction", "compactionPrompt", "compactionMaxTokens", "preservation"])
+        ctx.slots.state[key] = String(getSetting(values, key) ?? "");
+      ctx.updateStatus();
+    }
+    for (const [key, value] of entries)
+      ctx.log.append({
+        type: "ext/event",
+        at: now(),
+        source: "setup",
+        kind: "setting",
+        payload: { key, value, scope },
+      });
+    if (scope === "session") ctx.persistSetup();
+    return {
+      ok: true,
+      message:
+        scope === "session"
+          ? "Context composition applied. Used by the next compaction check; no request sent."
+          : "Context composition saved for future starts. This session stays unchanged.",
+    };
+  } catch (err) {
+    return { ok: false, message: errorMessage(err) };
+  }
+}
 
 function validate(def: SettingDef, value: unknown): void {
   if (def.key === "prompt.skills.sources") parseSkillSources(value);
@@ -387,8 +449,10 @@ export async function changeSetting(
 ): Promise<SettingChange> {
   try {
     validate(def, value);
+    if (def.key === "compactionPrompt") await loadSummaryPrompt(String(value));
     const save = ctx.deps.settings?.saveSetting;
     if (scope === "defaults") {
+      if (def.key === "compaction") validateCompactionName(String(value));
       if (!save)
         throw new Error(
           "Saving is not available here. Use This session to make a temporary change.",
@@ -405,7 +469,7 @@ export async function changeSetting(
       const overridden = getSetting(layers?.preset, def.key) !== undefined;
       return {
         ok: true,
-        message: `${def.key} → ${formatSetting(def, value)} · saved for future starts; this session unchanged${overridden ? ` · preset ${layers?.presetName ?? ""} still overrides defaults` : ""}`,
+        message: `${def.key} → ${formatSetting(def, value)} · saved for future starts; this session unchanged${def.key === "compaction" ? " · strategy loads at startup" : ""}${overridden ? ` · preset ${layers?.presetName ?? ""} still overrides defaults` : ""}`,
       };
     }
     if (def.scope === "next start") {
@@ -474,12 +538,11 @@ export type { Preset };
 
 export function captureSessionSetup(ctx: TuiContext): SessionSetup {
   const values = setupSnapshot(SETTINGS, (def) => effectiveSetting(ctx, def));
-  values.extensions = [...(ctx.setupInitial.extensions ?? [])];
+  values.extensions = [...(ctx.setupBase.extensions ?? [])];
   values.approval = structuredClone(ctx.approval.cfg);
-  if (ctx.setupInitial.systemPromptFile)
-    values.systemPromptFile = ctx.setupInitial.systemPromptFile;
-  if (ctx.setupInitial.appendSystemPromptFile)
-    values.appendSystemPromptFile = ctx.setupInitial.appendSystemPromptFile;
+  if (ctx.setupBase.systemPromptFile) values.systemPromptFile = ctx.setupBase.systemPromptFile;
+  if (ctx.setupBase.appendSystemPromptFile)
+    values.appendSystemPromptFile = ctx.setupBase.appendSystemPromptFile;
   return {
     values,
     tools: ctx.defs().map((tool) => tool.name),

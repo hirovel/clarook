@@ -191,9 +191,9 @@ export function parseAge(s: string): number {
 
 // ---------- 目录、新建、恢复、分叉 ----------
 
-/** 会话目录:环境变量 CLARI_SESSIONS > 配置 sessionsDir > ./sessions。 */
+/** 会话目录:环境变量 CLAROOK_SESSIONS > 配置 sessionsDir > ./sessions。 */
 export function sessionsDir(config?: Pick<KernelConfig, "sessionsDir">): string {
-  return process.env.CLARI_SESSIONS?.trim() || config?.sessionsDir || SESSIONS_DIR;
+  return process.env.CLAROOK_SESSIONS?.trim() || config?.sessionsDir || SESSIONS_DIR;
 }
 
 /** 最近一次会话文件(按文件名排序,文件名即时间戳)。 */

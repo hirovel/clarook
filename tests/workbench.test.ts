@@ -205,7 +205,7 @@ describe("工作台的界面", () => {
       }),
     ],
   ) {
-    tmp = mkdtempSync(join(tmpdir(), "clari-wb-"));
+    tmp = mkdtempSync(join(tmpdir(), "clarook-wb-"));
     const provider: Provider = {
       model: "m",
       async complete(): Promise<AssistantTurn> {

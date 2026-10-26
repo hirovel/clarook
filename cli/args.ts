@@ -11,8 +11,20 @@ import {
 } from "../src/config.js";
 import { COMPACTION_TRIGGERS, type CompactionTrigger, type ExecutionPolicy } from "../src/loop.js";
 import { EFFORT_LEVELS, type EffortLevel, parseEffort } from "../src/provider.js";
-import { parseSkillSources, SETTINGS, setSetting } from "../src/settings.js";
+import {
+  parseSetting,
+  parseSkillSources,
+  SETTINGS,
+  setSetting,
+  settingDef,
+} from "../src/settings.js";
 import { isToolPromptStyle } from "./tool-prompts.js";
+
+function parseRegisteredSetting(key: string, value: string): unknown {
+  const def = settingDef(key);
+  if (!def) throw new Error(`Unknown setting ${key}`);
+  return parseSetting(def, value);
+}
 
 export const PROMPT_SECTION_NAMES: PromptSectionName[] = [
   "role",
@@ -67,12 +79,17 @@ export type CommonArgs = {
   toolPrompts?: ToolPromptStyle;
   /** 插话槽:step 缺省;turn = 留言等到模型停止调用工具。 */
   steering?: "step" | "turn";
-  /** 保留策略:"tokens N" 或 "ratio X";不给用内置缺省。 */
+  /** 保留策略:auto、"tokens N" 或 "ratio X";不给用内置缺省。 */
   preservation?: string;
   /** 压缩触发:threshold / manual / remind;不给用内置缺省 threshold。 */
   compactionTrigger?: CompactionTrigger;
-  /** 自动压缩余量(token);不给用内置缺省 32000。 */
+  /** 自动压缩余量(token);不给用内置缺省 16384。 */
   compactionReserve?: number;
+  /** 提早压缩的窗口比例;0 关闭,开启建议 0.8。 */
+  compactionRatio?: number;
+  compactionPrompt?: string;
+  compactionMaxTokens?: number;
+  compactionAcceptance?: NonNullable<Preset["compactionAcceptance"]>;
   /** 预设里的审批规则;没有就用配置的,再没有就用内置缺省。 */
   approval?: ApprovalConfig;
   /** 预设名:从配置 presets 取缺省参数;显式给的参数优先。 */
@@ -128,10 +145,19 @@ export function settingsFromArgs(args: CommonArgs): Preset {
 }
 
 /** 保留策略的文字形态 → 实现与显示名:配置、预设、命令行、/preservation 共用一种写法。 */
-export function parsePreservation(spec: string): { policy: PreservationPolicy; label: string } {
+export function parsePreservation(
+  spec: string,
+  window = Number.POSITIVE_INFINITY,
+): { policy: PreservationPolicy; label: string } {
+  if (spec === "auto")
+    return {
+      policy: keepRecentTokens(Math.min(20000, Math.floor(window / 4))),
+      label: "Automatic token tail",
+    };
   const m = spec.trim().match(/^(tokens|ratio)\s+([\d.]+)$/);
-  if (!m) throw new Error(`preservation must be "tokens N" or "ratio X", got "${spec}"`);
+  if (!m) throw new Error(`preservation must be "auto", "tokens N" or "ratio X", got "${spec}"`);
   const n = Number(m[2]);
+  if (!Number.isFinite(n)) throw new Error(`preservation ${m[1]} must be a finite number`);
   if (m[1] === "tokens") {
     if (!(n > 0)) throw new Error("preservation tokens must be positive");
     return { policy: keepRecentTokens(n), label: `keepRecentTokens(${n})` };
@@ -271,6 +297,28 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         out.compactionTrigger = v;
         break;
       }
+      case "--compaction-ratio": {
+        out.compactionRatio = parseRegisteredSetting(
+          "compactionRatio",
+          takeValue(i++, a),
+        ) as number;
+        break;
+      }
+      case "--compaction-prompt":
+        out.compactionPrompt = takeValue(i++, a);
+        break;
+      case "--compaction-max-tokens":
+        out.compactionMaxTokens = parseRegisteredSetting(
+          "compactionMaxTokens",
+          takeValue(i++, a),
+        ) as number;
+        break;
+      case "--compaction-acceptance":
+        out.compactionAcceptance = parseRegisteredSetting(
+          "compactionAcceptance",
+          takeValue(i++, a),
+        ) as NonNullable<Preset["compactionAcceptance"]>;
+        break;
       case "--compaction-reserve": {
         const n = Number(takeValue(i++, a));
         if (!Number.isInteger(n) || n < 0)
@@ -370,9 +418,9 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
 }
 
 export const USAGE = `Usage
-  clari [options]                      interactive UI          (from source: pnpm tui -- [options])
-  clari once "task" [options]          one-shot mode: run one turn and exit; stdout is the reply
-  clari replay <session.jsonl> [--request N] [--compaction N [--json]] [--messages]
+  clarook [options]                      interactive UI          (from source: pnpm tui -- [options])
+  clarook once "task" [options]          one-shot mode: run one turn and exit; stdout is the reply
+  clarook replay <session.jsonl> [--request N] [--compaction N [--json]] [--messages]
 
 Options
   --model provider/model         default: the config's default model
@@ -388,9 +436,13 @@ Options
   --instructions-as system|user  put project instructions and memory in system (default) or in the first user message
   --execution sequential|parallel  tool execution slot: default one at a time; parallel = adjacent read-only calls run together
   --steering step|turn           steering slot: step (default) injects queued messages at the next step; turn waits until the model stops calling tools
-  --preservation "tokens N|ratio X"   what compaction keeps verbatim; default tokens min(20000, window/4)
+  --preservation "auto|tokens N|ratio X"   recent history kept verbatim; default tokens 20000
   --compaction-trigger threshold|manual|remind   threshold (default) compacts when usage passes window - reserve; manual only on /compact; remind only shows a hint
-  --compaction-reserve N         tokens kept free below the window for the reply and the summary call (default 32000)
+  --compaction-reserve N         tokens kept free below the window (default 16384)
+  --compaction-ratio X           early compaction by window fraction; 0 off, 0.8 suggested; reserve may trigger earlier
+  --compaction-prompt name|file.md   summary template: pi (default), codex, zcode, opencode, clarook-detailed, minimal
+  --compaction-max-tokens N      summary output limit (default 13107); 0 uses provider configuration
+  --compaction-acceptance complete|smaller|reduced   apply complete summaries (default), or require size reduction
   --extension <module.mjs>       load an extension module (repeatable): add tools, replace slot implementations
   --max-steps N                  termination guard (default: no limit)
   --subagent                     add the task tool (sub-agents)
@@ -406,12 +458,12 @@ Options
 
 Config
   ${DEFAULT_CONFIG_PATH}
-  CLARI_CONFIG overrides the path; keys come from the env var named by apiKeyEnv, or /login in the UI
+  CLAROOK_CONFIG overrides the path; keys come from the env var named by apiKeyEnv, or /login in the UI
   every option above has a config counterpart: defaults.<name> is the global default, presets.<name>.<option> a named set; flags > preset > defaults > built-in
-  clari sessions [--dir D]        list session files; clari sessions prune --older-than 30d | --keep N [--yes]
-  session files default to ./sessions/; override with sessionsDir in config or CLARI_SESSIONS
-  prompt templates: ~/.clari/prompts/*.md and <git root>/.clari/prompts/*.md; /name args in the UI
-  skills (first name wins): ~/.clari/skills, ~/.claude/skills, <git root>/.agents/skills, <git root>/.claude/skills
+  clarook sessions [--dir D]        list session files; clarook sessions prune --older-than 30d | --keep N [--yes]
+  session files default to ./sessions/; override with sessionsDir in config or CLAROOK_SESSIONS
+  prompt templates: ~/.clarook/prompts/*.md and <git root>/.clarook/prompts/*.md; /name args in the UI
+  skills (first name wins): ~/.clarook/skills, ~/.claude/skills, <git root>/.agents/skills, <git root>/.claude/skills
   each location loads direct <name>/SKILL.md; invoke with /name args (manual by default); /inspect skills shows sources
   automatic skills: enable in /settings; selected catalogs go in the system prompt (read mode) or the skill tool definition (tool mode)`;
 
@@ -507,6 +559,26 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
       out.compactionTrigger = layer.compactionTrigger;
     if (out.compactionReserve === undefined && layer.compactionReserve !== undefined)
       out.compactionReserve = layer.compactionReserve;
+    if (out.compactionRatio === undefined && layer.compactionRatio !== undefined)
+      out.compactionRatio = parseRegisteredSetting(
+        "compactionRatio",
+        String(layer.compactionRatio),
+      ) as number;
+    if (out.compactionPrompt === undefined && layer.compactionPrompt !== undefined)
+      out.compactionPrompt = parseRegisteredSetting(
+        "compactionPrompt",
+        layer.compactionPrompt,
+      ) as string;
+    if (out.compactionMaxTokens === undefined && layer.compactionMaxTokens !== undefined)
+      out.compactionMaxTokens = parseRegisteredSetting(
+        "compactionMaxTokens",
+        String(layer.compactionMaxTokens),
+      ) as number;
+    if (out.compactionAcceptance === undefined && layer.compactionAcceptance !== undefined)
+      out.compactionAcceptance = parseRegisteredSetting(
+        "compactionAcceptance",
+        layer.compactionAcceptance,
+      ) as NonNullable<Preset["compactionAcceptance"]>;
     if (out.extensions.length === 0 && layer.extensions) out.extensions = [...layer.extensions];
   };
   if (preset) applyLayer(preset, `preset ${args.preset}`);

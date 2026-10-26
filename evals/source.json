@@ -1,0 +1,8 @@
+{
+  "source": "https://github.com/Aider-AI/polyglot-benchmark",
+  "revision": "7e0611e77b54e2dea774cdc0aa00cf9f7ed6144f",
+  "upstream": "Exercism JavaScript exercises; each task retains its LICENSE",
+  "adaptation": "Three visible-test tasks, all selected assertions enabled, run with the repository's Vitest. Reference implementations retained from the verified local acceptance artifact. Not an official benchmark score.",
+  "evidence": ".preview/benchmark-principles-20261008/manifest.json",
+  "scope": "Basic file/tool/test loop only. Context editing, summary retention and multi-file maintenance need separate tasks before release-quality claims."
+}

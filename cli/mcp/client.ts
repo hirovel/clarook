@@ -4,6 +4,7 @@
 // 每条收发的消息都交给 onRpc,检视器据此可见;stderr 逐行交给 onLog,不当错误。
 import { type ChildProcess, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { sseData } from "../../src/providers/sse.js";
 import { stopProcessTree } from "../process-tree.js";
 
 export const MODERN_VERSION = "2026-07-28";
@@ -178,7 +179,7 @@ export class McpClient {
       {
         protocolVersion: LEGACY_VERSION,
         capabilities: {},
-        clientInfo: { name: "clari", version: this.opts.clientVersion ?? "0.1.0" },
+        clientInfo: { name: "clarook", version: this.opts.clientVersion ?? "0.1.0" },
       },
       timeoutMs,
     )) as {
@@ -235,7 +236,7 @@ export class McpClient {
       _meta: {
         [META_VERSION]: this.version,
         [META_CAPS]: {},
-        [META_INFO]: { name: "clari", version: this.opts.clientVersion ?? "0.1.0" },
+        [META_INFO]: { name: "clarook", version: this.opts.clientVersion ?? "0.1.0" },
       },
     };
   }
@@ -363,19 +364,11 @@ export class McpClient {
       return;
     }
     if (ct.startsWith("text/event-stream")) {
-      const text = await res.text();
-      for (const block of text.split(/\n\n+/)) {
-        const data = block
-          .split("\n")
-          .filter((l) => l.startsWith("data:"))
-          .map((l) => l.slice(5).trim())
-          .join("\n");
-        if (!data) continue;
-        try {
-          this.receive(JSON.parse(data) as JsonRpcMessage);
-        } catch {
-          // 非 JSON 的 SSE 行,跳过
-        }
+      if (!res.body) throw new Error(`mcp ${this.name}: empty SSE response`);
+      for await (const data of sseData(res.body, { stallTimeoutMs: 0 })) {
+        this.receive(JSON.parse(data) as JsonRpcMessage);
+        // 匹配结果已经完成请求并撤销传输;不等待服务器关闭长连接。
+        if (!this.pending.has(message.id as number)) return;
       }
       return;
     }

@@ -177,7 +177,7 @@ const failures: string[] = [];
 server.kill();
 
 const html = join(outDir, "index.html");
-writeFileSync(html, ansiToHtmlDocument(shots, "clari rehearsal: the plan without a key"), "utf8");
+writeFileSync(html, ansiToHtmlDocument(shots, "clarook rehearsal: the plan without a key"), "utf8");
 for (const v of verdicts) console.log(v);
 console.log(`\n${"=".repeat(96)}`);
 console.log(`screens: ${html}`);

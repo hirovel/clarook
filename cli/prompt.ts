@@ -7,7 +7,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { release, type } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse } from "yaml";
-import { clariHome, type PromptSectionName, type SkillsConfig } from "../src/config.js";
+import { clarookHome, type PromptSectionName, type SkillsConfig } from "../src/config.js";
 import { DEFAULT_SKILL_SOURCES, parseSkillSources } from "../src/settings.js";
 import { splitMemory } from "./tools/memory.js";
 
@@ -39,7 +39,7 @@ export const SECTION_LABELS: Record<PromptSectionName, string> = {
 
 /**
  * 技能:一个目录一个 SKILL.md。frontmatter 读取 name、description、
- * disable-model-invocation(只许用户 /名 触发,不进系统提示词)、allowed-tools(用户触发的那一 turn 里这些工具免审批)、
+ * disable-model-invocation(只许用户 /名 触发,不进系统提示词)、
  * argument-hint(补全提示)。正文按需进入上下文,不预先占 token。
  */
 export type Skill = {
@@ -52,7 +52,6 @@ export type Skill = {
   /** frontmatter 之后的正文。 */
   body: string;
   disableModelInvocation: boolean;
-  allowedTools: string[];
   argumentHint?: string;
 };
 
@@ -83,7 +82,6 @@ export function parseSkill(path: string, raw: string): Skill {
     const manual = metadata["disable-model-invocation"];
     if (manual != null && typeof manual !== "boolean")
       throw new Error("disable-model-invocation must be a YAML boolean (true or false).");
-    const allowed = field("allowed-tools");
     const hint = field("argument-hint");
     return {
       name: field("name") || basename(dir),
@@ -92,7 +90,6 @@ export function parseSkill(path: string, raw: string): Skill {
       dir,
       body: body.trim(),
       disableModelInvocation: manual === true,
-      allowedTools: allowed ? allowed.split(/[\s,]+/).filter(Boolean) : [],
       ...(hint && { argumentHint: hint }),
     };
   } catch (error) {
@@ -101,20 +98,20 @@ export function parseSkill(path: string, raw: string): Skill {
 }
 
 /**
- * 技能发现:用户级 ~/.clari/skills 与 ~/.claude/skills,项目级 <git 根>/.agents/skills 与 <git 根>/.claude/skills;
+ * 技能发现:用户级 ~/.clarook/skills 与 ~/.claude/skills,项目级 <git 根>/.agents/skills 与 <git 根>/.claude/skills;
  * 默认四个来源可关闭,自定义路径按保存顺序添加。每个目录下 <名>/SKILL.md,不递归;同名以先发现的为准。
  */
 export function skillSources(
   cwd: string,
   opts: { home?: string; root?: string; sources?: SkillsConfig["sources"] } = {},
 ): { name: string; path: string; enabled: boolean }[] {
-  const home = opts.home ?? clariHome();
+  const home = opts.home ?? clarookHome();
   const root = opts.root ?? findGitRoot(cwd) ?? resolve(cwd);
-  // 用户级 .claude/skills 取 clari 用户目录的同级(~/.clari 与 ~/.claude 同在家目录);
-  // 测试用临时 home(或 CLARI_HOME)时就不会漏到真机目录。
+  // 用户级 .claude/skills 取 clarook 用户目录的同级(~/.clarook 与 ~/.claude 同在家目录);
+  // 测试用临时 home(或 CLAROOK_HOME)时就不会漏到真机目录。
   const userClaude = join(dirname(home), ".claude", "skills");
   const builtin: Record<string, string> = {
-    "user-clari": join(home, "skills"),
+    "user-clarook": join(home, "skills"),
     "user-claude": userClaude,
     "project-agents": join(root, ".agents", "skills"),
     "project-claude": join(root, ".claude", "skills"),
@@ -269,7 +266,7 @@ export function environmentSection(
   const lines = [
     `working directory: ${resolve(cwd)}`,
     `os: ${type()} ${release()}`,
-    `shell: ${shell}`,
+    `host shell: ${shell}; built-in bash tool executes Bash commands`,
     `date: ${now.toISOString().slice(0, 10)}`,
   ];
   if (opts.git !== false) {
@@ -299,7 +296,7 @@ export type InstructionFile = {
 };
 
 export type DiscoverOptions = {
-  /** 全局指令文件所在目录;缺省 ~/.clari。 */
+  /** 全局指令文件所在目录;缺省 ~/.clarook。 */
   home?: string;
   /** 总预算(字节),缺省 32 KiB。 */
   budgetBytes?: number;
@@ -323,7 +320,7 @@ export function discoverProjectInstructions(
 ): { section?: PromptSection; memory?: PromptSection; files: InstructionFile[] } {
   const filenames = opts.filenames ?? DEFAULT_INSTRUCTION_FILES;
   const budget = opts.budgetBytes ?? DEFAULT_INSTRUCTION_BUDGET;
-  const home = opts.home ?? clariHome();
+  const home = opts.home ?? clarookHome();
   const start = resolve(cwd);
   const root = opts.root ? resolve(opts.root) : (findGitRoot(start) ?? start);
 

@@ -14,7 +14,7 @@ import { EventLog } from "../src/log.js";
 import { toAnthropicWire } from "../src/providers/anthropic.js";
 import { isRetryable, ProviderError } from "../src/providers/errors.js";
 import { feedChunk, finishAcc, newAcc } from "../src/providers/openai-chat.js";
-import { StreamStall, sseEvents, streamError } from "../src/providers/sse.js";
+import { StreamStall, sseData, sseEvents, streamError } from "../src/providers/sse.js";
 
 const enc = new TextEncoder();
 async function* chunks(parts: string[], delayMs = 0): AsyncGenerator<Uint8Array> {
@@ -31,33 +31,53 @@ async function collect(it: AsyncIterable<unknown>): Promise<unknown[]> {
 const ctx = { signal: new AbortController().signal };
 
 describe("SSE 读流", () => {
-  it("跨块拼行、CRLF、[DONE] 与非 data 行跳过、尾部无换行的 data 也产出", async () => {
-    const got = await collect(
-      sseEvents(
-        chunks(['data: {"a":1}\r\nevent: ping\n\ndata: {"a"', ':2}\ndata: [DONE]\ndata: {"a":3}']),
-      ),
-    );
-    expect(got).toEqual([{ a: 1 }, { a: 2 }, { a: 3 }]);
+  it("按空行分帧并拼接 data;三种换行与 UTF-8 可跨块,未完成事件不派发", async () => {
+    for (const newline of ["\n", "\r\n", "\r"]) {
+      const input = [
+        "\uFEFF: keepalive",
+        "event: message",
+        'data: {"a":',
+        'data: "你"}',
+        "",
+        "data: [DONE]",
+        "",
+        'data:{"a":2}',
+        "",
+        'data: {"a":3}',
+        "",
+      ].join(newline);
+      async function* bytes() {
+        for (const byte of enc.encode(input)) yield Uint8Array.of(byte);
+      }
+      expect(await collect(sseEvents(bytes()))).toEqual([{ a: "你" }, { a: 2 }]);
+    }
   });
 
   it("onRaw 收到每一非空行,含非 data 行", async () => {
     const raw: string[] = [];
-    await collect(sseEvents(chunks(["event: x\ndata: {}\n\n"]), { onRaw: (l) => raw.push(l) }));
-    expect(raw).toEqual(["event: x", "data: {}"]);
+    const data = await collect(
+      sseData(chunks(["event: x\ndata:  first \ndata\n\ndata: unfinished"]), {
+        onRaw: (l) => raw.push(l),
+      }),
+    );
+    expect(data).toEqual([" first \n"]);
+    expect(raw).toEqual(["event: x", "data:  first ", "data", "data: unfinished"]);
   });
 
-  it("解析不了的一行 → 不可重试的 ProviderError,原文随错误带回", async () => {
-    await expect(collect(sseEvents(chunks(["data: {oops\n"])))).rejects.toMatchObject({
+  it("解析不了的完整事件 → 不可重试的 ProviderError,原文随错误带回", async () => {
+    await expect(
+      collect(sseEvents(chunks(["data: {oops\ndata: broken}\n\n"]))),
+    ).rejects.toMatchObject({
       name: "ProviderError",
       retryable: false,
-      body: "{oops",
+      body: "{oops\nbroken}",
     });
   });
 
   it("停滞会撤销请求;已有输出时停滞、断连和流内错误都不重试", async () => {
     let stalled = 0;
     const p = collect(
-      sseEvents(chunks(['data: {"a":1}\n', 'data: {"a":2}\n'], 80), {
+      sseEvents(chunks(['data: {"a":1}\n\n', 'data: {"a":2}\n\n'], 80), {
         stallTimeoutMs: 20,
         onStall: () => stalled++,
       }),
@@ -83,7 +103,7 @@ describe("SSE 读流", () => {
   });
 
   it("stallTimeoutMs=0 不限时", async () => {
-    const got = await collect(sseEvents(chunks(['data: {"a":1}\n'], 30), { stallTimeoutMs: 0 }));
+    const got = await collect(sseEvents(chunks(['data: {"a":1}\n\n'], 30), { stallTimeoutMs: 0 }));
     expect(got).toEqual([{ a: 1 }]);
   });
 });

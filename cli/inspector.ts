@@ -3,7 +3,7 @@
 //   事件视图  同一条流,每种事件一句人读的话;筛选页签;详情三页(排版 / JSON / 在投影里怎么了)   inspector-events
 //   压缩对照  每次压缩:被覆盖的那一大段原文 ↔ 它变成的摘要,带 token 与压缩比                 inspector-compactions
 //   工作台    Ctrl+E:下一次请求的正文按发送顺序一列,token 尺、缓存线、底部预览;Enter 出动作     inspector-workbench
-//   会话切换  s 键在主会话与子 agent 会话间轮换,以上视图作用在选中的数组上
+//   会话切换  通过可见操作切换主会话与子 agent 会话,以上视图作用在选中的数组上
 // 行数爆炸由视口与按键控制,不靠删内容:任何一字节都能翻到。
 // 本文件只剩覆盖层组件 RequestInspector:模式、选中、滚动、按键、行缓存;各视图的行由上面的模块算。
 import {
@@ -858,6 +858,7 @@ export class RequestInspector implements Component {
           rec.request.effort,
           recording,
           missing,
+          rec.request.maxTokens,
         );
       case 6:
         return []; // 正文浏览器负责此分区。

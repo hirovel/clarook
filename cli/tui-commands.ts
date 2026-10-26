@@ -297,7 +297,6 @@ function skillsList(ctx: TuiContext): string {
             (include === "all" || (Array.isArray(include) && include.includes(s.name)))
           ? "in automatic range + manual"
           : "manual invocation",
-      ...(s.allowedTools.length ? [`allowed-tools: ${s.allowedTools.join(" ")}`] : []),
       ...(s.argumentHint ? [`args: ${s.argumentHint}`] : []),
       ...(COMMANDS.some((command) => command.name === s.name)
         ? ["manual /name unavailable: reserved built-in command; read the skill path instead"]
@@ -307,6 +306,7 @@ function skillsList(ctx: TuiContext): string {
   });
   return [
     `${c.soft("Skills")} ${c.ink(`${skills.length}`)}  ${c.faint(`Mode: ${mode} · /<name> args to run one now; /settings to change the automatic range`)}`,
+    c.faint("Tool permissions follow the current session's approval rules."),
     ...sources,
     "",
     ...rows,
@@ -318,7 +318,7 @@ function sessionsList(ctx: TuiContext): string {
   const list = listSessions(dir).slice(0, 15);
   if (list.length === 0) return c.faint(`No sessions in ${dir}/.`);
   return [
-    `${c.soft("Sessions")} ${c.ink(`${list.length} most recent in ${dir}/`)}  ${c.faint("/session resumes or forks; prune: clari sessions prune --older-than 30d --yes")}`,
+    `${c.soft("Sessions")} ${c.ink(`${list.length} most recent in ${dir}/`)}  ${c.faint("/session resumes or forks; prune: clarook sessions prune --older-than 30d --yes")}`,
     ...sessionRows(list).map((l) => `  ${c.ink(l)}`),
   ].join("\n");
 }
@@ -327,7 +327,7 @@ function mcpList(ctx: TuiContext): string {
   const list = ctx.deps.mcp?.statuses() ?? [];
   if (list.length === 0)
     return c.faint(
-      "No MCP servers. Configure mcp.servers in ~/.clari/config.json or mcpServers in ./.mcp.json.",
+      "No MCP servers. Configure mcp.servers in ~/.clarook/config.json or mcpServers in ./.mcp.json.",
     );
   return [
     `${c.soft("MCP")} ${c.ink(`${list.length} servers`)}  ${c.faint("tools are named mcp__<server>__<tool>; approval rules mcp:<server>:<tool>; every RPC is an ext/event with source mcp")}`,
@@ -1687,7 +1687,7 @@ async function dispatch(ctx: TuiContext, text: string): Promise<void> {
     case "help":
       ctx.note(
         arg === "update"
-          ? `Clari ${installedVersion() ?? "(version unavailable)"}\nExit Clari, then update:\n${UPDATE_COMMAND}\nCheck at startup: /settings checkUpdates (saved defaults, next start).\nUpdates are never installed automatically. Your config and sessions stay outside the installation. For source checkouts, update the checkout instead.`
+          ? `Clarook ${installedVersion() ?? "(version unavailable)"}\nExit Clarook, then update:\n${UPDATE_COMMAND}\nCheck at startup: /settings checkUpdates (saved defaults, next start).\nUpdates are never installed automatically. Your config and sessions stay outside the installation. For source checkouts, update the checkout instead.`
           : helpText(ctx),
       );
       break;
@@ -1742,7 +1742,7 @@ async function dispatch(ctx: TuiContext, text: string): Promise<void> {
   }
 }
 
-/** 提示词模板与技能:/名 参数 → 一条用户消息。技能的 allowed-tools 在这一 turn 免审批。 */
+/** 提示词模板与技能:/名 参数 → 一条用户消息,工具统一走当前审批策略。 */
 async function userDefined(ctx: TuiContext, cmd: string, arg: string): Promise<void> {
   const t = ctx.templates.find((x) => x.name === cmd);
   if (t) {
@@ -1752,18 +1752,8 @@ async function userDefined(ctx: TuiContext, cmd: string, arg: string): Promise<v
   }
   const sk = ctx.skills.find((x) => x.name === cmd);
   if (sk) {
-    ctx.note(
-      c.faint(
-        `· skill /${sk.name}  ${sk.path}${sk.allowedTools.length ? `  allowed-tools: ${sk.allowedTools.join(" ")}` : ""}`,
-      ),
-    );
-    const allow = ctx.approval.skillAllow;
-    for (const name of sk.allowedTools) allow.add(name);
-    try {
-      await submit(ctx, expandSkill(sk, arg));
-    } finally {
-      allow.clear();
-    }
+    ctx.note(c.faint(`· skill /${sk.name}  ${sk.path}`));
+    await submit(ctx, expandSkill(sk, arg));
     return;
   }
   ctx.note(

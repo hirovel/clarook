@@ -15,7 +15,7 @@ const server = spawn(process.execPath, [join(root, "scripts", "fake-model.mjs"),
 });
 await new Promise((r) => setTimeout(r, 400));
 
-const env = { ...process.env, CLARI_CONFIG: join(root, "examples", "config.demo.json") };
+const env = { ...process.env, CLAROOK_CONFIG: join(root, "examples", "config.demo.json") };
 // 直接用 node 跑 tsx 的入口,不经 .cmd 与 shell,参数原样传递。
 const tsx = join(root, "node_modules", "tsx", "dist", "cli.mjs");
 const args =

@@ -2,6 +2,7 @@
 // 配置模板的 defaults、/settings 屏、Ctrl+K 的条目都从这一张表生成;命令行解析仍是手写的,
 // 由测试逐项核对它认得表里的每个键(tests/settings.test.ts)。加一个开关就是加一行,屏上不会漏。
 // 键名是 defaults 下的路径:foldSteps、facts.repeats、prompt.sections、tools.disable。
+import { DEFAULT_COMPACTION_SETTINGS, SUMMARY_TEMPLATES } from "./compaction-presets.js";
 import type { Preset } from "./config.js";
 import { DEFAULT_STATUS_WIDGETS, STATUS_STYLES, STATUS_WIDGETS } from "./status-bar.js";
 
@@ -39,7 +40,7 @@ export const GROUP_ORDER: readonly SettingGroup[] = [
 const onOff: readonly SettingValue[] = [{ label: "on" }, { label: "off" }];
 
 export const DEFAULT_SKILL_SOURCES: Record<string, "on" | "off"> = {
-  "user-clari": "on",
+  "user-clarook": "on",
   "user-claude": "on",
   "project-agents": "on",
   "project-claude": "on",
@@ -159,12 +160,65 @@ export const SETTINGS: readonly SettingDef[] = [
   },
   // ---------- context ----------
   {
+    key: "compactionRatio",
+    group: "context",
+    type: "number",
+    values: [
+      { label: "0", note: "off; use the context reserve" },
+      { label: "0.8", note: "suggested when enabled; start by 80% of the window" },
+      { label: "0.6", note: "earlier summaries; more frequent and potentially lossy" },
+      { label: "0.9", note: "keep more original context before summarizing" },
+    ],
+    note: "optional early compaction at a fraction of the model window; 0 disables it",
+    builtin: 0,
+    scope: "now",
+  },
+  {
     key: "compactionReserve",
     group: "context",
     type: "number",
-    values: [{ label: "8000" }, { label: "16000" }, { label: "32000" }, { label: "64000" }],
+    values: [{ label: "8000" }, { label: "16384" }, { label: "32000" }, { label: "64000" }],
     note: "compact when the context is this many tokens from the window",
-    builtin: 32000,
+    builtin: DEFAULT_COMPACTION_SETTINGS.compactionReserve,
+    scope: "now",
+  },
+  {
+    key: "compactionPrompt",
+    group: "context",
+    type: "text",
+    values: Object.entries(SUMMARY_TEMPLATES).map(([label, template]) => ({
+      label,
+      note: template.label,
+    })),
+    note: "summary instructions and expected format; built-in name or Markdown file",
+    builtin: DEFAULT_COMPACTION_SETTINGS.compactionPrompt,
+    scope: "now",
+  },
+  {
+    key: "compactionMaxTokens",
+    group: "context",
+    type: "number",
+    values: [
+      { label: "0", note: "inherit provider output setting" },
+      { label: "4096" },
+      { label: "13107" },
+      { label: "20000" },
+    ],
+    note: "output token limit for summary requests only; 0 inherits provider settings",
+    builtin: DEFAULT_COMPACTION_SETTINGS.compactionMaxTokens,
+    scope: "now",
+  },
+  {
+    key: "compactionAcceptance",
+    group: "context",
+    type: "enum",
+    values: [
+      { label: "complete", note: "apply a complete nonempty summary; size may increase" },
+      { label: "smaller", note: "apply only when the projected context becomes smaller" },
+      { label: "reduced", note: "require more than 10% summary reduction and a smaller context" },
+    ],
+    note: "when a completed summary replaces older context",
+    builtin: DEFAULT_COMPACTION_SETTINGS.compactionAcceptance,
     scope: "now",
   },
   {
@@ -393,13 +447,14 @@ export const SETTINGS: readonly SettingDef[] = [
     group: "strategy",
     type: "text",
     values: [
+      { label: "auto", note: "20k tokens, capped at one quarter of the window" },
       { label: "tokens 20000" },
       { label: "tokens 50000" },
       { label: "ratio 0.3" },
       { label: "ratio 0.5" },
     ],
     note: "how much recent context compaction keeps verbatim",
-    builtin: undefined,
+    builtin: DEFAULT_COMPACTION_SETTINGS.preservation,
     scope: "now",
   },
   {
@@ -525,8 +580,13 @@ export function parseSetting(def: SettingDef, text: string): unknown {
       if (/^(off|false|no|0)$/i.test(t)) return false;
       throw new Error(`${def.key} takes on or off`);
     case "number": {
-      if (/^(none|unset|-)$/i.test(t)) return undefined;
       const n = Number(t);
+      if (def.key === "compactionRatio") {
+        if (!t || !Number.isFinite(n) || n < 0 || n >= 1)
+          throw new Error("compactionRatio takes 0 (off) or a fraction between 0 and 1");
+        return n;
+      }
+      if (/^(none|unset|-)$/i.test(t)) return undefined;
       if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n))
         throw new Error(`${def.key} takes a whole number`);
       return n;

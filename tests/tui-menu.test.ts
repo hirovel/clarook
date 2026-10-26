@@ -265,7 +265,7 @@ describe("命令选单", () => {
     expect(bare.doc()).toContain("switching sessions is not available here");
     bare.app.stop();
     app.stop();
-    const dir = mkdtempSync(join(tmpdir(), "clari-session-search-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-session-search-"));
     const narrow = new VirtualTerminal(60, 18);
     const restored: SessionTarget[] = [];
     const older = join(dir, "00-old session.jsonl");

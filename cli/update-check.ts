@@ -2,15 +2,15 @@
 import { readFileSync } from "node:fs";
 import { gt, prerelease, valid } from "semver";
 
-const VERSION_URL = "https://registry.npmjs.org/@hirovel%2Fclari/latest";
-export const UPDATE_COMMAND = "npm install -g @hirovel/clari@latest";
+const VERSION_URL = "https://registry.npmjs.org/clarook/latest";
+export const UPDATE_COMMAND = "npm install -g clarook@latest";
 
 export function installedVersion(): string | undefined {
   // 源码运行与 dist/cli 安装运行分别读取同一份包元数据。
   for (const path of ["../package.json", "../../package.json"]) {
     try {
       const pkg = JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
-      if (pkg.name === "@hirovel/clari" && typeof pkg.version === "string")
+      if (pkg.name === "clarook" && typeof pkg.version === "string")
         return valid(pkg.version) ?? undefined;
     } catch {
       // 更新提示不可阻止缺少元数据的开发环境启动。
@@ -32,7 +32,7 @@ export async function checkForUpdate(
   try {
     const timeout = AbortSignal.timeout(options.timeoutMs ?? 3000);
     const response = await (options.fetchImpl ?? fetch)(VERSION_URL, {
-      headers: { Accept: "application/json", "User-Agent": `clari/${current}` },
+      headers: { Accept: "application/json", "User-Agent": `clarook/${current}` },
       signal: options.signal ? AbortSignal.any([timeout, options.signal]) : timeout,
     });
     if (!response.ok) return undefined;

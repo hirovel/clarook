@@ -26,7 +26,7 @@ import {
   mcpEvent,
   toolAllowed,
 } from "../cli/mcp/bridge.js";
-import type { JsonRpcMessage } from "../cli/mcp/client.js";
+import type { JsonRpcMessage, McpClientOptions } from "../cli/mcp/client.js";
 import { McpClient } from "../cli/mcp/client.js";
 import { expandVars, loadMcpServers, type ResolvedServer } from "../cli/mcp/config.js";
 import { McpConnections } from "../cli/mcp/connections.js";
@@ -120,7 +120,7 @@ describe("stdio · modern", () => {
   it.skipIf(process.platform !== "win32")(
     "关闭 cmd 包装的 MCP 时也停止其服务器进程",
     async () => {
-      const dir = mkdtempSync(join(tmpdir(), "clari-mcp-tree-"));
+      const dir = mkdtempSync(join(tmpdir(), "clarook-mcp-tree-"));
       tempDirs.push(dir);
       const script = join(dir, "server.mjs");
       const wrapper = join(dir, "server.cmd");
@@ -167,7 +167,7 @@ setInterval(() => {}, 1000);
   );
 
   it("server/discover 定时代;分页拼全;命名;echo / boom / proto / image;stderr 进 mcp/log;关闭", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-mcp-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-mcp-"));
     tempDirs.push(dir);
     const log = new EventLog(join(dir, "session.jsonl"));
     recordedLogs.push(log);
@@ -202,7 +202,7 @@ setInterval(() => {}, 1000);
     });
 
     expect(await find(tools, "mcp__fake__echo").execute({ text: "hi" }, ctx)).toBe("echo: hi");
-    const captureDir = mkdtempSync(join(tmpdir(), "clari-mcp-output-"));
+    const captureDir = mkdtempSync(join(tmpdir(), "clarook-mcp-output-"));
     tempDirs.push(captureDir);
     const captureLog = new EventLog(join(captureDir, "session.jsonl"));
     try {
@@ -268,7 +268,7 @@ setInterval(() => {}, 1000);
           ...servers,
           {
             name: "broken",
-            config: { command: "clari-no-such-command-xyz", required: true },
+            config: { command: "clarook-no-such-command-xyz", required: true },
             missing: [],
             source: "test",
           },
@@ -352,7 +352,7 @@ setInterval(() => {}, 1000);
         }),
         {
           name: "gone",
-          config: { command: "clari-no-such-command-xyz" },
+          config: { command: "clarook-no-such-command-xyz" },
           missing: ["TOKEN"],
           source: "test",
         },
@@ -390,7 +390,7 @@ setInterval(() => {}, 1000);
         [
           {
             name: "must",
-            config: { command: "clari-no-such-command-xyz", required: true },
+            config: { command: "clarook-no-such-command-xyz", required: true },
             missing: [],
             source: "t",
           },
@@ -476,6 +476,42 @@ describe("Streamable HTTP · modern", () => {
     });
     expect(JSON.stringify(log.events)).not.toContain("secret-token");
     await bridge.close();
+
+    const client = new McpClient("framing", { url }, { requestTimeoutMs: 500 });
+    try {
+      for (const mode of ["crlf", "open", "invalid"] as const) {
+        let disconnected!: () => void;
+        const closed = new Promise<void>((resolve) => {
+          disconnected = resolve;
+        });
+        intercept = (message, res) => {
+          if (message.method !== "tools/call") return false;
+          res.once("close", disconnected);
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          const notification = JSON.stringify({
+            jsonrpc: "2.0",
+            method: "notifications/progress",
+            params: {},
+          });
+          const result = JSON.stringify({
+            jsonrpc: "2.0",
+            id: message.id,
+            result: { content: [{ type: "text", text: mode }] },
+          });
+          if (mode === "invalid") res.write("data: {broken}\n\n");
+          else if (mode === "crlf") res.end(`data: ${notification}\r\n\r\ndata: ${result}\r\n\r\n`);
+          else res.write(`data: ${notification}\n\ndata: ${result}\n\n`);
+          return true;
+        };
+        const result = client.callTool("echo", { text: mode });
+        if (mode === "invalid") await expect(result).rejects.toThrow(/JSON/);
+        else expect((await result).content).toEqual([{ type: "text", text: mode }]);
+        await closed;
+      }
+    } finally {
+      intercept = undefined;
+      await client.close();
+    }
   });
 
   it("远端执行后超时、取消或断线:结果未知回喂,Esc 停止;释放 HTTP 等待且迟到结果不串会话", async () => {
@@ -582,7 +618,7 @@ describe("Streamable HTTP · modern", () => {
 
 describe("命名、白黑名单、内容转换、审批规则、配置", () => {
   it("一次性模式在未信任项目 MCP 时退出,不启动项目命令", () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-mcp-gate-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-mcp-gate-"));
     tempDirs.push(dir);
     const home = join(dir, "home");
     mkdirSync(home);
@@ -621,9 +657,9 @@ describe("命名、白黑名单、内容转换、审批规则、配置", () => {
         cwd: dir,
         env: {
           ...process.env,
-          CLARI_HOME: home,
-          CLARI_CONFIG: join(home, "config.json"),
-          CLARI_CREDENTIALS: join(home, "missing.json"),
+          CLAROOK_HOME: home,
+          CLAROOK_CONFIG: join(home, "config.json"),
+          CLAROOK_CREDENTIALS: join(home, "missing.json"),
         },
         encoding: "utf8",
         timeout: 10000,
@@ -635,7 +671,7 @@ describe("命名、白黑名单、内容转换、审批规则、配置", () => {
   });
 
   it("项目 MCP 信任绑定目录和文件内容,修改命令后失效", () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-mcp-trust-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-mcp-trust-"));
     tempDirs.push(dir);
     const file = join(dir, ".mcp.json");
     writeFileSync(
@@ -654,8 +690,7 @@ describe("命名、白黑名单、内容转换、审批规则、配置", () => {
     expect(() => trustProjectMcp(first)).toThrow(/changed during review/);
   });
 
-  it("bridgedName 清洗与超长哈希;toolAllowed;contentToText 各类型", () => {
-    expect(bridgedName("my server", "get/issue")).toBe("mcp__my_server__get_issue");
+  it("bridgedName 稳定消歧,注册及刷新不混淆工具;toolAllowed;contentToText 各类型", async () => {
     const long = bridgedName("s", "x".repeat(200));
     expect(long).toHaveLength(128);
     expect(long).toMatch(/_[0-9a-f]{12}$/);
@@ -671,6 +706,90 @@ describe("命名、白黑名单、内容转换、审批规则、配置", () => {
       ]),
     ).toBe(
       "a\n[resource file:///x]\nbody\n[resource link n https://x]\n[image image/png, 3 bytes, not saved]",
+    );
+    const definitions = new Map([
+      ["a.b", ["a.b", "a_b"]],
+      ["a_b", ["a.b", "a_b"]],
+      ["a__b", ["c"]],
+      ["a_", ["b"]],
+      ["a", ["b__c", "_b"]],
+    ]);
+    const callbacks = new Map<string, McpClientOptions>();
+    const tools: Tool[] = [];
+    const log = new EventLog();
+    const bridge = await connectMcpServers(
+      [...definitions.keys()].map((name) => stdioServer(name, [])),
+      {
+        log,
+        tools,
+        createClient: (server, options) => {
+          callbacks.set(server.name, options ?? {});
+          return {
+            async connect() {
+              return { era: "modern", protocolVersion: "2026-07-28" };
+            },
+            async listTools() {
+              return (
+                definitions.get(server.name)?.map((name) => ({
+                  name,
+                  description: `${server.name}/${name}`,
+                  inputSchema: { type: "object" },
+                })) ?? []
+              );
+            },
+            async callTool(name: string) {
+              return { content: [{ type: "text", text: `${server.name}/${name}` }] };
+            },
+            async close() {},
+          } as unknown as McpClient;
+        },
+      },
+    );
+    try {
+      expect(new Set(tools.map((tool) => tool.name)).size).toBe(8);
+      const expectedNames = tools.map((tool) => tool.name).sort();
+      let step = 0;
+      const agent = new Agent({
+        log: new EventLog(),
+        tools,
+        provider: {
+          model: "fake",
+          async complete(messages) {
+            if (step++ === 0)
+              return {
+                text: "",
+                toolCalls: tools.map((tool, i) => ({ id: `call-${i}`, name: tool.name, args: {} })),
+                stopReason: "tool",
+              };
+            expect(
+              messages
+                .filter((message) => message.role === "tool")
+                .map((message) => message.content),
+            ).toEqual(tools.map((tool) => tool.description));
+            return { text: "done", toolCalls: [], stopReason: "end" };
+          },
+        },
+      });
+      await agent.prompt("Use each registered tool.");
+      definitions.set("a.b", ["a_b", "a.b"]);
+      callbacks.get("a.b")?.onNotification?.("notifications/tools/list_changed", {});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(tools.map((tool) => tool.name).sort()).toEqual(expectedNames);
+      expect(await find(tools, bridgedName("a_b", "a_b")).execute({}, ctx)).toBe("a_b/a_b");
+      definitions.set("a.b", ["a_b", "a_b"]);
+      callbacks.get("a.b")?.onNotification?.("notifications/tools/list_changed", {});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(tools.map((tool) => tool.name).sort()).toEqual(expectedNames);
+      expect(
+        mcpEvents(log.events).some(
+          (event) => event.kind === "log" && event.line.includes("duplicate tool name"),
+        ),
+      ).toBe(true);
+    } finally {
+      await bridge.close();
+    }
+    expect(bridgedName("my server", "get/issue")).toMatch(
+      /^mcp__my_server__get_issue_[0-9a-f]{12}$/,
     );
   });
 
@@ -689,7 +808,7 @@ describe("命名、白黑名单、内容转换、审批规则、配置", () => {
   });
 
   it("配置合并:.mcp.json 与 config.json 同名以后者为准;${VAR} 展开与缺失记录;enabled:false 跳过", () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-mcpcfg-"));
+    const dir = mkdtempSync(join(tmpdir(), "clarook-mcpcfg-"));
     tempDirs.push(dir);
     writeFileSync(
       join(dir, ".mcp.json"),

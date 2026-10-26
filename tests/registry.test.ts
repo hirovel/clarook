@@ -221,7 +221,7 @@ describe("能力数据的顺序", () => {
       }
     }
     // 没有缓存文件时同步取到的就是快照
-    expect(loadRegistrySync(join(tmpdir(), "clari-no-such-cache.json"))).toBe(SNAPSHOT);
+    expect(loadRegistrySync(join(tmpdir(), "clarook-no-such-cache.json"))).toBe(SNAPSHOT);
   });
 });
 
@@ -259,7 +259,7 @@ describe("推导", () => {
 
 describe("缓存", () => {
   it("新鲜缓存直接用;过期后联网并重写;联网失败退回旧缓存;没有缓存且失败返回 undefined", async () => {
-    const dir = testDirectory("clari-reg-");
+    const dir = testDirectory("clarook-reg-");
     const path = join(dir, "models.dev.json");
     let calls = 0;
     const fetchImpl = (async () => {
@@ -289,7 +289,7 @@ describe("缓存", () => {
 
 describe("写进配置", () => {
   it("addModel 追加或替换同名模型并落盘;登录对话框里服务器多出来的模型可选,选中先写配置再切换", async () => {
-    const dir = testDirectory("clari-cfg-");
+    const dir = testDirectory("clarook-cfg-");
     const path = join(dir, "config.json");
     const config: KernelConfig = {
       default: "deepseek/deepseek-v4-pro",

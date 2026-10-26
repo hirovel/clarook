@@ -76,8 +76,10 @@ function globToRegExp(pattern: string): RegExp {
     if (ch === "*") {
       if (pattern[i + 1] === "*") {
         i++;
-        if (pattern[i + 1] === "/") i++;
-        re += "(?:.*/)?";
+        if (pattern[i + 1] === "/") {
+          i++;
+          re += "(?:.*/)?";
+        } else re += ".*";
       } else re += "[^/]*";
     } else if (ch === "?") re += "[^/]";
     else if (/[.+^${}()|[\]\\]/.test(ch)) re += `\\${ch}`;

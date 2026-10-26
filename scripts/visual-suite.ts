@@ -101,7 +101,7 @@ const read: Tool = {
 const bigRead: Tool = {
   ...readTool,
   async execute() {
-    return Array.from({ length: 300 }, (_, i) => `${i + 1}\t// line ${i + 1} of a long README about the clari kernel and its event log`).join("\n");
+    return Array.from({ length: 300 }, (_, i) => `${i + 1}\t// line ${i + 1} of a long README about the clarook kernel and its event log`).join("\n");
   },
 };
 /** 等打断的工具:子在它里面被 Esc 打断,得到 partial。 */
@@ -416,7 +416,7 @@ scene = "7";
       ],
       verifyKey: async () => ["deepseek-v4-pro", "deepseek-v4-lite"],
     },
-    unavailable: "no API key for provider deepseek. Run /login in the TUI, set env var DEEPSEEK_API_KEY, or add it to ~/.clari/credentials.json",
+    unavailable: "no API key for provider deepseek. Run /login in the TUI, set env var DEEPSEEK_API_KEY, or add it to ~/.clarook/credentials.json",
     onExit: () => {},
   });
   const shots: string[] = [];
@@ -675,7 +675,7 @@ for (const [width, height] of [[60, 24], [120, 36]] as const) {
 // 新建、历史补全与失败恢复均走真实会话控制器,不手绘未来状态。
 for (const [width, height] of [[60, 24], [120, 36]] as const) {
   scene = `session lifecycle ${width}`;
-  const dir = mkdtempSync(join(tmpdir(), "clari-session-visual-"));
+  const dir = mkdtempSync(join(tmpdir(), "clarook-session-visual-"));
   const config: KernelConfig = { default: "demo/local-fake", providers: { demo: { protocol: "openai", baseUrl: "http://unused", models: ["local-fake"] } },
     sessionsDir: dir, defaults: { prompt: { sections: [] }, execution: "sequential" } };
   let hold = false;
@@ -886,7 +886,7 @@ for (const [width, height] of [[60, 24], [120, 36]] as const) {
 }
 
 const index = [
-  "<!doctype html><meta charset=utf-8><title>clari visual suite</title><body style='font:14px system-ui;padding:20px'><h1>clari visual suite</h1><ol>",
+  "<!doctype html><meta charset=utf-8><title>clarook visual suite</title><body style='font:14px system-ui;padding:20px'><h1>clarook visual suite</h1><ol>",
   ...files.map((f) => `<li><a href='${f.name}.html'>${f.title}</a> (${f.lines.length} lines)</li>`),
   "</ol>",
 ].join("\n");

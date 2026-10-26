@@ -41,6 +41,10 @@ describe("开关登记表", () => {
       showCostEstimate: true,
       results: { bash: "all" },
       compactionReserve: 12345,
+      compactionRatio: 0.8,
+      compactionPrompt: "minimal",
+      compactionMaxTokens: 0,
+      compactionAcceptance: "smaller",
       "facts.repeats": false,
       "facts.slow": false,
       "facts.date": false,
@@ -52,7 +56,7 @@ describe("开关登记表", () => {
       "prompt.skills.mode": "auto",
       "prompt.skills.include": ["review"],
       "prompt.skills.load": "tool",
-      "prompt.skills.sources": { "user-clari": "off", "./custom skills": "on" },
+      "prompt.skills.sources": { "user-clarook": "off", "./custom skills": "on" },
 
       "tools.disable": ["bash"],
       mcpReconnect: ["browser"],
@@ -85,6 +89,10 @@ describe("开关登记表", () => {
       showCostEstimate: args.showCostEstimate,
       results: args.results,
       compactionReserve: args.compactionReserve,
+      compactionRatio: args.compactionRatio,
+      compactionPrompt: args.compactionPrompt,
+      compactionMaxTokens: args.compactionMaxTokens,
+      compactionAcceptance: args.compactionAcceptance,
       "facts.repeats": args.facts?.repeats,
       "facts.slow": args.facts?.slow,
       "facts.date": args.facts?.date,
@@ -125,6 +133,36 @@ describe("开关登记表", () => {
         .checkUpdates,
     ).toBe(false);
     expect(parseCommonArgs(["--check-updates"]).checkUpdates).toBe(true);
+    expect(
+      applyPreset(parseCommonArgs(["--compaction-ratio", "0"]), config({ compactionRatio: 0.8 }))
+        .compactionRatio,
+    ).toBe(0);
+    expect(parseCommonArgs(["--compaction-ratio", "0.65"]).compactionRatio).toBe(0.65);
+    expect(
+      applyPreset(
+        parseCommonArgs([
+          "--compaction-prompt",
+          "codex",
+          "--compaction-max-tokens",
+          "0",
+          "--compaction-acceptance",
+          "complete",
+        ]),
+        config({
+          compactionPrompt: "zcode",
+          compactionMaxTokens: 20000,
+          compactionAcceptance: "reduced",
+        }),
+      ),
+    ).toMatchObject({
+      compactionPrompt: "codex",
+      compactionMaxTokens: 0,
+      compactionAcceptance: "complete",
+    });
+    for (const value of [-0.1, 1, Number.NaN])
+      expect(() => applyPreset(parseCommonArgs([]), config({ compactionRatio: value }))).toThrow(
+        "compactionRatio",
+      );
   });
 
   it("按路径读写:写 undefined 删项,空对象一并删;不改原对象", () => {
@@ -142,6 +180,9 @@ describe("开关登记表", () => {
     const def = (k: string) => settingDef(k) as NonNullable<ReturnType<typeof settingDef>>;
     expect(parseSetting(def("fold"), "off")).toBe(false);
     expect(parseSetting(def("foldSteps"), "12")).toBe(12);
+    expect(parseSetting(def("compactionRatio"), "0.8")).toBe(0.8);
+    for (const bad of ["-0.1", "1", "many", "none", ""])
+      expect(() => parseSetting(def("compactionRatio"), bad)).toThrow("compactionRatio");
     expect(parseSetting(def("maxSteps"), "none")).toBeUndefined();
     expect(parseSetting(def("notify"), "always")).toBe("always");
     expect(parseSetting(def("results"), "read head bash all")).toEqual({
@@ -151,8 +192,8 @@ describe("开关登记表", () => {
     expect(parseSetting(def("prompt.sections"), "role,env")).toEqual(["role", "env"]);
     expect(parseSetting(def("tools.disable"), "bash fetch")).toEqual(["bash", "fetch"]);
     expect(
-      parseSetting(def("prompt.skills.sources"), '{"./custom  skills":"on","user-clari":"off"}'),
-    ).toEqual({ "./custom  skills": "on", "user-clari": "off" });
+      parseSetting(def("prompt.skills.sources"), '{"./custom  skills":"on","user-clarook":"off"}'),
+    ).toEqual({ "./custom  skills": "on", "user-clarook": "off" });
     for (const bad of ["[]", "null", '{"":"on"}', '{"./skills":true}'])
       expect(() => parseSetting(def("prompt.skills.sources"), bad)).toThrow();
     expect(() => parseSetting(def("foldSteps"), "many")).toThrow("whole number");

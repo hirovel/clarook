@@ -9,7 +9,7 @@ export const PLAN_STATUSES = ["pending", "in_progress", "done", "cancelled"] as 
 export type PlanStatus = (typeof PLAN_STATUSES)[number];
 export type PlanItem = { id: string; text: string; status: PlanStatus };
 
-/** 复述的用户消息以它开头;stepsSincePlan 靠它认出复述。 */
+/** 复述正文的可读标记;计数通过 decision 事件识别,不猜测用户文本。 */
 export const PLAN_MARK = "[plan]";
 /** 连续这么多步没碰计划且还有未完成项就复述一次;配置 planReminder,0 = 从不。 */
 export const DEFAULT_PLAN_REMINDER = 0;
@@ -100,7 +100,7 @@ export function stepsSincePlan(events: readonly AgentEvent[]): number {
     if (e.type === "assistant/message") {
       steps += 1;
       if (e.toolCalls.some((tc) => tc.name === "plan")) steps = 0;
-    } else if (e.type === "user/message" && e.text.startsWith(PLAN_MARK)) steps = 0;
+    } else if (e.type === "decision" && e.slot === "plan") steps = 0;
   }
   return steps;
 }

@@ -1,0 +1,18 @@
+{
+  "default": "deepseek/deepseek-flash",
+  "providers": {
+    "deepseek": {
+      "protocol": "openai",
+      "baseUrl": "https://api.deepseek.com",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "reasoningField": "reasoning_content",
+      "models": ["deepseek-flash"]
+    }
+  },
+  "defaults": {
+    "prompt": {
+      "sections": ["role", "env", "append"],
+      "skills": { "mode": "manual", "sources": {} }
+    }
+  }
+}

@@ -1,20 +1,30 @@
 // 验证用户能完成的调整流程:作用域、真实请求、恢复、错误、窄屏与长列表。
 
 import { randomUUID } from "node:crypto";
+import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { SessionInputs } from "../cli/session-inputs.js";
+import { restoreSessionSetup } from "../cli/session-setup.js";
 import { renderStatusLayout } from "../cli/status-layout.js";
 import { createTuiApp, type TuiAppDeps } from "../cli/tui-app.js";
+import {
+  COMPACTION_REFERENCES,
+  DEFAULT_COMPACTION_SETTINGS,
+  summaryPrompt,
+} from "../src/compaction-presets.js";
 import type { Preset } from "../src/config.js";
+import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
+import type { Message } from "../src/messages.js";
 import { planTool } from "../src/plan.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { setSetting } from "../src/settings.js";
 import { STATUS_WIDGETS } from "../src/status-bar.js";
 import { defineTool } from "../src/tools.js";
+import { testDirectory } from "./helpers/setup.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
 const tick = () => new Promise((r) => setTimeout(r, 5));
@@ -67,6 +77,12 @@ function boot(over: Partial<TuiAppDeps> = {}, size = [120, 40]) {
         saved.push([key, value]);
         defaults = setSetting(defaults, key, value);
       },
+      saveSettings: (values) => {
+        for (const [key, value] of Object.entries(values)) {
+          saved.push([key, value]);
+          defaults = setSetting(defaults, key, value);
+        }
+      },
       listPresets: () => presets,
       savePreset: (name, values) => {
         presets.push({ name, values });
@@ -84,6 +100,150 @@ function boot(over: Partial<TuiAppDeps> = {}, size = [120, 40]) {
 }
 
 describe("Agent setup", () => {
+  it("参考组合只修改压缩设置，预览零请求，单项调整控制实际摘要并保存恢复", async () => {
+    const calls: { messages: Message[]; maxTokens?: number }[] = [];
+    const provider: Provider = {
+      model: "m",
+      async complete(messages, _tools, opts) {
+        calls.push({
+          messages: structuredClone(messages),
+          ...(opts?.maxTokens === undefined ? {} : { maxTokens: opts.maxTokens }),
+        });
+        return { text: "Summary ready.", toolCalls: [], stopReason: "end" };
+      },
+    };
+    const { app, menu, defaults, log } = boot({ provider });
+    try {
+      app.setDraft("Keep my working draft.");
+      await app.command("/settings compaction");
+      app.dialogInput("\x1b[A");
+      app.dialogInput(ENTER);
+      expect(menu()).toContain("Pi reference");
+      expect(calls).toEqual([]);
+      app.dialogInput(ENTER);
+      await tick();
+      for (const [key, value] of Object.entries(DEFAULT_COMPACTION_SETTINGS))
+        expect(app.setup().values[key as keyof Preset]).toEqual(value);
+      expect(app.agent.provider.model).toBe("m");
+      expect(app.setup().tools).toEqual(["echo", "plan"]);
+      expect(defaults()).toEqual({ foldSteps: 5 });
+      expect(app.draft()).toBe("Keep my working draft.");
+      app.dialogInput(TAB);
+      app.dialogInput(ENTER);
+      app.dialogInput(DOWN);
+      app.dialogInput(ENTER);
+      await tick();
+      const codex = COMPACTION_REFERENCES.find((reference) => reference.id === "codex");
+      if (!codex) throw new Error("Codex reference is missing");
+      for (const [key, value] of Object.entries(codex.values))
+        expect(defaults()[key as keyof Preset]).toEqual(value);
+      expect(defaults().foldSteps).toBe(5);
+      expect(app.setup().values.compactionPrompt).toBe("pi");
+      expect(calls).toEqual([]);
+      await app.command("/settings compactionPrompt minimal");
+      await app.command("/settings compactionMaxTokens 222");
+      await app.command("/set preservation tokens 1");
+      expect(app.setup().values.compactionPrompt).toBe("minimal");
+      expect(restoreSessionSetup(log.events, {}).setup.values.compactionPrompt).toBe("minimal");
+      await app.command("/settings compaction");
+      app.dialogInput("\x1b[A");
+      expect(menu()).toContain("Current: Custom");
+      app.dialogInput(ESC);
+      app.dialogInput(ESC);
+      await app.submit("Keep this first request.");
+      await app.submit("Record this subsequent request and verified work.");
+      await app.command("/compact");
+      expect(calls).toHaveLength(3);
+      expect(calls.at(-1)?.maxTokens).toBe(222);
+      expect(
+        calls
+          .at(-1)
+          ?.messages.some((message) => message.content.includes(summaryPrompt("minimal"))),
+      ).toBe(true);
+    } finally {
+      app.stop();
+    }
+  });
+
+  it("运行中不能部分切换参考组合，保存默认值不影响当前任务", async () => {
+    let finish: (() => void) | undefined;
+    const waiting = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const { app, menu, defaults, log } = boot({
+      provider: {
+        model: "m",
+        async complete() {
+          await waiting;
+          return { text: "Finished.", toolCalls: [], stopReason: "end" };
+        },
+      },
+    });
+    const run = app.submit("Work in progress.");
+    try {
+      await tick();
+      app.setDraft("Unsent next request.");
+      const before = app.setup().values;
+      const changes = log.events.filter((event) => event.type === "ext/event").length;
+      await app.command("/settings compaction");
+      app.dialogInput("\x1b[A");
+      app.dialogInput(ENTER);
+      app.dialogInput(ENTER);
+      await tick();
+      expect(menu()).toContain("cannot change mid-turn");
+      expect(app.setup().values).toEqual(before);
+      expect(log.events.filter((event) => event.type === "ext/event")).toHaveLength(changes);
+      expect(app.draft()).toBe("Unsent next request.");
+      app.dialogInput(ESC);
+      app.dialogInput(TAB);
+      app.dialogInput(ENTER);
+      app.dialogInput(ENTER);
+      await tick();
+      expect(defaults().compactionPrompt).toBe("pi");
+      expect(app.setup().values).toEqual(before);
+    } finally {
+      finish?.();
+      await run;
+      app.stop();
+    }
+  });
+
+  it("窄屏参考组合模板可完整分页，阅读返回保留候选和草稿", async () => {
+    const { app, menu, saved, requests, term } = boot({}, [60, 24]);
+    try {
+      app.setDraft("Draft stays outside setup.");
+      await app.command("/settings compaction");
+      app.dialogInput("\x1b[A");
+      app.dialogInput(ENTER);
+      app.dialogInput("\x1b[C");
+      app.dialogInput(ENTER);
+      const pages: string[] = [];
+      for (let page = 0; page < 25; page++) {
+        pages.push(menu());
+        expect(app.dialogLines().length).toBeLessThanOrEqual(22);
+        expect(app.dialogLines().every((line) => stripAnsi(line).length <= 60)).toBe(true);
+        app.dialogInput("\x1b[6~");
+      }
+      const text = pages.join("\n").replace(/\s+/g, " ");
+      expect(text).toContain("Prompt sent to summarizer");
+      expect(text).toContain("Summary format (model instructions)");
+      expect(text).toContain("## Critical Context");
+      expect(text).toContain(COMPACTION_REFERENCES[0]?.differences[0]);
+      app.dialogInput(ESC);
+      expect(menu()).toMatch(/›\s+Pi reference/);
+      app.tui.renderNow(true);
+      expect((await term.screen()).slice(-24).join("\n")).toContain("Esc back");
+      app.dialogInput(ESC);
+      app.dialogInput(ESC);
+      app.dialogInput(ESC);
+      expect(app.draft()).toBe("Draft stays outside setup.");
+      expect(saved).toEqual([]);
+      expect(requests).toEqual([]);
+    } finally {
+      app.stop();
+    }
+  });
+
   it("窄状态栏保留全部已选读数，隐藏读数仍保留保存故障和恢复入口", async () => {
     const lines = renderStatusLayout(
       "rail",
@@ -162,7 +322,26 @@ describe("Agent setup", () => {
   it("同一模型入口区分当前切换与默认值保存,保存默认值不会创建供应商", async () => {
     let chosen = 0;
     let defaults: Preset = {};
+    const cuts: number[] = [];
+    const history: AgentEvent[] = [
+      { type: "session/start", at: "", model: "m", system: "" },
+      { type: "user/message", at: "", text: "x".repeat(80000) },
+      {
+        type: "assistant/message",
+        at: "",
+        text: "x".repeat(68000),
+        toolCalls: [],
+        stopReason: "end",
+      },
+    ];
     const { app, menu, log } = boot({
+      compaction: {
+        window: 100000,
+        strategy: async (input) => {
+          cuts.push(input.preservation?.(history) ?? -1);
+          return null;
+        },
+      },
       settings: {
         listModels: () => ["p/m", "p/other"],
         defaultModel: () => "p/m",
@@ -188,6 +367,9 @@ describe("Agent setup", () => {
         },
       },
     });
+    await app.command("/settings preservation auto");
+    await app.command("/compact");
+    expect(cuts).toEqual([2]);
     await app.command("/settings model");
     app.dialogInput(ENTER);
     app.dialogInput("3");
@@ -204,6 +386,8 @@ describe("Agent setup", () => {
     expect(chosen).toBe(1);
     expect(defaults.model).toBe("p/m");
     expect(menu()).toContain("this session unchanged");
+    await app.command("/compact");
+    expect(cuts).toEqual([2, 3]);
     app.stop();
   });
   it("按组成导航,搜索后可以修改当前会话,不偷偷保存", async () => {
@@ -249,7 +433,7 @@ describe("Agent setup", () => {
   });
 
   it("保存默认值不改当前会话;重新打开仍区分实际值与保存值", async () => {
-    const { app, menu, saved } = boot();
+    const { app, menu, saved, log, defaults } = boot();
     await app.command("/settings foldSteps");
     expect(menu()).toContain("matches config");
     app.dialogInput(TAB);
@@ -275,8 +459,23 @@ describe("Agent setup", () => {
     app.dialogInput(ENTER);
     await tick();
     expect(saved.at(-1)?.[0]).toBe("prompt.skills.sources");
-    expect((saved.at(-1)?.[1] as Record<string, string> | undefined)?.["user-clari"]).toBe("off");
-    expect(app.setup().values.prompt?.skills?.sources?.["user-clari"]).toBe("on");
+    expect((saved.at(-1)?.[1] as Record<string, string> | undefined)?.["user-clarook"]).toBe("off");
+    expect(app.setup().values.prompt?.skills?.sources?.["user-clarook"]).toBe("on");
+    await app.command("/settings compactionRatio");
+    app.dialogInput(TAB);
+    app.dialogInput(ENTER);
+    app.dialogInput("2");
+    app.dialogInput(ENTER);
+    await tick();
+    expect(defaults().compactionRatio).toBe(0.8);
+    expect(app.setup().values.compactionRatio).toBe(0);
+    app.dialogInput(TAB);
+    app.dialogInput(ENTER);
+    app.dialogInput("2");
+    app.dialogInput(ENTER);
+    await tick();
+    expect(app.setup().values.compactionRatio).toBe(0.8);
+    expect(restoreSessionSetup(log.events, {}).setup.values.compactionRatio).toBe(0.8);
     app.stop();
   });
 
@@ -515,7 +714,7 @@ describe("Agent setup", () => {
   });
 
   it("打字入口保留应用并保存语义,错误与恢复都明确", async () => {
-    const { app, doc, saved, log } = boot();
+    const { app, doc, saved, log, defaults, menu } = boot();
     await app.command("/settings foldLines 9");
     expect(saved.at(-1)).toEqual(["foldLines", 9]);
     await app.command("/settings screen main");
@@ -524,7 +723,7 @@ describe("Agent setup", () => {
     expect(saved.at(-1)).toEqual(["checkUpdates", false]);
     app.setDraft("Keep this unsent draft.");
     await app.command("/help update");
-    expect(doc()).toContain("npm install -g @hirovel/clari@latest");
+    expect(doc()).toContain("npm install -g clarook@latest");
     expect(app.draft()).toBe("Keep this unsent draft.");
     await app.command("/settings nope 1");
     expect(doc()).toContain("unknown setting nope");
@@ -533,6 +732,7 @@ describe("Agent setup", () => {
     const eventsBeforeFailure = log.events.length;
     await app.command("/settings model p/unavailable");
     await app.command("/settings compaction ./missing-setting-strategy.mjs");
+    await app.command("/settings compactionPrompt constructor");
     expect(saved).toEqual(savedBeforeFailure);
     expect(app.agent.provider.model).toBe("m");
     expect(app.setup().values.compaction).toBe("llm");
@@ -545,6 +745,46 @@ describe("Agent setup", () => {
     expect(saved.at(-1)).toEqual(["execution", "parallel"]);
     await app.command('/settings prompt.skills.sources {"./custom  skills":"on"}');
     expect(saved.at(-1)).toEqual(["prompt.skills.sources", { "./custom  skills": "on" }]);
+    await app.command("/set compaction clear");
+    const beforeInvalidPrompt = [...saved];
+    await app.command("/settings compactionPrompt invalid-template");
+    expect(saved).toEqual(beforeInvalidPrompt);
+    expect(app.setup().values.compactionPrompt).toBe("pi");
+    expect(
+      restoreSessionSetup(log.events, DEFAULT_COMPACTION_SETTINGS).setup.values.compactionPrompt,
+    ).toBe("pi");
+    await app.command("/set compaction llm");
+    expect(app.setup().values.compaction).toBe("llm");
+
+    await app.command("/settings compaction");
+    app.dialogInput(TAB);
+    app.dialogInput(ENTER);
+    app.dialogInput("\x1b[C");
+    app.dialogInput(ENTER);
+    app.dialogInput("\x15");
+    app.dialogInput("not-a-strategy");
+    app.dialogInput(ENTER);
+    await tick();
+    expect(menu()).toContain("unknown compaction strategy");
+    expect(saved).toEqual(beforeInvalidPrompt);
+    const strategyPath = join(testDirectory("setup-strategy-"), "deferred.mjs");
+    writeFileSync(strategyPath, 'throw new Error("must not execute during save");');
+    app.dialogInput("\x15");
+    app.dialogInput(strategyPath);
+    app.dialogInput(ENTER);
+    await tick();
+    expect(defaults().compaction).toBe(strategyPath);
+    expect(app.setup().values.compaction).toBe("llm");
+    expect(menu()).toContain("strategy loads at startup");
+
+    defaults().compactionPrompt = "constructor";
+    await app.command("/settings compactionPrompt");
+    app.dialogInput(TAB);
+    app.dialogInput(ENTER);
+    expect(menu()).toContain("constructor");
+    app.dialogInput(ENTER);
+    await tick();
+    expect(menu()).toContain("Unknown summary template");
     app.stop();
   });
 });

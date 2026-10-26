@@ -47,6 +47,8 @@ export type ModelSettings = {
   settingLayers?(): SettingLayers;
   /** 写一个开关进配置 defaults 并落盘;undefined 删掉那一项。 */
   saveSetting?(key: string, value: unknown): void;
+  /** 一次保存组合中的多个设置，避免部分写入。 */
+  saveSettings?(values: Partial<Preset>): void;
   /** 只包含方案,不暴露供应商连接或凭据。 */
   listPresets?(): { name: string; values: Preset }[];
   savePreset?(name: string, values: Preset): void;

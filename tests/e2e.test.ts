@@ -206,9 +206,7 @@ describe("端到端(假服务器)", () => {
     // 屏幕视角
     expect(doc).toContain("· retry 1: 429");
     expect(doc).toContain("✓ big");
-    expect(doc).toContain(
-      "≈ compacted (llmSummarize(structuredFull, replay)): summary covers events",
-    );
+    expect(doc).toContain("≈ compacted (llmSummarize(pi, replay)): summary covers events");
     expect(doc).toContain("完成:文件已看过");
     // 直印:失败的请求一行 ✗,溢出重发一行 ≈;用量不进正文(命中 67% 不低,不出声)
     expect(doc).toContain("✗ request #2 failed  overflow · HTTP 400");

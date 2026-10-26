@@ -92,7 +92,7 @@ export function exitReview(ctx: TuiContext, state: ExitState): Component {
         ctx.deps.inputs?.saving
           ? "Input saving on · drafts and queued messages will be saved."
           : "Input saving off · unsaved inputs will be lost.",
-        "Force exit ends clari. External work may continue. Missing results stay unknown; unrecorded output may be lost.",
+        "Force exit ends clarook. External work may continue. Missing results stay unknown; unrecorded output may be lost.",
         ...(state.failure
           ? ["", "Failure details", state.failure, "", `Session log: ${ctx.model.info.sessionFile}`]
           : []),

@@ -1,22 +1,24 @@
 {
-  "name": "@hirovel/clari",
-  "version": "0.1.3",
+  "name": "clarook",
+  "version": "0.1.4",
   "description": "A terminal coding agent with inspectable requests and configurable tools and context.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hirovel/clari.git"
+    "url": "git+https://github.com/hirovel/clarook.git"
   },
-  "homepage": "https://github.com/hirovel/clari#readme",
+  "homepage": "https://github.com/hirovel/clarook#readme",
   "type": "module",
   "bin": {
-    "clari": "bin/clari.js"
+    "clarook": "bin/clarook.js"
   },
   "files": [
     "bin",
     "dist",
-    "assets/clari-setup.png",
+    "assets/clarook-setup.png",
     "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "licenses",
     "examples/config.relay.json",
     "README.md",
     "README.zh-CN.md",
@@ -38,7 +40,8 @@
     "demo": "node scripts/demo.mjs",
     "coverage": "vitest run --coverage --coverage.include=src/** --coverage.include=cli/** --coverage.reporter=text-summary --coverage.reporter=html",
     "checkup": "tsx scripts/checkup.ts",
-    "rehearsal": "tsx scripts/rehearsal.ts"
+    "rehearsal": "tsx scripts/rehearsal.ts",
+    "evaluate": "tsx scripts/evaluate.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",
