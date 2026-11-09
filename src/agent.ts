@@ -175,7 +175,6 @@ export class Agent {
     this.opts.slots = slots;
   }
 
-  /** 会话中切换模型:下一次请求起生效;记一条只给人看的事件,审计时知道哪段由谁生成。 */
   /** 下一请求读取工具集;进行中的请求保留它发出时的工具版本。 */
   setTools(tools: AgentOptions["tools"]): void {
     this.opts.tools = tools;
@@ -195,7 +194,9 @@ export class Agent {
     return this.opts.planReminder;
   }
 
+  /** 空闲时切换模型并记录事实;运行中的 turn 保留其启动时捕获的模型。 */
   setProvider(provider: Provider): void {
+    if (this.running) throw new Error("cannot switch models while running; press Esc first");
     this.opts.provider = provider;
     this.opts.log.append({ type: "session/model", at: now(), model: provider.model });
   }

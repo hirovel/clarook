@@ -6,7 +6,6 @@
 //   会话切换  通过可见操作切换主会话与子 agent 会话,以上视图作用在选中的数组上
 // 行数爆炸由视口与按键控制,不靠删内容:任何一字节都能翻到。
 // 本文件只剩覆盖层组件 RequestInspector:模式、选中、滚动、按键、行缓存;各视图的行由上面的模块算。
-import { isDeepStrictEqual } from "node:util";
 import {
   type Component,
   Key,
@@ -15,14 +14,15 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { estimateTokens, toolDefinitionTokens } from "../src/context.js";
+import { estimateTokens } from "../src/context.js";
 import { contextView } from "../src/context-edit.js";
 import type { AgentEvent } from "../src/events.js";
 import { type Message, requestMessages } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
 import { systemAt, systemText } from "../src/system-prompt.js";
-import { toolDefinitionsForRequest } from "../src/tool-definitions.js";
+import { modelToolDefinitions, toolDefinitionsForRequest } from "../src/tool-definitions.js";
 import { BodyBrowser } from "./body-browser.js";
+import { compareInputs, inputComparisonLines, requestSnapshot } from "./input-comparison.js";
 import { inputBlocks, receivedBlocks, recordingErrorBlock } from "./inspector-bodies.js";
 import {
   COMPACTION_SECTIONS,
@@ -265,23 +265,36 @@ export class RequestInspector implements Component {
   workbench(): Workbench {
     const events = this.events();
     const main = events === this.deps.events();
-    const tools = main ? this.deps.tools() : [];
+    const tools = main ? this.deps.tools() : undefined;
     const lastSent = main ? this.deps.lastSent?.() : undefined;
-    // 工具行只依赖名称、数量和估算量;同名声明刷新也必须更新屏上的数字。
-    const key = `${this.sessionIndex}:${tools.map((t) => t.name).join(",")}:${toolDefinitionTokens(tools)}:${lastSent?.length ?? -1}`;
+    const records = this.records();
+    const prior =
+      records[lastIndexWhere(records, (record) => record.request.reason !== "compaction")];
+    const saved = prior
+      ? this.sessions()[this.sessionIndex]?.recordingFor?.(prior.index, "input")
+      : undefined;
+    // 同名同估算量的定义仍可能变化;既有阅读缓存必须包含完整声明与比较基线。
+    const key = JSON.stringify([
+      this.sessionIndex,
+      main ? this.deps.currentProvider?.()?.model : undefined,
+      tools && modelToolDefinitions(tools),
+      prior?.index,
+      Boolean(saved?.input),
+      lastSent?.length,
+    ]);
     if (
       this.wbCache?.events !== events ||
       this.wbCache.len !== events.length ||
       this.wbCache.key !== key
     ) {
+      const previous = prior ? requestSnapshot(events, prior.index, saved?.input) : undefined;
       const wb = workbench({
         events,
         provider: main ? this.deps.currentProvider?.() : undefined,
         tools,
         lastSent,
+        previous,
       });
-      // 子任务下一次派发会重新组装工具;不能把主会话工具冒充子配置。
-      if (!main) wb.rows = wb.rows.filter((row) => row.kind !== "tools");
       this.wbCache = { events, len: events.length, key, wb };
     }
     return this.wbCache.wb;
@@ -415,18 +428,21 @@ export class RequestInspector implements Component {
         ? (priorInput?.messages ?? requestMessages(events, prior.index))
         : undefined;
     if (this.section === 3) {
-      const definitions = saved?.input?.tools ?? toolDefinitionsForRequest(events, rec.index);
-      const priorDefinitions = prior
-        ? (priorInput?.tools ?? toolDefinitionsForRequest(events, prior.index))
-        : undefined;
-      const toolChange = !prior
-        ? "first request"
-        : definitions && priorDefinitions
-          ? isDeepStrictEqual(definitions, priorDefinitions)
-            ? "unchanged"
-            : "changed"
-          : "comparison unavailable (definitions not recorded)";
-      this.bodyEvidence += `\nTool definitions: ${toolChange}`;
+      const reader = this.sessions()[this.sessionIndex]?.recordingFor;
+      const wire = reader?.(rec.index, "wire");
+      const priorWire = prior ? reader?.(prior.index, "wire") : undefined;
+      const captured = (recording: RequestRecording | undefined) =>
+        !recording?.error && recording?.bodies.length
+          ? {
+              origin: "captured" as const,
+              body: recording.bodies[recording.bodies.length - 1] as string,
+            }
+          : undefined;
+      const comparison = compareInputs(
+        prior ? requestSnapshot(events, prior.index, priorInput, captured(priorWire)) : undefined,
+        requestSnapshot(events, rec.index, saved?.input, captured(wire)),
+      );
+      this.bodyEvidence += `\n${inputComparisonLines(comparison).join("\n")}`;
     }
     const blocks =
       this.section === 3
@@ -1197,10 +1213,42 @@ export class RequestInspector implements Component {
           ? `${action} · Esc close`
           : `${action} · Esc close · ↑↓ select · PgUp/PgDn page · Tab requests${this.sessions().length > 1 ? " · ←/→ session" : ""}`,
       );
+      const comparison = wb.comparison;
+      const difference = comparison?.text.first;
+      // 默认工作台只报变化;完整 same/unknown 与 HTTP 证据在请求详情,不挤占消息列表。
+      const changes = comparison
+        ? [
+            ...(comparison.document.status === "changed"
+              ? [`Document: ${comparison.document.sections.join(", ") || "structure"} changed`]
+              : []),
+            ...(difference
+              ? [
+                  `Text: ${difference.sameChars}/${difference.oldChars} chars unchanged${difference.section ? ` · ${difference.section.name} char ${difference.section.char}` : ` · message ${difference.message + 1}`}`,
+                ]
+              : []),
+            ...(comparison.tools === "changed" || comparison.model === "changed"
+              ? [
+                  [
+                    ...(comparison.tools === "changed" ? ["Tool definitions changed"] : []),
+                    ...(comparison.model === "changed" ? ["Model changed"] : []),
+                  ].join(" · "),
+                ]
+              : []),
+            ...(comparison.providerState === "changed"
+              ? ["Replay state changed · wire impact is provider-dependent"]
+              : []),
+          ]
+        : [];
       // 至少保留一个列表行、一个预览行和分隔线;短窗口先省略可在请求详情阅读的统计。
       const headLimit = Math.max(1, rows - hints.length - 3);
       const head = [
-        pad(c.bold(c.ink(main ? "Context · Current projection" : "Context · Sub-session"))),
+        pad(
+          c.bold(
+            c.ink(
+              main ? "Context · Current projection candidate" : "Context · Sub-session candidate",
+            ),
+          ),
+        ),
         ...(reason
           ? [
               pad(
@@ -1214,6 +1262,8 @@ export class RequestInspector implements Component {
           : []),
         ...(hasImages ? [pad(c.jin("Image tokens unknown before next request · text only"))] : []),
         pad(c.soft(`Projected input estimate: ${size}`)),
+        pad(c.faint("Draft excluded; sending may compact or append context")),
+        ...changes.map((line) => pad(c.jin(line))),
         pad(
           c.faint(
             main
@@ -1222,7 +1272,6 @@ export class RequestInspector implements Component {
           ),
         ),
         pad(c.faint("Images, opaque blocks and provider framing are not estimated")),
-        pad(c.faint("Draft excluded; sending may compact or append context")),
         pad(c.faint("⋯ Log rows explain event gaps; not extra input")),
         ...(sessionLine ? [pad(sessionLine)] : []),
       ].slice(0, headLimit);

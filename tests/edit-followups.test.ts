@@ -108,7 +108,7 @@ describe("变化说明里的编辑点与预计命中", () => {
     ];
     const prev = deriveMessages(base());
     const cur = deriveMessages(events);
-    // 编辑点信息在变化说明里:改了哪条、从哪起重算、丢几条思考、预计命中上限。
+    // 编辑点信息在变化说明里:改了哪条、从哪起变化、丢几条思考;文字估算不是缓存上限。
     const edit = plain(
       changeNote({
         n: 3,
@@ -159,7 +159,7 @@ describe("变化说明里的编辑点与预计命中", () => {
     const note = plain(
       cacheNote({ inputTokens: 5000, outputTokens: 5, cacheReadTokens: 1000 }, 4000) ?? "",
     );
-    expect(note).toMatch(/^≈ cache hit 20% · \S+ of \S+ tok · unchanged text ≈\S+ tok$/);
+    expect(note).toMatch(/^≈ cache hit 20% · \S+ of \S+ tok · unchanged text ≈\S+ tok/);
   });
 });
 

@@ -13,7 +13,15 @@ import type { AgentEvent } from "../src/events.js";
 import { compactionState, editState, type Message } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
 import { systemAt, systemParts } from "../src/system-prompt.js";
-import { firstLine, unchangedPrefix } from "./cards.js";
+import { firstLine } from "./cards.js";
+import {
+  type ChangeStatus,
+  compareInputs,
+  type InputComparison,
+  type InputSnapshot,
+  requestSnapshot,
+  textDifferenceLabel,
+} from "./input-comparison.js";
 import { compactionChanges, compactionSourceLines } from "./inspector-compactions.js";
 import { type CompositionRow, compositionRows } from "./inspector-composition.js";
 import { eventSummary } from "./inspector-events.js";
@@ -23,7 +31,7 @@ import { c, G, selectedText } from "./theme.js";
 
 export type WorkbenchRow =
   | { kind: "system"; row: CompositionRow; tok: number; sections: string[]; edited: boolean }
-  | { kind: "tools"; count: number; names: string[]; tok: number }
+  | { kind: "tools"; count: number; names: string[]; tok: number; change?: ChangeStatus }
   | { kind: "message"; row: CompositionRow; tok: number }
   | { kind: "covered"; from: number; upTo: number; count: number; tok: number; summary: number }
   | { kind: "dropped"; event: number; tok: number; by: number | undefined; role: string }
@@ -49,15 +57,17 @@ export type Workbench = {
   broken: boolean;
   /** 最新一次 request 事件的下标;之后的消息还没发过。 */
   lastRequest: number;
+  comparison: InputComparison | undefined;
 };
 
 export type WorkbenchInput = {
   events: readonly AgentEvent[];
   provider?: Provider | undefined;
   /** 随请求发出的工具定义。 */
-  tools: ToolDef[];
+  tools: ToolDef[] | undefined;
   /** 上一次正常请求发出的消息;没有就不画缓存线。 */
   lastSent?: Message[] | undefined;
+  previous?: InputSnapshot | undefined;
 };
 
 /** 段名的短写:登记的段用键名,自定义的原样。 */
@@ -67,10 +77,33 @@ export function shortSection(name: string): string {
 }
 
 export function workbench(input: WorkbenchInput): Workbench {
-  const { events, tools } = input;
+  const { events } = input;
+  const tools = input.tools ?? [];
   const { rows: crows, omitted } = compositionRows(events, input.provider);
   const messages = crows.map((r) => r.message);
-  const keep = input.lastSent ? unchangedPrefix(input.lastSent, messages) : undefined;
+  const lastNormalRequest = events.reduce(
+    (last, event, index) =>
+      event.type === "request" && event.reason !== "compaction" ? index : last,
+    -1,
+  );
+  const previous =
+    input.previous ??
+    (input.lastSent
+      ? {
+          ...requestSnapshot(events, lastNormalRequest),
+          messages: input.lastSent,
+        }
+      : undefined);
+  const comparison = previous
+    ? compareInputs(previous, {
+        origin: "current-candidate",
+        messages,
+        system: systemAt(events),
+        tools: input.tools,
+        model: input.provider?.model,
+      })
+    : undefined;
+  const keep = comparison?.text.sameMessages;
   const state = compactionState(events);
   const ed = editState(events);
   const sections = systemParts(systemAt(events))
@@ -108,7 +141,7 @@ export function workbench(input: WorkbenchInput): Workbench {
     if (keep === undefined || k !== keep) return;
     const through = k > 0 ? crows[k - 1]?.event : undefined;
     const next = crows[k];
-    const lastLen = input.lastSent?.length ?? 0;
+    const lastLen = previous?.messages.length ?? 0;
     broken = k < lastLen;
     if (broken && next) {
       const what = next.stages.some((s) => s.startsWith("edited"))
@@ -141,9 +174,17 @@ export function workbench(input: WorkbenchInput): Workbench {
         sections,
         edited: ed.edits.has(r.event),
       });
-      const ttok = toolDefinitionTokens(tools);
-      total += ttok;
-      rows.push({ kind: "tools", count: tools.length, names: tools.map((t) => t.name), tok: ttok });
+      if (input.tools) {
+        const ttok = toolDefinitionTokens(tools);
+        total += ttok;
+        rows.push({
+          kind: "tools",
+          count: tools.length,
+          names: tools.map((t) => t.name),
+          tok: ttok,
+          ...(comparison && { change: comparison.tools }),
+        });
+      }
     } else rows.push({ kind: "message", row: r, tok });
     if (r.stages.some((s) => s.startsWith("summary")) && covered.length > 0) {
       const before = compactionChanges(events, r.event);
@@ -159,7 +200,10 @@ export function workbench(input: WorkbenchInput): Workbench {
     pushCache(k + 1);
   });
   pushDropped(Number.MAX_SAFE_INTEGER);
-  if (keep === 0) rows.unshift({ kind: "prefix", through: undefined, tok: 0, broken: true });
+  if (keep === 0) {
+    broken = (previous?.messages.length ?? 0) > 0;
+    rows.unshift({ kind: "prefix", through: undefined, tok: 0, broken });
+  }
   return {
     rows: withRecords(
       events,
@@ -170,6 +214,7 @@ export function workbench(input: WorkbenchInput): Workbench {
     prefixTokens: keep === undefined ? undefined : prefixTokens,
     broken,
     lastRequest,
+    comparison,
   };
 }
 
@@ -249,8 +294,9 @@ function describe(
       return {
         sign: "·",
         role: "tools",
-        text: `${r.count} definition${r.count === 1 ? "" : "s"}  ${r.names.join(" ")}`,
+        text: `${r.count} definition${r.count === 1 ? "" : "s"}${r.change ? ` · ${r.change === "same" ? "unchanged" : r.change}` : ""}  ${r.names.join(" ")}`,
         faint: false,
+        ...(r.change === "changed" && { gold: true }),
       };
     case "covered":
       return {
@@ -367,8 +413,8 @@ export function workbenchLine(
   }
   if (r.kind === "prefix") {
     const text = r.broken
-      ? `same prefix through ${r.through === undefined ? "nothing" : `#${r.through}`} · ≈${fmtTok(r.tok)}${r.reason ? ` · ${r.reason} changes input below` : ""}`
-      : `same prefix through #${r.through ?? 0} vs previous input · ≈${fmtTok(r.tok)}`;
+      ? `same prefix through ${r.through === undefined ? "nothing" : `#${r.through}`} · text ≈${fmtTok(r.tok)}${r.reason ? ` · ${r.reason} changes text below` : ""}`
+      : `same prefix through #${r.through ?? 0} vs previous input · text ≈${fmtTok(r.tok)}`;
     const side = Math.max(2, Math.floor((width - text.length - 2) / 2));
     const line = `${"┈".repeat(side)} ${text} ${"┈".repeat(Math.max(2, width - side - text.length - 2))}`;
     return (r.broken ? c.jin : c.faint)(truncateToWidth(line, width, "…"));
@@ -424,6 +470,9 @@ export function previewLines(
           `${secs > 0 ? `${secs} section${secs === 1 ? "" : "s"} · ` : ""}≈${r.tok} tok${r.edited ? ` · ${c.jin("edited")}` : ""} · Enter shows the sections${secs > 0 ? " and flips one for this session" : ""}`,
         ),
       );
+      const difference = wb.comparison?.text.first;
+      if (difference && r.row.message.role === "system" && difference.message === r.row.i - 1)
+        out.push(c.jin(`  System text: ${textDifferenceLabel(difference)}`));
       out.push(...body(r.row.message.content));
       break;
     }
@@ -431,7 +480,7 @@ export function previewLines(
       out.push(
         head(
           "tools",
-          `${r.count} definition${r.count === 1 ? "" : "s"} · ≈${r.tok} tok sent with every request · Enter opens /tools`,
+          `${r.count} definition${r.count === 1 ? "" : "s"} · ≈${r.tok} tok in candidate · ${r.change === "same" ? "unchanged" : (r.change ?? "not compared")} · Enter opens /tools`,
         ),
       );
       out.push(...body(r.names.join("  ")));

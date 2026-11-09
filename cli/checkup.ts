@@ -7,7 +7,8 @@ import { estimateAfter } from "../src/compaction.js";
 import type { UsageTotals } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
 import { type Message, requestMessages } from "../src/messages.js";
-import { predictedCache, unchangedPrefix } from "./cards.js";
+import { predictedCache } from "./cards.js";
+import { unchangedTextPrefix } from "./input-comparison.js";
 import { collectCompactions } from "./inspector-compactions.js";
 import { fmtMs, fmtTok } from "./inspector-format.js";
 import { collectRequests } from "./inspector-requests.js";
@@ -95,7 +96,7 @@ export function analyze(events: readonly AgentEvent[], recording?: ResponseCover
     const previous = records[rec.n - 2];
     const previousRow = rows.at(-1);
     const messages = requestMessages(events, rec.index);
-    const keep = unchangedPrefix(lastSent, messages);
+    const keep = unchangedTextPrefix(lastSent, messages);
     // 新图片的供应商视觉用量无法由本地文字估算推得;下一轮已有实测基准,仍可比较。
     const newImage = messages.slice(keep).some((m) => m.role === "user" && m.images?.length);
     const usage = rec.response?.usage ?? rec.compaction?.usage;
@@ -401,7 +402,7 @@ export function reportLines(
     `${eventCount} events · ${c.requests} requests · ${c.compactions} compactions · ${c.toolCalls} tool calls · ${c.models.join(", ")} · ${c.minutes.toFixed(1)} min`,
     `${fmtTok(totals.inputTokens)} in (${fmtTok(totals.cacheReadTokens)} cached${totals.cacheWriteTokens > 0 ? `, ${fmtTok(totals.cacheWriteTokens)} written` : ""}) · ${fmtTok(totals.outputTokens)} out`,
     "",
-    "  #  reason          msgs    est  measured    gap   cache (prefix ≈)   out  latency  stop",
+    "  #  reason          msgs    est  measured    gap   read / text ≈      out  latency  stop",
     `  ${"─".repeat(88)}`,
   ];
   for (const r of c.rows) {
@@ -418,7 +419,8 @@ export function reportLines(
   out.push(
     "",
     "  est: stored known-input estimate, including known tools, or usage-based estimate; older records may differ.",
-    "  prefix ≈ excludes tools and provider formatting.",
+    "  read is reported cache usage; text ≈ is the unchanged message-text estimate, excluding tools and provider formatting.",
+    "  Text estimates do not predict cache hits.",
     "",
   );
   const gaps = c.estimationGaps;

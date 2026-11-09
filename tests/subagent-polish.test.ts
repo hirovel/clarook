@@ -8,10 +8,11 @@ import type { ToolCall } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { EventLog as Log } from "../src/log.js";
 import { type ApproveOrigin, maxSteps, type TurnDeps } from "../src/loop.js";
-import { deriveMessages } from "../src/messages.js";
+import { deriveMessages, type Message } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
 import { createTaskTool, type TaskToolOptions } from "../src/subagent.js";
 import { defineTool } from "../src/tools.js";
+import { testImage } from "./helpers/image.js";
 
 function parentLog(): EventLog {
   const log = new Log();
@@ -799,7 +800,7 @@ describe("类型注册表与嵌套", () => {
     expect(texts).toEqual(["hi", "dig"]);
   });
 
-  it("新子继承当前system,类型覆盖最后生效;续聊保留子自己的修改", async () => {
+  it("新子继承当前system与有效用户要求,类型覆盖最后生效;续聊保留子自己的修改", async () => {
     for (const [scope, override] of [
       ["taskOnly", undefined],
       ["userMessagesOnly", undefined],
@@ -808,12 +809,54 @@ describe("类型注册表与嵌套", () => {
       ["fork", ""],
     ] as const) {
       const parent = parentLog();
+      if (scope === "userMessagesOnly") {
+        parent.append({ type: "user/message", at: "t", text: "PHOTO", images: [testImage] });
+        parent.append({ type: "user/message", at: "t", text: "REMOVED", images: [testImage] });
+        parent.append({
+          type: "assistant/message",
+          at: "t",
+          text: "old assistant step",
+          toolCalls: [],
+          stopReason: "end",
+        });
+        parent.append({
+          type: "context/edit",
+          at: "t",
+          target: 1,
+          field: "content",
+          value: "EARLY_EDITED",
+        });
+        parent.append({
+          type: "context/edit",
+          at: "t",
+          target: 2,
+          field: "content",
+          value: "PHOTO_EDITED",
+        });
+        parent.append({ type: "context/edit", at: "t", target: 2, field: "content", value: "" });
+        parent.append({ type: "context/drop", at: "t", target: 3 });
+        parent.append({ type: "compaction", at: "t", summary: "summary", coversUpTo: 5 });
+        parent.append({ type: "user/message", at: "t", text: "latest" });
+        parent.append({
+          type: "session/directory",
+          at: "t",
+          cwd: "/parent",
+          environment: "PARENT_ENVIRONMENT",
+        });
+        expect(
+          deriveMessages(parent.events).some((message) => message.content === "EARLY_EDITED"),
+        ).toBe(false);
+      }
+      const currentSystem = [
+        { id: "role", name: "Role", text: "CURRENT", enabled: true },
+        { id: "private", name: "Private", text: "DISABLED", enabled: false },
+      ];
       parent.append({
         type: "context/edit",
         at: "t",
         target: 0,
         field: "system",
-        value: "CURRENT",
+        value: currentSystem,
       });
       parent.append({
         type: "assistant/message",
@@ -824,6 +867,7 @@ describe("类型注册表与嵌套", () => {
       });
       const before = JSON.stringify(parent.events);
       const seen: string[] = [];
+      const requests: Message[][] = [];
       const { tool, logs } = mk({
         parent,
         tools: [],
@@ -833,6 +877,7 @@ describe("类型注册表与嵌套", () => {
         provider: {
           model: "fake",
           async complete(messages) {
+            requests.push(structuredClone(messages));
             seen.push(messages.find((m) => m.role === "system")?.content ?? "MISSING");
             return { text: "done", toolCalls: [], stopReason: "end" };
           },
@@ -843,6 +888,15 @@ describe("类型注册表与嵌套", () => {
       expect(JSON.stringify(parent.events)).toBe(before);
       const child = logs[0];
       expect(child).toBeDefined();
+      if (scope === "userMessagesOnly") {
+        expect(requests[0]?.filter((message) => message.role === "user")).toEqual([
+          { role: "user", content: "EARLY_EDITED" },
+          { role: "user", content: "", images: [testImage] },
+          { role: "user", content: "latest" },
+          { role: "user", content: "inspect" },
+        ]);
+        expect(child?.events[0]).toMatchObject({ type: "session/start", system: currentSystem });
+      }
       child?.append({ type: "context/edit", at: "t", target: 0, field: "system", value: "CHILD" });
       parent.append({
         type: "context/edit",
@@ -853,6 +907,13 @@ describe("类型注册表与嵌套", () => {
       });
       await tool.execute({ task: "continue", type: "custom", resume: "sub-1" }, ctx());
       expect(seen).toEqual([override ?? "CURRENT", "CHILD"]);
+      if (scope === "userMessagesOnly") {
+        expect(requests[1]?.filter((message) => message.role === "user")).toEqual([
+          ...(requests[0]?.filter((message) => message.role === "user") ?? []),
+          { role: "user", content: "continue" },
+        ]);
+        expect(logs[1]).toBe(child);
+      }
     }
   });
 

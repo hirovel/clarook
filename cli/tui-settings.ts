@@ -3,8 +3,7 @@ import type { SessionSetup } from "./session-setup.js";
 // 设置的读写语义与终端布局分离。运行值来自现有状态;保存值来自配置;变化进入事件日志。
 
 import { DEFAULT_COMPACTION_SETTINGS } from "../src/compaction-presets.js";
-import type { Preset, ResultView, SkillsConfig } from "../src/config.js";
-import { changeContext } from "../src/context-edit.js";
+import type { Preset, ResultView } from "../src/config.js";
 import { now } from "../src/events.js";
 import { DEFAULT_PLAN_REMINDER } from "../src/plan.js";
 import type { EffortLevel } from "../src/provider.js";
@@ -17,24 +16,19 @@ import {
   SETTINGS,
   type SettingDef,
   type SettingLayers,
-  setSetting,
   settingDef,
   settingSource,
 } from "../src/settings.js";
 import { configuredValue, type SetupScope, sameSetting, setupSnapshot } from "../src/setup.js";
 import { parsePreservation } from "./args.js";
 import { DEFAULT_RESULT_VIEWS } from "./cards.js";
-import { automaticSkills, discoverSkills, skillsSection } from "./prompt.js";
 import { buildCompaction, loadSummaryPrompt, validateCompactionName } from "./strategies.js";
-import { applyToolPrompts } from "./tool-prompts.js";
-import { createSkillTool, skillCatalog } from "./tools/skill.js";
 import type { TuiContext } from "./tui-context.js";
 import { applySlotValue, currentCompactionSettings } from "./tui-slots.js";
 
 /** 模型切换只更新实际运行值;显示和保存默认值由各入口负责。 */
 export function switchModel(ctx: TuiContext, name: string): void {
   if (!ctx.deps.settings) throw new Error("settings interface not configured");
-  if (ctx.agent.running) throw new Error("cannot switch models while running; press Esc first");
   const choice = ctx.deps.settings.switchModel(name);
   ctx.agent.setProvider(choice.provider);
   ctx.model.info = {
@@ -165,24 +159,27 @@ const DISPLAY_SETTINGS = new Set([
   "showCostEstimate",
   "notify",
 ]);
+const SOURCE_SETTING_TIMING =
+  "for future sessions or an explicit system rebuild; restoring history keeps its recorded setup and text";
 
 export function settingTiming(ctx: TuiContext, def: SettingDef, scope: SetupScope): string {
-  if (scope === "defaults") return "Saved for future starts; this session stays unchanged.";
+  if (scope === "defaults")
+    return def.key.startsWith("prompt.")
+      ? `Saved ${SOURCE_SETTING_TIMING}. This session stays unchanged.`
+      : "Saved for future starts; this session stays unchanged.";
   if (def.key === "saveInputs")
     return "Changes local input saving now. Turning off removes the saved snapshot, keeping inputs in memory.";
   if (def.key === "mcpReconnect") return "Applies when the next session connection is prepared.";
-  if (def.key === "prompt.skills.sources")
-    return "Rescans while idle. Wait for the current turn before changing sources. Loaded instructions stay in history.";
   if (def.scope === "next start")
-    return "Requires a restart. Switch to Saved defaults to change it.";
+    return def.key.startsWith("prompt.")
+      ? `Used ${SOURCE_SETTING_TIMING}. Switch to Saved defaults to change it.`
+      : "Requires a restart. Switch to Saved defaults to change it.";
   if (def.key === "plan" && !ctx.tools.some((t) => t.name === "plan"))
     return "Plan tool is not loaded. Enable it in Saved defaults and restart.";
   if (ctx.agent.running && SLOT_SETTINGS.has(def.key))
     return "This strategy cannot change mid-turn. Wait, or close setup and press Esc to interrupt.";
   if (DISPLAY_SETTINGS.has(def.key)) return "Changes the interface immediately.";
   if (def.key === "effort") return "Used by the next model request.";
-  if (def.key.startsWith("prompt.skills."))
-    return "Used by the next request. Loaded instructions stay in history. New files are discovered at session startup.";
   if (
     [
       "compaction",
@@ -207,67 +204,6 @@ export async function applySettingNow(
 ): Promise<void> {
   const { view } = ctx;
   switch (def.key) {
-    case "prompt.skills.mode":
-    case "prompt.skills.include":
-    case "prompt.skills.load":
-    case "prompt.skills.sources": {
-      const read = (key: string) =>
-        key === def.key ? value : effectiveSetting(ctx, settingDef(key) as SettingDef);
-      const config: SkillsConfig = {
-        mode: read("prompt.skills.mode") as "manual" | "auto",
-        include: read("prompt.skills.include") as "all" | string[],
-        load: read("prompt.skills.load") as "read" | "tool",
-        sources: read("prompt.skills.sources") as Record<string, "on" | "off">,
-      };
-      const warnings: string[] = [];
-      const skills =
-        def.key === "prompt.skills.sources"
-          ? discoverSkills(ctx.cwd, {
-              ...(config.sources && { sources: config.sources }),
-              onError: (error) => warnings.push(error.message),
-            })
-          : ctx.skills;
-      const catalog = automaticSkills(skills, config);
-      const existing = ctx.tools.find((t) => t.name === "skill");
-      if (config.load === "tool" && catalog.length && existing && !skillCatalog(existing))
-        throw new Error(
-          "An extension owns the skill tool. Choose read loading or remove that extension first.",
-        );
-      const tools = ctx.tools.filter((t) => !skillCatalog(t));
-      if (config.load === "tool" && catalog.length) {
-        const tool = createSkillTool(catalog);
-        applyToolPrompts([tool], ctx.slots.toolPrompts);
-        tools.push(tool);
-      }
-      const target = ctx.log.events.findIndex((event) => event.type === "session/start");
-      const section = skillsSection(skills, config);
-      changeContext(
-        ctx.log,
-        {
-          type: "replace-section",
-          target,
-          id: "skills",
-          ...(section && { section: { id: "skills", ...section, enabled: true } }),
-        },
-        {
-          running: ctx.agent.running,
-          ...(ctx.deps.readOnlyReason && { readOnlyReason: ctx.deps.readOnlyReason }),
-        },
-      );
-      if (skills !== ctx.skills) ctx.skills.splice(0, ctx.skills.length, ...skills);
-      ctx.tools.splice(0, ctx.tools.length, ...tools);
-      ctx.setupBase = setSetting(ctx.setupBase, def.key, structuredClone(value));
-      ctx.applyTools?.();
-      for (const message of warnings)
-        ctx.log.append({
-          type: "ext/event",
-          at: now(),
-          source: "skills",
-          kind: "load-error",
-          payload: { message },
-        });
-      return;
-    }
     case "saveInputs":
       ctx.deps.inputs?.configure(value as boolean);
       ctx.deps.saveInputs = value as boolean;
@@ -454,7 +390,7 @@ function validate(def: SettingDef, value: unknown): void {
     throw new Error("statusWidgets takes a list of registered status readings.");
 }
 
-/** session 只改运行态;defaults 先可靠落盘;both 保留已有打字命令的应用并保存语义。 */
+/** session 只改运行态;defaults 先可靠落盘;both 仅对可即时应用的设置先应用再保存。 */
 export async function changeSetting(
   ctx: TuiContext,
   def: SettingDef,
@@ -483,17 +419,19 @@ export async function changeSetting(
       const overridden = getSetting(layers?.preset, def.key) !== undefined;
       return {
         ok: true,
-        message: `${def.key} → ${formatSetting(def, value)} · saved for future starts; this session unchanged${def.key === "compaction" ? " · strategy loads at startup" : ""}${overridden ? ` · preset ${layers?.presetName ?? ""} still overrides defaults` : ""}`,
+        message: `${def.key} → ${formatSetting(def, value)} · ${def.key.startsWith("prompt.") ? `saved ${SOURCE_SETTING_TIMING}; this session unchanged` : "saved for future starts; this session unchanged"}${def.key === "compaction" ? " · strategy loads at startup" : ""}${overridden ? ` · preset ${layers?.presetName ?? ""} still overrides defaults` : ""}`,
       };
     }
     if (def.scope === "next start") {
       if (scope === "session") throw new Error(settingTiming(ctx, def, "session"));
       if (!save)
-        throw new Error("This setting requires a restart, and saving is not available here.");
+        throw new Error(
+          "This setting cannot change in this session, and saving is not available here.",
+        );
       await save(def.key, value);
       return { ok: true, message: describeChange(def, value, undefined, true) };
     }
-    if (ctx.agent.running && (SLOT_SETTINGS.has(def.key) || def.key === "prompt.skills.sources"))
+    if (ctx.agent.running && SLOT_SETTINGS.has(def.key))
       throw new Error(settingTiming(ctx, def, "session"));
     await applySettingNow(ctx, def, value ?? def.builtin);
     ctx.log.append({
@@ -543,7 +481,12 @@ export function describeChange(
 ): string {
   return [
     `${def.key} → ${formatSetting(def, value)}`,
-    applied || (def.scope === "now" ? "in effect now" : "takes effect at the next start"),
+    applied ||
+      (def.scope === "now"
+        ? "in effect now"
+        : def.key.startsWith("prompt.")
+          ? `used ${SOURCE_SETTING_TIMING}; this session unchanged`
+          : "takes effect at the next start"),
     saved ? "saved to config" : "not saved: no config here",
   ].join(" · ");
 }

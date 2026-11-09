@@ -26,7 +26,7 @@ import {
   projectMcpTrusted,
   trustProjectMcp,
 } from "./mcp/trust.js";
-import { automaticSkills, discoverSkills } from "./prompt.js";
+import { automaticSkills, discoverSkills, type Skill } from "./prompt.js";
 import { type DirectoryIssue, prepareSessionDirectory } from "./session-directory.js";
 import { applyToolPrompts } from "./tool-prompts.js";
 import { createSkillTool, skillCatalog } from "./tools/skill.js";
@@ -36,6 +36,8 @@ export async function prepareSessionRuntime(options: {
   args: CommonArgs;
   log: EventLog;
   sessionFile: string;
+  /** 新建时与初稿共享同次发现;恢复时按保存的配置重新准备能力。 */
+  skills?: Skill[];
   entryCwd?: string;
   directory?: string;
   chooseDirectory?: (issue: DirectoryIssue) => Promise<string | undefined>;
@@ -58,17 +60,19 @@ export async function prepareSessionRuntime(options: {
   const choice = options.allowUnavailable ? boot.chooseOrNone(args.model) : boot.choose(args.model);
   const compaction = await buildCompaction(args, choice.contextWindow, cwd);
   const memory = args.memory ? memoryFiles(cwd) : undefined;
-  const skills = discoverSkills(cwd, {
-    ...(args.skillsSources && { sources: args.skillsSources }),
-    onError: (error) =>
-      log.append({
-        type: "ext/event",
-        at: now(),
-        source: "skills",
-        kind: "load-error",
-        payload: { message: error.message },
-      }),
-  });
+  const skills =
+    options.skills ??
+    discoverSkills(cwd, {
+      ...(args.skillsSources && { sources: args.skillsSources }),
+      onError: (error) =>
+        log.append({
+          type: "ext/event",
+          at: now(),
+          source: "skills",
+          kind: "load-error",
+          payload: { message: error.message },
+        }),
+    });
   const toolPrompts = resolveToolPrompts(args, boot.config);
   if (options.descriptions) toolPrompts.descriptions = options.descriptions;
   const connections = options.connections ?? new McpConnections();

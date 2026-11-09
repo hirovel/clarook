@@ -1,9 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   applyPreset,
+  type Bootstrap,
   beginSession,
   buildCompaction,
   latestSession,
@@ -13,6 +14,7 @@ import {
   parsePreservation,
   systemPromptFor,
 } from "../cli/bootstrap.js";
+import { prepareSessionRuntime } from "../cli/session-runtime.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
@@ -243,12 +245,60 @@ describe("会话恢复", () => {
     ).resolves.toHaveProperty("strategy");
   });
 
-  it("新会话直接保存具名段正文和启用状态", () => {
+  it("新会话保存具名正文,初稿与能力共用发现结果,恢复不重建正文", async () => {
     tmp = mkdtempSync(join(tmpdir(), "ak-prompt-"));
     const p = systemPromptFor({}, tmp);
     expect(p.system.map((s) => s.id)).toEqual(["role", "env"]);
     expect(p.system.every((s) => s.enabled && s.text.length > 0)).toBe(true);
     expect(systemText(p.system)).toContain("working directory: ");
+    const file = join(tmp, ".agents", "skills", "proof", "SKILL.md");
+    mkdirSync(join(tmp, ".agents", "skills", "proof"), { recursive: true });
+    writeFileSync(file, "---\nname: proof\ndescription: Original catalog\n---\nOriginal body");
+    const args = { ...parseCommonArgs([]), skillsMode: "auto" as const, subagent: false };
+    const choice = {
+      model: "m",
+      providerName: "p",
+      contextWindow: 100000,
+      provider: scripted("m", []),
+    };
+    const boot: Bootstrap = {
+      config: { default: "p/m", providers: {} },
+      configCreated: false,
+      choose: () => choice,
+      chooseOrNone: () => choice,
+      resolve: (value) => value,
+      settings: {
+        listModels: () => [],
+        switchModel: () => choice,
+        setKey() {},
+        setDefault() {},
+      },
+    };
+    const session = beginSession(args, choice, tmp, join(tmp, "sessions"));
+    writeFileSync(file, "---\nname: proof\ndescription: Changed catalog\n---\nChanged body");
+    const runtime = await prepareSessionRuntime({ boot, args, ...session });
+    if (!runtime) throw new Error("Expected a prepared runtime");
+    try {
+      expect(runtime.skills.find((skill) => skill.name === "proof")?.body).toBe("Original body");
+      const start = session.log.events[0];
+      expect(start?.type === "session/start" && systemText(start.system)).toContain(
+        "Original catalog",
+      );
+      expect(systemText(systemPromptFor(args, tmp, { skills: runtime.skills }).system)).toContain(
+        "Original catalog",
+      );
+    } finally {
+      await runtime.dispose();
+      await session.log.checkpoint();
+      session.log.recording?.dispose();
+    }
+    const restored = beginSession({ ...args, resume: session.sessionFile }, choice, tmp);
+    try {
+      expect(restored.skills).toBeUndefined();
+      expect(restored.log.events).toEqual(session.log.events);
+    } finally {
+      restored.log.recording?.dispose();
+    }
   });
 });
 

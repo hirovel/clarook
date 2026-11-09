@@ -19,10 +19,10 @@ import {
   resultLines,
   resultView,
   thinkingReplayCounts,
-  unchangedPrefix,
   userLine,
 } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
+import { compareInputs, requestSnapshot, unchangedTextPrefix } from "./input-comparison.js";
 import { fmtMs, fmtTok } from "./inspector-format.js";
 import { PROMPT_MARK } from "./terminal-extras.js";
 import { c, G, markdownTheme } from "./theme.js";
@@ -479,6 +479,12 @@ function renderRequest(
     request: e,
     messages,
     ...(req.lastSent && { previous: req.lastSent }),
+    ...(req.lastSent && {
+      comparison: compareInputs(
+        { ...requestSnapshot(log.events, req.lastTurnIndex), messages: req.lastSent },
+        { ...requestSnapshot(log.events, index), messages },
+      ),
+    }),
     ...(provenance && { provenance }),
     ...(agent.provider.fields?.protocol.startsWith("anthropic") && {
       droppedThinking: thinkingReplayCounts(messages, e.model, originalOpaque).dropped,
@@ -489,7 +495,7 @@ function renderRequest(
   if (note) transcript.addChild(new Block(note));
   req.predictedAt.set(
     req.lastIndex,
-    predictedCache(req.lastSent, messages, unchangedPrefix(req.lastSent, messages)),
+    predictedCache(req.lastSent, messages, unchangedTextPrefix(req.lastSent, messages)),
   );
   if (e.reason === "compaction") req.lastCompactionIndex = req.lastIndex;
   else {

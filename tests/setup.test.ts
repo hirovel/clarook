@@ -175,8 +175,10 @@ describe("setup data and persistence", () => {
       providers: {},
       sessionsDir: dir,
       defaults: {
-        prompt: { sections: [] },
-
+        prompt: {
+          sections: [],
+          skills: { mode: "auto", load: "tool", include: ["proof"] },
+        },
         subagent: true,
         maxSteps: 4,
         subagents: { maxSteps: 2, depth: 2 },
@@ -276,13 +278,9 @@ describe("setup data and persistence", () => {
       await bash.execute({ command: "cd .." }, ctx);
       await running.app().command("/model p/new");
       await running.app().command("/tools off write");
-      await running.app().command("/settings prompt.skills.mode auto");
-      await running.app().command("/settings prompt.skills.load tool");
-      await running.app().command("/settings prompt.skills.include proof");
       duringRequest = async () => {
         await running.app().command("/tools off read");
         await running.app().command("/model p/old");
-        await running.app().command("/settings prompt.skills.mode manual");
       };
       await task.execute({ task: "first" }, ctx);
       expect(control.active).toBe(1);
@@ -313,7 +311,6 @@ describe("setup data and persistence", () => {
       );
       await running.app().command("/tools on read");
       await running.app().command("/tools on write");
-      await running.app().command("/settings prompt.skills.mode auto");
       await task.execute({ task: "resume", resume: "sub-1" }, ctx);
       expect(seen[2]?.model).toBe("new");
       expect(seen[2]?.tools).toContain("read");
@@ -676,6 +673,8 @@ describe("setup data and persistence", () => {
   });
   it("实际会话切换:新建取当前组合,分叉取历史前缀,显示偏好保持,初始化失败保留会话与草稿", async () => {
     const dir = mkdtempSync(join(tmpdir(), "clarook-switch-"));
+    vi.spyOn(process, "cwd").mockReturnValue(dir);
+    writeFileSync(join(dir, "AGENTS.md"), "UNIQUE PROJECT INSTRUCTION");
     const config: KernelConfig = {
       default: "p/m",
       providers: { p: { protocol: "openai", baseUrl: "http://unused", models: ["m"] } },
@@ -684,6 +683,7 @@ describe("setup data and persistence", () => {
     };
     let block = false;
     let requests = 0;
+    const receivedUsers: string[][] = [];
     let failTerminalStart = false;
     let failedTerminal: VirtualTerminal | undefined;
     const choose = (name = "p/m") => ({
@@ -692,8 +692,15 @@ describe("setup data and persistence", () => {
       contextWindow: 100000,
       provider: {
         model: name.replace(/^p\//, ""),
-        async complete(_messages: unknown, _tools: unknown, opts?: CompleteOptions) {
+        async complete(
+          messages: Parameters<Provider["complete"]>[0],
+          _tools: unknown,
+          opts?: CompleteOptions,
+        ) {
           requests++;
+          receivedUsers.push(
+            messages.filter((message) => message.role === "user").map((message) => message.content),
+          );
           if (block) {
             await new Promise<void>((resolve) =>
               opts?.signal?.addEventListener("abort", () => resolve(), { once: true }),
@@ -868,6 +875,53 @@ describe("setup data and persistence", () => {
       expect(host.app()).toBe(view);
       expect(view.draft()).toBe("keep this draft");
       expect(view.agent.running).toBe(false);
+      const alpha = join(dir, "alpha-source");
+      const beta = join(dir, "beta-source");
+      for (const [folder, name] of [
+        [alpha, "alpha"],
+        [beta, "beta"],
+      ] as const) {
+        mkdirSync(join(folder, name), { recursive: true });
+        writeFileSync(
+          join(folder, name, "SKILL.md"),
+          `---\nname: ${name}\ndescription: ${name} catalog\n---\n${name} body`,
+        );
+      }
+      config.defaults = {
+        ...config.defaults,
+        prompt: {
+          sections: ["instructions", "skills"],
+          instructionsAs: "user",
+          skills: { mode: "auto", sources: { [alpha]: "on" } },
+        },
+      };
+      const repair = vi.spyOn(view, "reviewSetup").mockImplementation(async (setup) => ({
+        ...setup,
+        values: setSetting({ ...setup.values, extensions: [] }, "prompt.skills.sources", {
+          [beta]: "on",
+        }),
+      }));
+      const adjusted = host.switchSession({ kind: "new", source: "defaults" });
+      await vi.waitFor(() => expect(view.dialogLines().join("\n")).toContain("preparation failed"));
+      view.dialogInput("\x1b[B");
+      view.dialogInput("\x1b[B");
+      view.dialogInput("\r");
+      await adjusted;
+      repair.mockRestore();
+      const adjustedText = systemText(systemAt(EventLog.load(host.file()).events));
+      expect(adjustedText).toContain("- beta: beta catalog");
+      expect(adjustedText).not.toContain("- alpha:");
+      await host.app().command("/beta");
+      expect(
+        receivedUsers.at(-1)?.filter((text) => text.includes("UNIQUE PROJECT INSTRUCTION")),
+      ).toHaveLength(1);
+      expect(
+        EventLog.load(host.file())
+          .events.filter((event) => event.type === "user/message")
+          .at(-1),
+      ).toMatchObject({ text: expect.stringContaining("beta body") });
+      await host.switchSession({ kind: "resume", file: original });
+      view = host.app();
       const rejectedExtension = join(dir, "rejected-extension.mjs");
       writeFileSync(
         rejectedExtension,

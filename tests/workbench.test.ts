@@ -14,7 +14,7 @@ import { changeContext } from "../src/context-edit.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { deriveMessages, requestMessages } from "../src/messages.js";
-import type { AssistantTurn, Provider } from "../src/provider.js";
+import type { AssistantTurn, Provider, ToolDef } from "../src/provider.js";
 import { systemAt, systemParts, systemText } from "../src/system-prompt.js";
 import { defineTool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
@@ -101,6 +101,27 @@ describe("工作台的行", () => {
     const none = workbench({ events, tools: [] });
     expect(none.rows.some((r) => r.kind === "prefix")).toBe(false);
     expect(none.prefixTokens).toBeUndefined();
+    // 同名同估算量刷新不追加事件,阅读缓存仍必须重新比较完整声明。
+    const originalTool = { name: "read", description: "Read text.", parameters: {} };
+    const originalTools = [originalTool];
+    const history = sample();
+    for (const event of history) if (event.type === "request") event.tools = ["read"];
+    history.splice(1, 0, { type: "tools/snapshot", at, tools: originalTools });
+    let currentTools: ToolDef[] = originalTools;
+    const inspector = new RequestInspector({
+      events: () => history,
+      providerFor: () => undefined,
+      tools: () => currentTools,
+      rows: () => 40,
+      onClose() {},
+      requestRender() {},
+    });
+    expect(inspector.workbench().comparison?.tools).toBe("same");
+    currentTools = [{ ...originalTool, description: "Read file." }];
+    expect(inspector.workbench().comparison?.tools).toBe("changed");
+    expect(inspector.workbench().rows.find((row) => row.kind === "tools")).toMatchObject({
+      change: "changed",
+    });
   });
 
   it("宽字符不把右边的列顶歪:中文预览的行与英文行,token 与占比尺同一列", () => {
@@ -334,7 +355,7 @@ describe("工作台的界面", () => {
     expect(s).toContain("Context · Current projection");
     expect(s).toMatch(/≈\d+ tok of 100k/);
     expect(s).toMatch(/#0\s+system\s+role · env/);
-    expect(s).toMatch(/tools\s+1 definition\s+echo/);
+    expect(s).toMatch(/tools\s+1 definition · unchanged\s+echo/);
     expect(s).toContain("same prefix through #");
     // 光标在最后一条:助手回复,预览写来历
     expect(s).toMatch(/›\s+#\d+\s+assistant\s+reply/);

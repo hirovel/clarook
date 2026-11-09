@@ -18,12 +18,13 @@ import {
 import { recordSessionSetup, restoreSessionSetup } from "../cli/session-setup.js";
 import { createSkillTool } from "../cli/tools/skill.js";
 import { createTuiApp } from "../cli/tui-app.js";
-import type { KernelConfig } from "../src/config.js";
+import type { KernelConfig, Preset } from "../src/config.js";
+import { changeContext } from "../src/context-edit.js";
 import { EventLog } from "../src/log.js";
 import { deriveMessages } from "../src/messages.js";
 import type { Provider } from "../src/provider.js";
-import { DEFAULT_SKILL_SOURCES } from "../src/settings.js";
-import { systemText } from "../src/system-prompt.js";
+import { DEFAULT_SKILL_SOURCES, setSetting } from "../src/settings.js";
+import { systemAt, systemText } from "../src/system-prompt.js";
 import { defineTool } from "../src/tools.js";
 import { testDirectory } from "./helpers/setup.js";
 import { VirtualTerminal } from "./helpers/virtual-terminal.js";
@@ -285,7 +286,7 @@ describe("SKILL.md 解析与发现", () => {
 });
 
 describe("界面里的技能", () => {
-  it("勾选范围只改未来请求,全选保存意图,历史正文与自定义系统文本保留;恢复同一配置", async () => {
+  it("技能设置只保存到以后会话,手改与关闭正文保留,已准备的 read/tool 仍可加载", async () => {
     const { home, proj } = project();
     const skills = discoverSkills(proj, { home, root: proj });
     skills.push({
@@ -294,41 +295,38 @@ describe("界面里的技能", () => {
       description: "Review a patch",
       body: "Check the patch.",
     });
+    const currentSkills = {
+      mode: "auto" as const,
+      include: ["deploy"],
+      load: "tool" as const,
+      sources: DEFAULT_SKILL_SOURCES,
+    };
+    const catalog = skillsSection(skills, { mode: "auto", load: "read" });
+    if (!catalog) throw new Error("missing test skill catalog");
+    const system = [
+      { id: "custom", name: "Custom", text: "My exact base instructions.", enabled: true },
+      { id: "skills", ...catalog, enabled: true },
+    ];
     const log = new EventLog();
     log.append({
       type: "session/start",
       at: "2026-10-25T00:00:00.000Z",
       model: "m",
-      system: "My exact base instructions.",
+      system,
     });
-    for (const [key, value] of Object.entries({
-      mode: "auto",
-      include: ["deploy"],
-      load: "tool",
-      sources: {},
-    }))
-      log.append({
-        type: "ext/event",
-        at: "2026-10-25T00:00:00.000Z",
-        source: "setup",
-        kind: "setting",
-        payload: { key: `prompt.skills.${key}`, value, scope: "session" },
-      });
-    // 恢复入口已明确选了当前组合,不能再被目标会话的旧设置覆盖。
-    const currentSkills = {
-      mode: "manual" as const,
-      include: "all" as const,
-      load: "read" as const,
-      sources: DEFAULT_SKILL_SOURCES,
-    };
-    const term = new VirtualTerminal(60, 28);
+    let defaults: Preset = { prompt: { skills: { include: "all", sources: {} } } };
+    const saved: [string, unknown][] = [];
+    const term = new VirtualTerminal(100, 32);
     const requests: { system: string; tools: string[]; description: string }[] = [];
-    let pending: Promise<void> | undefined;
+    const preparedTools = buildTools({
+      cwd: proj,
+      skills: automaticSkills(skills, currentSkills),
+    });
     const app = createTuiApp({
       terminal: term,
       log,
       skills,
-      tools: buildTools(),
+      tools: preparedTools,
       provider: {
         model: "m",
         async complete(messages, tools) {
@@ -337,144 +335,156 @@ describe("界面里的技能", () => {
             tools: tools.map((t) => t.name),
             description: tools.find((t) => t.name === "skill")?.description ?? "",
           });
-          await pending;
+          const last = messages.at(-1);
+          if (
+            last?.role === "user" &&
+            typeof last.content === "string" &&
+            last.content.startsWith("load prepared instructions with ")
+          ) {
+            const name = last.content.endsWith("read") ? "read" : "skill";
+            return {
+              text: "",
+              toolCalls: [
+                {
+                  id: "load",
+                  name,
+                  args: name === "read" ? { path: skills[0]?.path } : { name: "deploy" },
+                },
+              ],
+              stopReason: "tool",
+            };
+          }
+          if (last?.role === "tool")
+            expect(last.content).toContain("Deploy to $1. Full args: $ARGUMENTS");
           return { text: "ok", toolCalls: [], stopReason: "end" };
         },
       },
       compaction: { strategy: async () => null, window: 100000, reserveTokens: 1000 },
       reserveTokens: 1000,
       info: { model: "m", providerName: "p", sessionFile: "s" },
-      systemPrompt: "My exact base instructions.",
+      systemPrompt: systemText(system),
       startupSettings: { prompt: { skills: currentSkills } },
+      settings: {
+        listModels: () => [],
+        switchModel: () => {
+          throw new Error("no");
+        },
+        setKey: () => {},
+        setDefault: () => {},
+        settingLayers: () => ({ defaults }),
+        saveSetting: (key, value) => {
+          saved.push([key, value]);
+          defaults = setSetting(defaults, key, value);
+        },
+      },
       onExit: () => {},
       onSetupChange: (setup) => recordSessionSetup(log, setup),
     });
-    expect(app.setup().values.prompt?.skills).toEqual(currentSkills);
-    expect(restoreSessionSetup(log.events, {}).setup.values.prompt?.skills).toEqual(currentSkills);
     const tick = () => new Promise((r) => setTimeout(r, 5));
     const menu = () => app.dialogLines().map(plain).join("\n");
-    await app.command("/settings prompt.skills.include");
-    app.dialogInput("\r");
-    expect(menu()).toContain("All (including new skills)");
-    expect(menu()).toContain("Manual mode");
-    app.dialogInput("\x1b[B"); // deploy: 全选 -> 去掉 deploy 的具体名单
-    app.dialogInput("\r");
-    await tick();
-    expect(restoreSessionSetup(log.events, {}).setup.values.prompt?.skills?.include).toEqual([
-      "review",
-    ]);
-    app.dialogInput("\x1b[C");
-    app.dialogInput("\r");
-    expect(menu()).toContain("Ship a release");
-    app.dialogInput("\x1b");
-    app.dialogInput("\x1b[H");
-    app.dialogInput("\r"); // 再全选,保存字符串而非现有名单
-    await tick();
-    expect(restoreSessionSetup(log.events, {}).setup.values.prompt?.skills?.include).toBe("all");
-    app.dialogInput("\x1b");
-    app.dialogInput("\x1b");
-    app.dialogInput("\x1b");
-    await app.command("/deploy staging");
-    expect(requests[0]?.system).toBe("My exact base instructions.");
-    expect(requests[0]?.tools).not.toContain("skill");
-    const editedInstructions = "My edited base instructions.\nKeep the literal phrase # Skills.";
-    await app.command(`/edit 0 system custom ${editedInstructions}`);
-    await app.command("/settings prompt.skills.mode auto");
-    await app.command("/settings prompt.skills.include review");
-    await app.submit("continue");
-    expect(requests.at(-1)?.system).toContain(editedInstructions);
-    expect(requests.at(-1)?.system).toContain("- review:");
-    expect(requests.at(-1)?.system).not.toContain("- deploy:");
-    await app.command("/settings prompt.skills.load tool");
-    await app.submit("continue");
-    expect(requests.at(-1)?.system).toBe(editedInstructions);
-    expect(requests.at(-1)?.tools).toContain("skill");
-    expect(requests.at(-1)?.description).toContain("review");
-    expect(requests.at(-1)?.description).not.toContain("deploy");
-    const setup = restoreSessionSetup(log.events, {}).setup;
-    const resumed = applyPreset(parseCommonArgs([]), {
-      default: "m",
-      providers: {},
-      defaults: setup.values,
-    });
-    expect(resumed.skillsMode).toBe("auto");
-    expect(resumed.skillsInclude).toEqual(["review"]);
-    expect(resumed.skillsLoad).toBe("tool");
-    await app.command("/settings prompt.skills.mode manual");
-    await app.submit("continue");
-    expect(requests.at(-1)?.tools).not.toContain("skill");
-    expect(requests.at(-1)?.system).toBe(editedInstructions);
-    expect(JSON.stringify(deriveMessages(log.events))).toContain("User request:\\nstaging");
-    // 来源的增删开关验证实际发现、后续请求与历史,不对样式建立快照。
-    await app.command("/settings prompt.skills.sources {}");
-    expect(skills).toEqual([]);
-    const custom = join(proj, "custom  skills");
-    mkdirSync(join(custom, "review"), { recursive: true });
-    writeFileSync(
-      join(custom, "review", "SKILL.md"),
-      "---\nname: review\ndescription: Custom review\n---\nCheck custom instructions.",
-    );
-    await app.command("/settings prompt.skills.sources");
-    app.dialogInput("\r");
-    app.dialogInput("\x1b[F");
-    app.dialogInput("\r");
-    app.dialogInput(custom);
-    app.dialogInput("\r");
-    await tick();
-    expect(skills.map((s) => s.name)).toEqual(["review"]);
-    app.dialogInput("\x1b[C");
-    app.dialogInput("\r");
-    expect(menu()).toContain(custom.slice(0, 25));
-    app.dialogInput("\x1b");
-    app.dialogInput("\r"); // 禁用自定义来源。
-    await tick();
-    expect(skills).toEqual([]);
-    app.dialogInput("\r");
-    await tick();
-    expect(skills.map((s) => s.name)).toEqual(["review"]);
-    app.dialogInput("\x1b");
-    app.dialogInput("\x1b");
-    app.dialogInput("\x1b");
-    await app.command("/settings prompt.skills.mode auto");
-    await app.command("/settings prompt.skills.include all");
-    await app.command("/settings prompt.skills.load read");
-    await app.submit("continue with custom source");
-    expect(requests.at(-1)?.system).toContain(editedInstructions);
-    expect(requests.at(-1)?.system).toContain("Custom review");
-    expect(requests.at(-1)?.system).not.toContain("- deploy:");
-    const sources = restoreSessionSetup(log.events, {}).setup.values.prompt?.skills?.sources;
-    expect(sources).toEqual({ [custom]: "on" });
-    expect(
-      applyPreset(parseCommonArgs([]), {
-        default: "m",
-        providers: {},
-        defaults: restoreSessionSetup(log.events, {}).setup.values,
-      }).skillsSources,
-    ).toEqual(sources);
-    let finish!: () => void;
-    pending = new Promise<void>((r) => {
-      finish = r;
-    });
-    const turn = app.submit("running request");
-    await tick();
-    await app.command("/settings prompt.skills.sources {}");
-    expect(skills.map((s) => s.name)).toEqual(["review"]);
-    expect(restoreSessionSetup(log.events, {}).setup.values.prompt?.skills?.sources).toEqual(
-      sources,
-    );
-    finish();
-    await turn;
-    pending = undefined;
-    await app.command("/settings prompt.skills.sources");
-    app.dialogInput("\r");
-    app.dialogInput("\x1b[H");
-    app.dialogInput("\x1b[3~"); // 自定义来源在配置首位;删除只删配置。
-    await tick();
-    expect(skills).toEqual([]);
-    expect(restoreSessionSetup(log.events, {}).setup.values.prompt?.skills?.sources).toEqual({});
-    expect(fs.existsSync(join(custom, "review", "SKILL.md"))).toBe(true);
-    expect(JSON.stringify(deriveMessages(log.events))).toContain("User request:\\nstaging");
-    app.stop();
+    try {
+      const editedInstructions = "My edited base instructions.\nKeep the literal phrase # Skills.";
+      await app.command(`/edit 0 system custom ${editedInstructions}`);
+      await app.command("/edit 0 system skills Keep my edited skill catalog.");
+      changeContext(log, { type: "toggle-section", target: 0, section: "skills" });
+      const edited = structuredClone(systemAt(log.events));
+      const discovered = structuredClone(skills);
+      const tools = app.setup().tools;
+      // 本会话入口拒绝四项来源设置,不能追加设置或正文事件。
+      for (const key of ["mode", "sources", "include", "load"]) {
+        await app.command(`/settings prompt.skills.${key}`);
+        const before = log.events.length;
+        app.dialogInput("\r");
+        await tick();
+        expect(log.events).toHaveLength(before);
+        expect(saved).toEqual([]);
+        app.dialogInput("\x1b");
+        app.dialogInput("\x1b");
+      }
+      await app.command("/settings prompt.skills.include");
+      app.dialogInput("\t");
+      app.dialogInput("\r");
+      expect(menu()).toContain("All (including new skills)");
+      app.dialogInput("\x1b[B");
+      app.dialogInput("\r");
+      await tick();
+      expect(defaults.prompt?.skills?.include).toEqual(["review"]);
+      app.dialogInput("\x1b[H");
+      app.dialogInput("\r");
+      await tick();
+      expect(defaults.prompt?.skills?.include).toBe("all");
+      app.dialogInput("\x1b");
+      app.dialogInput("\x1b");
+      app.dialogInput("\x1b");
+      // 来源的增删只改保存配置,不重扫当前目录,也不删除磁盘文件。
+      const custom = join(proj, "custom  skills");
+      mkdirSync(join(custom, "review"), { recursive: true });
+      writeFileSync(
+        join(custom, "review", "SKILL.md"),
+        "---\nname: review\ndescription: Custom review\n---\nCheck custom instructions.",
+      );
+      await app.command("/settings prompt.skills.sources");
+      app.dialogInput("\t");
+      app.dialogInput("\r");
+      app.dialogInput("\x1b[F");
+      app.dialogInput("\r");
+      app.dialogInput(custom);
+      app.dialogInput("\r");
+      await tick();
+      expect(defaults.prompt?.skills?.sources).toEqual({ [custom]: "on" });
+      app.dialogInput("\r");
+      await tick();
+      expect(defaults.prompt?.skills?.sources).toEqual({ [custom]: "off" });
+      app.dialogInput("\r");
+      await tick();
+      expect(defaults.prompt?.skills?.sources).toEqual({ [custom]: "on" });
+      app.dialogInput("\x1b[3~");
+      await tick();
+      expect(defaults.prompt?.skills?.sources).toEqual({});
+      expect(fs.existsSync(join(custom, "review", "SKILL.md"))).toBe(true);
+      app.dialogInput("\x1b");
+      app.dialogInput("\x1b");
+      app.dialogInput("\x1b");
+      const beforeTyped = log.events.length;
+      for (const [key, value] of [
+        ["mode", "manual"],
+        ["include", "review"],
+        ["load", "read"],
+        ["sources", "{}"],
+      ])
+        await app.command(`/settings prompt.skills.${key} ${value}`);
+      expect(log.events).toHaveLength(beforeTyped);
+      expect(saved.slice(-4)).toEqual([
+        ["prompt.skills.mode", "manual"],
+        ["prompt.skills.include", ["review"]],
+        ["prompt.skills.load", "read"],
+        ["prompt.skills.sources", {}],
+      ]);
+      expect(systemAt(log.events)).toEqual(edited);
+      expect(skills).toEqual(discovered);
+      expect(app.setup().tools).toEqual(tools);
+      expect(app.setup().values.prompt?.skills).toEqual(currentSkills);
+      expect(restoreSessionSetup(log.events, defaults).setup.values.prompt?.skills).toEqual(
+        currentSkills,
+      );
+      for (const name of ["read", "skill"]) {
+        await app.submit(`load prepared instructions with ${name}`);
+        expect(
+          log.events.some(
+            (event) => event.type === "tool/result" && event.name === name && !event.isError,
+          ),
+        ).toBe(true);
+      }
+      expect(requests.at(-1)?.system).toBe(editedInstructions);
+      expect(requests.at(-1)?.tools).toContain("skill");
+      expect(requests.at(-1)?.description).toContain("deploy");
+      expect(requests.at(-1)?.description).not.toContain("review");
+      await app.command("/deploy staging");
+      expect(JSON.stringify(deriveMessages(log.events))).toContain("User request:\\nstaging");
+      expect(systemAt(log.events)).toEqual(edited);
+    } finally {
+      app.stop();
+    }
   });
   it("技能正文及排队要求进入实际请求,工具统一审批且保留明确的本会话放行", async () => {
     const { home, proj } = project();

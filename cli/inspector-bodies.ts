@@ -2,7 +2,7 @@
 import type { Message } from "../src/messages.js";
 import type { SystemPrompt } from "../src/system-prompt.js";
 import type { BodyBlock } from "./body-browser.js";
-import { unchangedPrefix } from "./cards.js";
+import { compareInputs, textDifferenceLabel } from "./input-comparison.js";
 import { firstLine, fmtMs, messageTokens, pctOf, roleLabel } from "./inspector-format.js";
 import { messageBodyLines, type RequestRecord } from "./inspector-requests.js";
 import type { RecordedBody, RequestRecording } from "./session-records.js";
@@ -56,13 +56,17 @@ export function inputBlocks(
 ): BodyBlock[] {
   const tokens = messages.map(messageTokens);
   const total = tokens.reduce((n, size) => n + size, 0);
-  const keep = unchangedPrefix(previous, messages);
+  const comparison = compareInputs(
+    previous ? { origin: "history-projection", messages: previous } : undefined,
+    { origin: "history-projection", messages, system: prompt },
+  );
+  const keep = comparison.text.sameMessages;
   return messages.map((message, i) => ({
     ...(i === 0 && {
       divider: previous
         ? keep > 0
-          ? "Same message prefix"
-          : "Changed input from here"
+          ? "Same message text prefix"
+          : "Changed message text from here"
         : "First input",
     }),
     ...(previous &&
@@ -73,7 +77,7 @@ export function inputBlocks(
     id: `message-${i}`,
     version: message,
     title: `${i + 1}. ${roleLabel(message)}`,
-    meta: `~${tokens[i]} text tok · ${pctOf(tokens[i] as number, total)}${message.role === "user" && message.images?.length ? ` · ${message.images.length} image(s), tokens unestimated` : ""}${previous ? (i < keep ? " · unchanged prefix" : " · after prefix") : ""}${message.edited ? " · edited" : ""}`,
+    meta: `~${tokens[i]} text tok · ${pctOf(tokens[i] as number, total)}${message.role === "user" && message.images?.length ? ` · ${message.images.length} image(s), tokens unestimated` : ""}${previous ? (i < keep ? " · unchanged text prefix" : " · after text prefix") : ""}${message.edited ? " · edited" : ""}${comparison.text.first?.message === i ? ` · ${textDifferenceLabel(comparison.text.first)}` : ""}`,
     preview:
       firstLine(visibleSourceText(message.content.slice(0, 512))) ||
       (message.role === "assistant" ? `${message.toolCalls.length} tool calls` : "(empty)"),

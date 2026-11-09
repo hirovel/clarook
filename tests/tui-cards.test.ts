@@ -4,13 +4,16 @@ import { rmSync } from "node:fs";
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { cacheNote, changeNote, firstRunLines, messageMarks, thinkingLines } from "../cli/cards.js";
+import { compareInputs, type InputSnapshot, requestSnapshot } from "../cli/input-comparison.js";
 import type { ModelSettings } from "../cli/model-settings.js";
 import { createTuiApp, type TuiApp, type TuiAppDeps } from "../cli/tui-app.js";
 import { brief, formatArgs, toolCallDetail } from "../cli/tui-format.js";
-import { now } from "../src/events.js";
+import { toolDefinitionTokens } from "../src/context.js";
+import { type AgentEvent, now } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import type { Message } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
+import { type SystemPrompt, systemText } from "../src/system-prompt.js";
 import { defineTool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
@@ -649,6 +652,147 @@ describe("少见事件与流式思考的渲染", () => {
 });
 
 describe("变化说明与缓存说明", () => {
+  it("输入比较分别说明文档、正文位置、完整工具、回传状态和捕获字节;缺历史证据保持未知", () => {
+    const prompt: SystemPrompt = [
+      { id: "head", name: "Rules", text: "S".repeat(7000), enabled: true },
+      { id: "tail", name: "Skills", text: "Tail", enabled: true },
+      { id: "off", name: "Hidden", text: "Stored but disabled", enabled: false },
+    ];
+    const tools = [
+      {
+        name: "read",
+        description: "Read text.",
+        parameters: { properties: { path: { type: "string" } } },
+      },
+    ];
+    const before: InputSnapshot = {
+      origin: "recorded-input",
+      system: prompt,
+      model: "m",
+      tools,
+      messages: [{ role: "system", content: systemText(prompt) }, user("question")],
+    };
+    const metadata = prompt.map((section) =>
+      section.id === "tail"
+        ? { ...section, name: "Renamed", source: "another source" }
+        : section.id === "off"
+          ? { ...section, text: "Changed while disabled" }
+          : section,
+    );
+    const marked: InputSnapshot = {
+      ...before,
+      origin: "current-candidate",
+      system: metadata,
+      messages: [
+        { role: "system", content: systemText(metadata), edited: true, prefixChanged: true },
+        user("question"),
+      ],
+    };
+    const sameText = compareInputs(before, marked);
+    expect(sameText).toMatchObject({
+      document: { status: "changed", sections: ["Renamed", "Hidden"] },
+      text: { status: "same", sameMessages: 2 },
+      tools: "same",
+      providerState: "changed",
+      wire: { bytes: "unknown", json: "unknown" },
+    });
+    expect(sameText.text.first).toBeUndefined();
+    expect(marked.messages[0]?.edited).toBe(true);
+    const edited = prompt.map((section) =>
+      section.id === "tail" ? { ...section, text: "Tale" } : section,
+    );
+    const tail = compareInputs(before, {
+      ...before,
+      system: edited,
+      messages: [{ role: "system", content: systemText(edited), edited: true }, user("question")],
+    });
+    expect(tail.text).toMatchObject({
+      status: "changed",
+      sameMessages: 0,
+      first: {
+        message: 0,
+        sameChars: 7004,
+        oldChars: 7006,
+        newChars: 7006,
+        section: { name: "Skills", char: 3 },
+      },
+    });
+    const changedTools = [
+      {
+        name: "read",
+        description: "Read file.",
+        parameters: { properties: { file: { type: "string" } } },
+      },
+    ];
+    expect(toolDefinitionTokens(changedTools)).toBe(toolDefinitionTokens(tools));
+    expect(
+      compareInputs(before, { ...before, tools: changedTools, model: "another" }),
+    ).toMatchObject({
+      text: { status: "same" },
+      tools: "changed",
+      model: "changed",
+    });
+    // JSON 结构相等不能消除字节顺序差异,重建预览也不能证明实际捕获相等。
+    const firstBody = {
+      ...before,
+      wire: { origin: "captured" as const, body: '{"model":"m","tools":["a","b"]}' },
+    };
+    const secondBody = {
+      ...marked,
+      wire: { origin: "captured" as const, body: '{"tools":["a","b"],"model":"m"}' },
+    };
+    expect(compareInputs(firstBody, secondBody).wire).toEqual({ bytes: "changed", json: "same" });
+    expect(
+      compareInputs(firstBody, {
+        ...secondBody,
+        wire: { origin: "captured", body: '{"tools":["b","a"],"model":"m"}' },
+      }).wire,
+    ).toEqual({ bytes: "changed", json: "changed" });
+    expect(
+      compareInputs(firstBody, {
+        ...firstBody,
+        wire: { ...firstBody.wire, origin: "reconstructed" },
+      }).wire,
+    ).toEqual({ bytes: "unknown", json: "unknown" });
+    expect(compareInputs(firstBody, firstBody).wire).toEqual({ bytes: "same", json: "same" });
+    expect(
+      compareInputs(firstBody, { ...firstBody, wire: { origin: "captured", body: "broken" } }).wire,
+    ).toEqual({ bytes: "changed", json: "unknown" });
+    const history: AgentEvent[] = [
+      { type: "session/start", at: now(), model: "m", system: prompt },
+      { type: "tools/snapshot", at: now(), tools },
+      { type: "user/message", at: now(), text: "question" },
+      {
+        type: "request",
+        at: now(),
+        model: "m",
+        messages: 2,
+        tools: ["read"],
+        estimatedTokens: 1,
+        reason: "turn",
+      },
+      { type: "context/edit", at: now(), target: 0, field: "system", value: edited },
+      { type: "tools/snapshot", at: now(), tools: changedTools },
+    ];
+    expect(requestSnapshot(history, 3)).toMatchObject({ system: prompt, tools, model: "m" });
+    const legacy = history.filter((event) => event.type !== "tools/snapshot");
+    const unknown = requestSnapshot(legacy, 2);
+    expect(unknown.tools).toBeUndefined();
+    expect(compareInputs(unknown, before).tools).toBe("unknown");
+    expect(compareInputs(unknown, before).wire.bytes).toBe("unknown");
+    // 临时 assemble 文本没有对应文档段,不能用同字符位置猜归属。
+    expect(
+      compareInputs(before, { ...before, messages: [{ role: "system", content: "assembled" }] })
+        .text.first?.section,
+    ).toBeUndefined();
+    const restored = compareInputs(
+      { ...before, messages: [{ role: "system", content: "assembled" }] },
+      before,
+    ).text.first;
+    expect(restored).toMatchObject({ message: 0, sameChars: 0, oldChars: 9, newChars: 7006 });
+    expect(restored?.section).toBeUndefined();
+  });
+
   it("只在有事时印:编辑、压缩、前缀重算、摘要请求、假设的窗口;第一次请求与正常追加不印", () => {
     const prev = [user("a"), assistant("b"), user("c"), assistant("d"), user("e")];
     const cur = [

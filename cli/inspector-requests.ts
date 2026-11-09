@@ -6,8 +6,9 @@ import type { AgentEvent } from "../src/events.js";
 import { compactionState, editState, isProjected, type Message } from "../src/messages.js";
 import { type Provider, parseEffort, type ToolDef } from "../src/provider.js";
 import { type SystemPrompt, systemParts, systemText } from "../src/system-prompt.js";
-import { compactionDecisionText, unchangedPrefix } from "./cards.js";
+import { compactionDecisionText } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
+import { unchangedTextPrefix } from "./input-comparison.js";
 import {
   cacheUsageLines,
   clock,
@@ -180,7 +181,7 @@ export function exchangeLines(
   const unknown =
     rec.results.filter((e) => e.outcome === "unknown").length +
     after.filter((e) => e.type === "tool/unresolved").length;
-  const keep = unchangedPrefix(previous, messages);
+  const keep = unchangedTextPrefix(previous, messages);
   return [
     c.bold(c.ink("Round trip")),
     c.ink(
@@ -188,7 +189,7 @@ export function exchangeLines(
     ),
     c.soft(
       previous
-        ? `vs #${rec.n - 1}: ${keep}/${previous.length} previous messages kept as prefix · ${messages.length - keep} following messages`
+        ? `vs #${rec.n - 1}: ${keep}/${previous.length} previous message texts kept as prefix · ${messages.length - keep} following messages`
         : "First request: no earlier input to compare",
     ),
     c.ink(
@@ -409,11 +410,11 @@ export function sentLines(
     ),
     "",
   ];
-  const keep = unchangedPrefix(previous, messages);
+  const keep = unchangedTextPrefix(previous, messages);
   messages.forEach((m, i) => {
     const tok = messageTokens(m);
     lines.push(
-      `${c.ink(`[${i + 1}] ${roleLabel(m)}`)}  ${c.soft(`~${tok} tok · ${pctOf(tok, total)}${previous ? (i < keep ? " · unchanged prefix" : " · after prefix") : ""}`)}${m.edited ? c.jin("  ✎ edited (original in the events view)") : ""}`,
+      `${c.ink(`[${i + 1}] ${roleLabel(m)}`)}  ${c.soft(`~${tok} tok · ${pctOf(tok, total)}${previous ? (i < keep ? " · unchanged text prefix" : " · after text prefix") : ""}`)}${m.edited ? c.jin("  ✎ edited (original in the events view)") : ""}`,
     );
     lines.push(...messageBodyLines(m, folded, prompt));
     lines.push("");

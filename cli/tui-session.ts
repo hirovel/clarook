@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import type { Terminal } from "@earendil-works/pi-tui";
 import { DEFAULT_APPROVAL } from "../src/approval.js";
 import type { Preset } from "../src/config.js";
-import { changeContext } from "../src/context-edit.js";
+import { changeContext, contextView } from "../src/context-edit.js";
 import { now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { deriveMessages } from "../src/messages.js";
@@ -21,6 +21,7 @@ import {
 } from "./bootstrap.js";
 import { McpConnections } from "./mcp/connections.js";
 import type { ProjectMcpReview } from "./mcp/trust.js";
+import type { Skill } from "./prompt.js";
 import type { DirectoryIssue } from "./session-directory.js";
 import { SessionInputs } from "./session-inputs.js";
 import { prepareSessionRuntime } from "./session-runtime.js";
@@ -220,10 +221,14 @@ export async function startTuiSession(options: {
   async function prepare(
     session: Session,
     args: CommonArgs,
-    setup?: SessionSetup,
-    allowUnavailable = false,
-    directory?: string,
+    options: {
+      setup?: SessionSetup;
+      allowUnavailable?: boolean;
+      directory?: string;
+      skills?: Skill[];
+    } = {},
   ) {
+    const { setup, allowUnavailable = false, directory, skills } = options;
     const binding: { view?: TuiApp } = {};
     const reviewView = () => {
       if (current?.view) return current.view;
@@ -235,6 +240,7 @@ export async function startTuiSession(options: {
       boot,
       args,
       ...session,
+      ...(skills && { skills }),
       connections,
       allowUnavailable,
       entryCwd: current?.runtime?.cwd ?? entryCwd,
@@ -346,19 +352,35 @@ export async function startTuiSession(options: {
         if (!reviewed) return;
         setup = reviewed;
       }
+      let initialPreambleTarget: number | undefined;
       while (!closed) {
         const values = withCurrentDisplay(setup.values, originalSetup.values);
         try {
           const args = argsFor(values);
-          if (!session) session = beginSession(args, boot.choose(args.model), origin, dir);
+          const creating = !session;
+          let skills: Skill[] | undefined;
+          if (!session) {
+            const {
+              skills: discovered,
+              preambleTarget,
+              ...opened
+            } = beginSession(args, boot.choose(args.model), origin, dir);
+            skills = discovered;
+            initialPreambleTarget = preambleTarget;
+            session = opened;
+          }
           candidate = session;
           old.view.note("Preparing session… Your current session remains available.");
-          prepared = await prepare(session, args, setup, false, directory);
+          prepared = await prepare(session, args, {
+            setup,
+            ...(directory !== undefined && { directory }),
+            ...(skills && { skills }),
+          });
           if (!prepared) return;
           // 所有可能失败的文件读取都发生在切换之前,不改目标的模型上下文。
           const prompt =
-            session.resumed && source !== "history"
-              ? systemPromptFor(args, prepared.runtime.cwd)
+            !creating && source !== "history"
+              ? systemPromptFor(args, prepared.runtime.cwd, { skills: prepared.runtime.skills })
               : undefined;
           const missingTools = setup.tools.filter(
             (name) =>
@@ -450,12 +472,26 @@ export async function startTuiSession(options: {
                   value: prompt.system,
                   note: `Session setup: regenerate prompt from ${source}`,
                 });
-              if (prompt.preamble.length)
-                session.log.append({
-                  type: "user/message",
-                  at: now(),
-                  text: prompt.preamble.map((p) => p.text).join("\n\n"),
-                });
+            }
+            if (prompt) {
+              const text = prompt.preamble.map((part) => part.text).join("\n\n");
+              if (initialPreambleTarget !== undefined) {
+                if (!text) {
+                  changeContext(session.log, { type: "drop", target: initialPreambleTarget });
+                  initialPreambleTarget = undefined;
+                } else if (
+                  contextView(session.log.events, initialPreambleTarget).fields[0]?.current !== text
+                )
+                  changeContext(session.log, {
+                    type: "edit",
+                    target: initialPreambleTarget,
+                    field: "content",
+                    value: text,
+                  });
+              } else if (text) {
+                if (target.kind === "new") initialPreambleTarget = session.log.events.length;
+                session.log.append({ type: "user/message", at: now(), text });
+              }
             }
           } catch (error) {
             current.view.note(
@@ -646,10 +682,11 @@ export async function startTuiSession(options: {
     });
     return closing;
   }
-  const session =
+  const opened: ReturnType<typeof beginSession> =
     options.args.resume || options.args.continue
       ? openSession(options.args, dir)
       : beginSession(options.args, first, entryCwd, dir);
+  const { skills, preambleTarget: _preambleTarget, ...session } = opened;
   if (session.resumed) {
     current = { session, args: options.args, view: prepareView(session, options.args)() };
     void switchSession({ kind: "resume", file: session.sessionFile }).catch((error) =>
@@ -682,7 +719,10 @@ export async function startTuiSession(options: {
     };
     let ready: Awaited<ReturnType<typeof prepare>>;
     try {
-      ready = await prepare(session, options.args, undefined, true);
+      ready = await prepare(session, options.args, {
+        allowUnavailable: true,
+        ...(skills && { skills }),
+      });
       if (!ready) throw new Error("Session preparation cancelled.");
     } catch (error) {
       return failStartup(error);

@@ -66,7 +66,7 @@ The received view includes replacement previews for `edit` and submitted content
 
 Use Ctrl+R to inspect past requests and Ctrl+E to review the current projected context. The draft is excluded; sending may compact history or append context. Edit active system instructions, messages and tool results in the internal editor. Exclude messages, restore edited text, or rewind context to an earlier step. Original content and edit records remain available for comparison. Edits to summarized or cleared content and rewinds across a summary are refused because they would not produce the promised input. Retry selects an assistant reply from the active context.
 
-System instructions keep each section's identity, text, source and enabled state in the event history. Select the system row in Ctrl+E, press Enter to open its sections, then use `e` to edit a section or Enter to switch it on or off. `a` adds or edits Custom instructions, including when the system is empty. `/edit N system` opens the same list; `/edit N system SECTION_ID [text]` edits a specific section. Disabled sections keep their text across restarts. Skills discovery and catalog updates change only the Skills section, preserving your edits to other sections. Comparisons include identities, sources, enabled state and deleted or disabled text. Literal system instructions appear as an editable Custom section. The current/defaults setup operation explicitly rebuilds the composition.
+System instructions keep each section's identity, text, source and enabled state in the event history. Select the system row in Ctrl+E, press Enter to open its sections, then use `e` to edit a section or Enter to switch it on or off. `a` adds or edits Custom instructions, including when the system is empty. `/edit N system` opens the same list; `/edit N system SECTION_ID [text]` edits a specific section. Disabled sections keep their text across restarts. Initial instructions are generated once. Ordinary continuation, history resume and skill discovery preserve the saved document, including your edits to Skills. Comparisons include identities, sources, enabled state and deleted or disabled text. Literal system instructions appear as an editable Custom section. The current/defaults setup operation explicitly rebuilds the composition from the selected settings.
 
 Excluding history also marks the changed prefix for Anthropic's existing conservative thinking-replay policy: earlier blocks stay eligible, later historical blocks are omitted from the request. Recorded content remains inspectable. Chat reasoning keeps its configured replay behavior.
 
@@ -77,6 +77,8 @@ Legacy requests without complete tool-definition evidence retain their original 
 Summaries append paths referenced by read and write/edit calls. These lists identify calls, not confirmed file operations; inspect tool results to check their outcomes.
 
 Compaction comparisons show the effective context before the whole compaction, including edits, exclusions, earlier summaries and previously cleared results. Messages retained in the resulting context, such as the protected session directory, are excluded from the replaced-message list and its totals. Ctrl+E uses the same content. A pipeline can change this input before its summary call; inspect the summary request separately for that call's input. Raw originals remain in Events. Source text displays terminal controls as visible escapes. In `replay --compaction N --json`, `covered` and `cleared` contain effective messages; the corresponding `*Indices` identify their source events.
+
+Input comparisons separate document changes, unchanged message text, complete tool definitions and provider-dependent replay state. System edits show the first text difference within a section when its recorded identity matches. Captured HTTP bytes and JSON structure are compared separately; missing captures remain unknown. These differences do not prove cache reuse. Reported cache usage stays separate.
 
 Each action states whether it changes the next input, sends a request immediately or creates a session file. After sending, inspect the captured request in Ctrl+R to check what was actually sent. Intervening log records appear in folded rows; select one and press Enter to inspect them.
 
@@ -98,7 +100,7 @@ Keep tool definitions stable within a conversation when possible. Put task-speci
 
 Optional cost estimates cover the main session only, excluding child sessions. They use reported tokens and configured or catalog rates and are not a bill.
 
-Skills are manual by default: `/name your request`. Automatic selection is optional. Skills follow the session's tool approval rules; skill metadata does not grant permissions. MCP tools and JavaScript/TypeScript extensions add capabilities or replace strategies.
+Skills are manual by default: `/name your request`. Automatic selection is optional. Skills mode, source directories, automatic range and loading method are saved for future session preparation; they leave the current document and tools unchanged. A new session or explicit current/defaults rebuild can use the saved settings. History resume keeps its recorded setup. Initial instructions and runtime skills share one discovery result; runtime resources may be discovered again after a restart without rewriting saved instructions. Skills follow the session's tool approval rules; skill metadata does not grant permissions. MCP tools and JavaScript/TypeScript extensions add capabilities or replace strategies.
 
 MCP tool refreshes use a complete paginated list. Repeated cursors or more than 100 pages reject the refresh and keep the previous catalog. Closing a stdio connection also cleans up its local pipes and remaining POSIX process group when the direct server has already exited.
 
@@ -109,6 +111,8 @@ For earlier compaction, set `compactionRatio` in `/settings`: `0` disables it; `
 ### Work and resume
 
 Built-in tools read, write and edit files, run commands, search file contents and paths, and fetch pages. The agent continues through tool calls until the model finishes. In fullscreen mode, PgUp/PgDn pages through the transcript; Shift+PgUp/PgDn selects a request, and Enter folds or expands it when the input is empty. Esc closes a view or returns to live output before interrupting a running turn. `/session` creates, resumes and forks sessions. Type in the resume list to search all saved sessions by their latest user message, model or path. History, API bodies and original tool output are stored locally.
+
+The `userMessagesOnly` child scope inherits prior user messages with current edits and exclusions applied, including early requirements covered by compaction. Tool results and assistant steps are omitted. Those early messages can increase child input size.
 
 Each built-in `bash` call starts in its configured working directory. `cd` affects only that call; use `cd path && command` to run elsewhere. Shell directory changes do not carry over to later calls.
 

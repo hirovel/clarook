@@ -1,9 +1,9 @@
 // 事实附注与计划复述:代码算的事实贴在产生它的事件上,模型写的计划只在压缩后或久未更新时复述到末尾;
-// 两者都只追加,前缀不动。还量了三种注入方式的重算代价,证明"贴在事件上"是缓存代价最低的一种。
+// 两者都只追加,正文前缀不动;合成场景只比较变动正文的估算量,不证明服务端缓存代价。
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { buildTools } from "../cli/bootstrap.js";
-import { unchangedPrefix } from "../cli/cards.js";
+import { unchangedTextPrefix } from "../cli/input-comparison.js";
 import { createBashTool } from "../cli/tools/bash.js";
 import { messageTokens } from "../src/context.js";
 import type { AgentEvent, ToolCall } from "../src/events.js";
@@ -357,12 +357,12 @@ describe("前缀不变量与注入方式的代价", () => {
     for (let k = 0; k < log.events.length; k++) {
       if (log.events[k]?.type !== "request") continue;
       const cur = deriveMessages(log.events.slice(0, k));
-      if (prev) expect(unchangedPrefix(prev, cur)).toBe(prev.length);
+      if (prev) expect(unchangedTextPrefix(prev, cur)).toBe(prev.length);
       prev = cur;
     }
   });
 
-  it("三种注入方式在同一段会话上的重算代价:贴在事件上最低,每轮替换最高", () => {
+  it("三种注入方式在合成会话中的变动正文估算量:贴在事件上最低,每轮替换最高", () => {
     // 30 步的合成会话:每步一条助手消息、一条工具结果;状态栏每步一条。
     const status = (n: number): Message => ({ role: "user", content: `[status] step ${n} of 30` });
     const step = (n: number): Message[] => [
@@ -382,7 +382,7 @@ describe("前缀不变量与注入方式的代价", () => {
         const tokens = cur.map((m) => messageTokens(m));
         sent += tokens.reduce((a, b) => a + b, 0);
         if (prev) {
-          const keep = unchangedPrefix(prev, cur);
+          const keep = unchangedTextPrefix(prev, cur);
           for (let i = keep; i < cur.length; i++) recomputed += tokens[i] as number;
         }
         prev = cur;

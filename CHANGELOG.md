@@ -12,7 +12,9 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Changed
 
-- Store system sections with stable identities, full text and enabled state instead of character-count metadata. Edit and toggle explicit sections; preserve manual instructions while automatic Skills discovery, catalog refresh and tool loading continue. System text is rendered from the recorded document.
+- Apply Skills mode, sources, range and loading settings during future session preparation. Preserve the current system document and tools; share initial skill discovery with runtime assembly, and reuse prepared skills for explicit prompt rebuilds.
+- Compare document changes, message text, complete tool declarations and provider-dependent replay state separately. Locate system text changes within known sections; distinguish captured HTTP byte changes from JSON structure and actual cache usage.
+- Store system sections with stable identities, full text and enabled state instead of character-count metadata. Edit and toggle explicit sections; preserve saved manual instructions while prepared skills remain available for loading. System text is rendered from the recorded document.
 - Route context edits, restores, exclusions, rewinds and retry preparation through one context operation module. Menus and execution use the same availability rules and report the actual affected input.
 - Compare complete system documents, including removed sections, disabled text, identities, sources and enabled state. Keep empty system documents editable through the Custom section action.
 - Start each built-in Bash call from its configured directory. Keep `cd` local to that invocation; remove cross-call directory tracking and the hidden output marker protocol.
@@ -25,6 +27,8 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Apply current user-message edits and exclusions to `userMessagesOnly` child contexts while retaining early requirements covered by compaction. Preserve images and the recorded system document.
+- Reject model changes in the Agent interface while work is running, before changing selection or recording a model fact. Keep the existing idle-only model-switch behavior across callers.
 - Exclude messages that survive a compaction from its replaced-message comparison and totals. Use the actual context projection so protected directory facts remain consistent across the workbench, inspector and replay.
 - Pause all undelivered input when an activity ends, including step-limit and provider-aborted results. Keep paused follow-ups out of new questions until explicitly continued.
 - Bind file and search tools, attachments, completion, skills, memory, approval, extensions, subagents and MCP processes to the session directory. Resolve explicit CLI resource files at launch and saved relative resources at the session root. Commit directory changes after the target view and resources are ready; cancellation or preparation failure keeps the previous binding and draft.
@@ -156,7 +160,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 - Keep the tail and input marker visible when typing long paths, values or preset names in the setup view. Slice by terminal columns for wide characters; preserve the complete value.
 
-- Configure skill discovery directories in `/settings prompt.skills.sources`. Keep four enabled defaults, toggle sources, add custom paths, and remove custom sources without deleting files. Rescan idle sessions immediately, keep in-flight runs unchanged, and preserve loaded instructions. Save source choices with defaults, presets and session setup. Preserve spaces in typed setting values.
+- Configure skill discovery directories in `/settings prompt.skills.sources`. Keep four enabled defaults, toggle sources, add custom paths, and remove custom sources without deleting files. Apply source changes during future session preparation, keeping current tools and saved instructions unchanged. Save source choices with defaults, presets and session setup. Preserve spaces in typed setting values.
 
 - Treat failed Responses terminal events as errors even when details are missing, and reject incomplete responses for reasons other than the output-token limit before handing over tool calls. Keep existing truncation recovery. Use English for fixed tool-validation and stream-error text.
 
@@ -223,7 +227,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 - Edit context text and tool descriptions inside the terminal, with explicit Apply and Cancel actions. Preserve the message draft and original history. Remove Ctrl+G, external editor processes and temporary edit files.
 - Label where skill catalogs enter requests: system prompt for read loading, tool definition for skill loading, and no catalog for manual invocation. Distinguish catalogs from loaded instructions.
 
-- Default skills to manual invocation. Add live automatic selection and a shared checkbox range, saved in defaults and presets. `include: "all"` includes future discoveries; arrays keep specific names. Replace `prompt.skills.list` with `mode` and `include`; the old key reports an error. Dedicated skill tools carry the selected catalog without repeating it in the system prompt.
+- Default skills to manual invocation. Add optional automatic selection and a shared checkbox range, saved for future session preparation in defaults and presets. `include: "all"` includes future discoveries; arrays keep specific names. Replace `prompt.skills.list` with `mode` and `include`; the old key reports an error. Dedicated skill tools carry the selected catalog without repeating it in the system prompt.
 
 - Keep skill instructions literal and append invocation arguments as a separate request. Skills no longer substitute `$1`, `$@` or `$ARGUMENTS`; prompt templates still do.
 

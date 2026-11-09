@@ -526,12 +526,13 @@ describe("Agent setup", () => {
     app.stop();
   });
 
-  it("需要重启的设置不冒充当前已生效;空段列表可以真的保存为空", async () => {
-    const { app, menu, saved } = boot();
+  it("来源设置拒绝当前应用;空段列表可以保存且不改变当前选择", async () => {
+    const { app, menu, saved, log } = boot();
     await app.command("/settings prompt.sections");
+    const before = log.events.length;
     app.dialogInput(ENTER);
-    expect(menu()).toContain("Requires a restart");
     expect(saved).toEqual([]);
+    expect(log.events).toHaveLength(before);
     app.dialogInput(TAB);
     app.dialogInput(ENTER);
     for (let i = 0; i < 6; i++) {
@@ -546,7 +547,7 @@ describe("Agent setup", () => {
     app.stop();
   });
 
-  it("运行中策略切换失败不会把拒绝的值保存;界面设置仍可改", async () => {
+  it("运行中策略拒绝不保存;界面立即修改,来源只保存", async () => {
     let finish: ((turn: AssistantTurn) => void) | undefined;
     const provider: Provider = {
       model: "m",
@@ -555,7 +556,7 @@ describe("Agent setup", () => {
           finish = r;
         }),
     };
-    const { app, doc, saved } = boot({ provider });
+    const { app, doc, saved, log } = boot({ provider });
     const pending = app.submit("wait");
     await tick();
     await app.command("/settings execution parallel");
@@ -563,6 +564,11 @@ describe("Agent setup", () => {
     expect(saved).toEqual([]);
     await app.command("/settings foldLines 9");
     expect(saved).toEqual([["foldLines", 9]]);
+    const before = log.events.length;
+    await app.command("/settings prompt.skills.sources {}");
+    expect(saved.at(-1)).toEqual(["prompt.skills.sources", {}]);
+    expect(log.events).toHaveLength(before);
+    expect(app.setup().values.prompt?.skills?.sources?.["user-clarook"]).toBe("on");
     finish?.({ text: "ok", toolCalls: [], stopReason: "end" });
     await pending;
     app.stop();
@@ -693,6 +699,7 @@ describe("Agent setup", () => {
     expect(menu()).toContain("Current: Clear tool results (clear)");
     expect(menu()).toContain("Saved default: Model summary (llm)");
     await app.command("/settings prompt.skills.sources");
+    app.dialogInput(TAB);
     app.dialogInput(ENTER);
     app.dialogInput("\x1b[F");
     app.dialogInput(ENTER);

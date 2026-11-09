@@ -109,6 +109,18 @@ describe("Agent", () => {
     const first = agent.prompt("第一条");
     await tick();
     expect(agent.running).toBe(true);
+    let replacementCalls = 0;
+    const replacement: Provider = {
+      model: "replacement",
+      async complete() {
+        replacementCalls++;
+        return { text: "new model reply", toolCalls: [], stopReason: "end" };
+      },
+    };
+    const beforeSwitch = JSON.stringify(log.events);
+    expect(() => agent.setProvider(replacement)).toThrow("cannot switch models while running");
+    expect(agent.provider).toBe(provider);
+    expect(JSON.stringify(log.events)).toBe(beforeSwitch);
 
     void agent.prompt("插话", { images: [testImage] }); // 运行中 → 排队
     const viewed = agent.pending[0]?.images;
@@ -129,6 +141,21 @@ describe("Agent", () => {
     expect(types.indexOf("user/message", types.indexOf("tool/result"))).toBeLessThan(
       types.lastIndexOf("assistant/message"),
     );
+    expect(calls).toBe(2);
+    expect(replacementCalls).toBe(0);
+    expect(
+      log.events.filter((event) => event.type === "request").map((event) => event.model),
+    ).toEqual(["fake", "fake"]);
+    agent.setProvider(replacement);
+    await agent.prompt("空闲后切换模型");
+    expect(replacementCalls).toBe(1);
+    expect(log.events.filter((event) => event.type === "session/model")).toMatchObject([
+      { model: "replacement" },
+    ]);
+    expect(log.events.filter((event) => event.type === "request").at(-1)?.model).toBe(
+      "replacement",
+    );
+    expect(log.events.at(-1)).toMatchObject({ type: "assistant/message", text: "new model reply" });
     const restoredImage = { ...testImage };
     const restored = new Agent({
       log: newLog(),

@@ -7,6 +7,7 @@ import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ClipboardInput } from "../cli/clipboard-input.js";
 import type { ModelSettings } from "../cli/model-settings.js";
+import { discoverSkills } from "../cli/prompt.js";
 import { SessionInputs } from "../cli/session-inputs.js";
 import { forkSession } from "../cli/sessions.js";
 import { appendMemory } from "../cli/tools/memory.js";
@@ -1236,6 +1237,11 @@ describe("命令的分支", () => {
 
   it("/prompt 段构成与 instructions-as user 的提示;/compact 失败;/fork 的三种参数;未知命令与模板", async () => {
     tmp = mkdtempSync(join(tmpdir(), "clarook-tui-"));
+    const sources = { "project-agents": "on" } as const;
+    const skill = join(tmp, ".agents", "skills", "directory-review");
+    mkdirSync(skill, { recursive: true });
+    writeFileSync(join(skill, "SKILL.md"), "Review from the selected directory.");
+    const saveSetting = vi.fn();
     const resumed: string[] = [];
     const switches: SessionTarget[] = [];
     const log = new EventLog();
@@ -1254,6 +1260,16 @@ describe("命令的分支", () => {
       {
         cwd: tmp,
         sessionsDir: tmp,
+        startupSettings: { prompt: { skills: { sources } } },
+        settings: {
+          listModels: () => [],
+          switchModel: () => {
+            throw new Error("n/a");
+          },
+          setKey: () => {},
+          setDefault: () => {},
+          saveSetting,
+        },
         switchSession: (target) => {
           switches.push(target);
           if (target.kind === "resume") resumed.push(target.file);
@@ -1267,6 +1283,7 @@ describe("命令的分支", () => {
         },
         templates: [{ name: "greet", description: "say hi", body: "Hi $ARGUMENTS", path: "t.md" }],
         skills: [
+          ...discoverSkills(tmp, { sources }),
           {
             name: "review",
             description: "review text",
@@ -1349,10 +1366,21 @@ describe("命令的分支", () => {
     expect(approval).toMatchObject({
       value: expect.stringContaining("read:folder with  spaces/**"),
     });
-    const skill = join(tmp, ".agents", "skills", "directory-review");
-    mkdirSync(skill, { recursive: true });
-    writeFileSync(join(skill, "SKILL.md"), "Review from the selected directory.");
-    await app.command('/settings prompt.skills.sources {"project-agents":"on"}');
+    const futureSkill = join(tmp, ".claude", "skills", "future-review");
+    mkdirSync(futureSkill, { recursive: true });
+    writeFileSync(join(futureSkill, "SKILL.md"), "Only a future prepared session sees this skill.");
+    const beforeSources = log.events.length;
+    await app.command(
+      '/settings prompt.skills.sources {"project-agents":"on","project-claude":"on"}',
+    );
+    expect(saveSetting).toHaveBeenCalledWith("prompt.skills.sources", {
+      "project-agents": "on",
+      "project-claude": "on",
+    });
+    expect(app.setup().values.prompt?.skills?.sources).toEqual(sources);
+    await app.command("/future-review");
+    expect(doc(app)).toContain("unknown command /future-review");
+    expect(log.events).toHaveLength(beforeSources);
     await app.command("/directory-review");
     expect(log.events.filter((event) => event.type === "user/message").at(-1)).toMatchObject({
       text: expect.stringContaining("Review from the selected directory."),

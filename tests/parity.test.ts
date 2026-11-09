@@ -712,17 +712,19 @@ describe("技能段", () => {
       base: "角色",
       cwd: proj,
       skills: { mode: "auto" },
+      catalog: skills,
       discover: { home, root: proj },
       env: { git: false },
     });
     const sec = built.sections.find((s) => s.name === "Skills");
     expect(sec?.text).toContain("- deploy: 发布流程");
     expect(sec?.text).not.toContain("步骤很长很长");
-    // 不点名技能段就不扫目录、不注入。
+    // 不点名技能段就不注入已经发现的目录。
     const without = buildSystemPrompt({
       base: "角色",
       cwd: proj,
       skills: { mode: "auto" },
+      catalog: skills,
       discover: { home, root: proj },
       env: { git: false },
       sections: ["role", "env"],

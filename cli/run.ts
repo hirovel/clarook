@@ -54,13 +54,17 @@ try {
   process.exit(1);
 }
 
-const { log, sessionFile } = beginSession(args, choice, process.cwd(), sessionsDir(boot.config));
+const session = beginSession(args, choice, process.cwd(), sessionsDir(boot.config));
+const { log, sessionFile } = session;
 // 事件流输出(--events):每条事件一行 JSON,与会话文件逐字节相同;给外部程序订阅内核的全部状态变化。
 if (args.events) log.subscribe((e) => process.stdout.write(`${JSON.stringify(e)}\n`));
-log.subscribe((e) => {
+const reportSkillError = (e: AgentEvent) => {
   if (e.type === "ext/event" && e.source === "skills" && e.kind === "load-error")
     console.error(String(e.payload.message));
-});
+};
+// 初稿发现发生在订阅之前;只补显示本次新建的诊断,不重印恢复历史。
+if (!session.resumed) for (const event of log.events) reportSkillError(event);
+log.subscribe(reportSkillError);
 let runtime: Awaited<ReturnType<typeof prepareSessionRuntime>>;
 let agent: Agent;
 const recordings = new Set<typeof log>();
@@ -93,8 +97,7 @@ try {
   const prepared = await prepareSessionRuntime({
     boot,
     args,
-    log,
-    sessionFile,
+    ...session,
     slots: () => agent.slots,
     current: () => ({
       provider: agent.provider,

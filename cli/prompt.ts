@@ -200,7 +200,7 @@ export function automaticSkills(skills: readonly Skill[], config: SkillsConfig =
 }
 
 export function skillsSection(
-  skills: Skill[],
+  skills: readonly Skill[],
   config: SkillsConfig = {},
 ): PromptSection | undefined {
   // 专用工具在自己的描述里列目录,避免两处重复占用上下文。
@@ -403,8 +403,8 @@ export type BuildPromptOptions = {
   /** 项目指令与记忆放 system 还是首条 user 消息。缺省 system。 */
   instructionsAs?: "system" | "user";
   skills?: SkillsConfig;
-  /** 正式入口统一由运行资源装配记录错误;独立调用时默认打印。 */
-  onSkillError?: (error: Error) => void;
+  /** 来源装配交入同次发现结果;正文生成不再次扫描技能。 */
+  catalog?: readonly Skill[];
   discover?: DiscoverOptions;
   env?: { now?: Date; env?: NodeJS.ProcessEnv; git?: boolean };
 };
@@ -425,17 +425,9 @@ export function buildSystemPrompt(opts: BuildPromptOptions): BuiltPrompt {
     text: section.text.trim(),
     enabled: true,
   });
-  // 自动技能目录有独立身份,自定义角色正文也不会夺走它的更新资格。
+  // 初稿只消费来源装配的目录,不会从磁盘再生成另一份技能结果。
   const skills = order.includes("skills")
-    ? skillsSection(
-        discoverSkills(opts.cwd, {
-          ...(opts.skills?.sources && { sources: opts.skills.sources }),
-          ...(opts.discover?.home && { home: opts.discover.home }),
-          ...(opts.discover?.root && { root: opts.discover.root }),
-          ...(opts.onSkillError && { onError: opts.onSkillError }),
-        }),
-        opts.skills,
-      )
+    ? skillsSection(opts.catalog ?? [], opts.skills)
     : undefined;
   if (opts.replace !== undefined) {
     return {

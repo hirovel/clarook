@@ -680,6 +680,7 @@ describe("请求检视器", () => {
 
     // 历史工具同名也可能改了定义;只比较实录,不借当前工具集猜测。
     const records = build(log, bare).insp.records();
+    let capturePrevious = false;
     const recorded = new RequestInspector({
       events: () => log.events,
       providerFor: () => undefined,
@@ -694,7 +695,9 @@ describe("请求检视器", () => {
                   bodies:
                     section === "wire" && rec.n === 2
                       ? ['{"tools":[{"name":"echo","description":"captured HTTP definition"}]}']
-                      : [],
+                      : section === "wire" && capturePrevious
+                        ? ['{"tools":[{"description":"captured HTTP definition","name":"echo"}]}']
+                        : [],
                   input: {
                     messages: requestMessages(log.events, rec.index),
                     tools: [
@@ -714,9 +717,14 @@ describe("请求检视器", () => {
     recorded.showRequest(2, 3);
     const compared = recorded.render(100).map(stripAnsi).join("\n");
     expect(compared).toContain("Tool definitions: changed");
-    expect(compared).toContain("Same message prefix");
+    expect(compared).toContain("Same message text prefix");
     expect(compared).toContain("Added since previous input");
     expect(compared).toContain("Cache hit: not reported");
+    expect(compared).toContain("HTTP bytes: unknown");
+    capturePrevious = true;
+    const byteComparison = recorded.render(100).map(stripAnsi).join("\n");
+    expect(byteComparison).toContain("HTTP bytes: changed · JSON structure: unchanged");
+    capturePrevious = false;
     recorded.showRequest(1, 4);
     const savedDefinitions = recorded.render(100).map(stripAnsi).join("\n");
     expect(savedDefinitions).toContain("Definitions saved with this request's adapter input");

@@ -9,6 +9,12 @@ import { messageTokens as estimateMessageTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
 import type { Message } from "../src/messages.js";
 import { isAnthropicOpaque, toAnthropicWire } from "../src/providers/anthropic.js";
+import {
+  compareInputs,
+  type InputComparison,
+  textDifferenceLabel,
+  unchangedTextPrefix,
+} from "./input-comparison.js";
 import { fmtMs, fmtTok } from "./inspector-format.js";
 import { fmtWindow } from "./registry.js";
 import { c, G } from "./theme.js";
@@ -34,10 +40,8 @@ export function firstLine(s: string, max = 60): string {
   return l.length > max ? `${l.slice(0, max)}…` : l;
 }
 
-// 消息对象在一次投影里是固定的,按对象记住 token 数与 JSON 形态:
-// 同一条消息要算好几次,长会话回放时这两处是二次方的主项。
+// 消息对象在一次投影里是固定的,复用原有的 token 估算。
 const tokenMemo = new WeakMap<Message, number>();
-const keyMemo = new WeakMap<Message, string>();
 
 function messageTokens(m: Message): number {
   const hit = tokenMemo.get(m);
@@ -45,28 +49,6 @@ function messageTokens(m: Message): number {
   const n = estimateMessageTokens(m);
   tokenMemo.set(m, n);
   return n;
-}
-
-/** 消息的比较键:JSON 全文,按对象缓存;两次投影里内容相同的消息键相同。 */
-function messageKey(m: Message): string {
-  const hit = keyMemo.get(m);
-  if (hit !== undefined) return hit;
-  const k = JSON.stringify(m);
-  keyMemo.set(m, k);
-  return k;
-}
-
-/** 相同消息前缀有多长:逐条比 JSON(按对象缓存),不含工具定义和供应商格式。 */
-export function unchangedPrefix(prev: Message[] | undefined, cur: Message[]): number {
-  if (!prev) return 0;
-  let i = 0;
-  while (i < prev.length && i < cur.length) {
-    const a = prev[i] as Message;
-    const b = cur[i] as Message;
-    if (a !== b && messageKey(a) !== messageKey(b)) break;
-    i++;
-  }
-  return i;
 }
 
 function tokensOf(messages: Message[], upTo = messages.length): number {
@@ -79,7 +61,7 @@ function tokensOf(messages: Message[], upTo = messages.length): number {
 export function predictedCache(
   previous: Message[] | undefined,
   messages: Message[],
-  keep = unchangedPrefix(previous, messages),
+  keep = unchangedTextPrefix(previous, messages),
 ): number {
   return tokensOf(messages, keep);
 }
@@ -94,7 +76,7 @@ export function messageMarks(
   messages: Message[],
   previous: Message[] | undefined,
   provenance?: { event: number; stages: string[] }[],
-  keep = unchangedPrefix(previous, messages),
+  keep = unchangedTextPrefix(previous, messages),
 ): MessageMark[] {
   return messages.map((m, i) => {
     const stages = provenance?.[i]?.stages ?? [];
@@ -121,6 +103,8 @@ export type ChangeInput = {
   provenance?: { event: number; stages: string[] }[];
   /** 上一次正常步发出的消息;没有就是第一次。 */
   previous?: Message[];
+  /** 调用方已有的文档、工具与请求边界证据;不为显示准备下一次请求。 */
+  comparison?: InputComparison;
   /** 实际输入省略的 thinking/redacted 块数,由来源与适配器结果派生。 */
   droppedThinking?: number;
   /** 窗口数据的出处(config / models.dev / assumed)。 */
@@ -186,7 +170,13 @@ export function changeNote(input: ChangeInput): string | undefined {
       ),
     );
   if (!input.previous) return lines[0];
-  const keep = unchangedPrefix(input.previous, messages);
+  const comparison =
+    input.comparison ??
+    compareInputs(
+      { origin: "history-projection", messages: input.previous },
+      { origin: "history-projection", messages },
+    );
+  const keep = comparison.text.sameMessages;
   const marks = messageMarks(messages, input.previous, input.provenance, keep);
   const count = (s: MessageState) => marks.filter((m) => m.state === s);
   const edited = count("edited");
@@ -202,8 +192,21 @@ export function changeNote(input: ChangeInput): string | undefined {
   // 前缀断了:上次发过的某条消息变了或没了,而上面两种来历都解释不了。
   if (keep < input.previous.length && parts.length === 0)
     parts.push(`prefix recomputed from #${marks[keep]?.idx ?? keep + 1}`);
+  if (comparison.document.status === "changed")
+    parts.push(`document: ${comparison.document.sections.join(", ") || "structure"} changed`);
+  if (comparison.text.first)
+    parts.push(
+      `${messages[keep]?.role ?? "message"} text: ${textDifferenceLabel(comparison.text.first)}`,
+    );
+  if (comparison.tools === "changed") parts.push("tool definitions changed");
+  if (comparison.model === "changed") parts.push("model changed");
+  if (comparison.providerState === "changed")
+    parts.push("replay state changed · wire impact is provider-dependent");
   // 已省略的旧块会留在来源记录里;稳定追加时不重复报告同一变化。
-  const thinking = keep < input.previous.length ? (input.droppedThinking ?? 0) : 0;
+  const thinking =
+    keep < input.previous.length || comparison.providerState === "changed"
+      ? (input.droppedThinking ?? 0)
+      : 0;
   if (thinking > 0) parts.push(`${thinking} thinking block${thinking > 1 ? "s" : ""} dropped`);
   if (parts.length === 0) return lines[0];
   const recomputed = messages.length - keep;
@@ -222,7 +225,7 @@ const CACHE_MIN_TOKENS = 1024;
 
 /**
  * 缓存说明:实测命中率明显低于预计时印一行;正常时不印。
- * 消息表没变而缓存没中,说明请求里消息之外的什么变了(参数、工具定义、系统提示词)。
+ * 相同正文也不能证明命中;配置、协议、断点、缓存寿命和供应商条件均可能影响结果。
  */
 export function cacheNote(u: Usage, predicted: number | undefined): string | undefined {
   if (u.cacheReadTokens === undefined || u.inputTokens <= 0) return undefined;
@@ -230,7 +233,7 @@ export function cacheNote(u: Usage, predicted: number | undefined): string | und
   const ratio = u.cacheReadTokens / u.inputTokens;
   if (ratio >= 0.5) return undefined;
   return `${c.jin(G.compact)} ${c.faint(
-    `cache hit ${Math.round(ratio * 100)}% · ${fmtTok(u.cacheReadTokens)} of ${fmtTok(u.inputTokens)} tok · unchanged text ≈${fmtTok(predicted)} tok`,
+    `cache hit ${Math.round(ratio * 100)}% · ${fmtTok(u.cacheReadTokens)} of ${fmtTok(u.inputTokens)} tok · unchanged text ≈${fmtTok(predicted)} tok · text estimates do not predict cache hits`,
   )}`;
 }
 

@@ -211,20 +211,27 @@ describe("真实入口(子进程)", () => {
     tmp = mkdtempSync(join(tmpdir(), "ak-cli-"));
     const project = join(tmp, "A");
     mkdirSync(project);
+    writeFileSync(join(project, "AGENTS.md"), "UNIQUE CLI PROJECT INSTRUCTION");
+    const badSkill = join(project, ".agents", "skills", "broken", "SKILL.md");
+    mkdirSync(join(project, ".agents", "skills", "broken"), { recursive: true });
+    writeFileSync(badSkill, "---\nname: [broken\n---\nbody");
     const model = await fakeModel();
     const cfg = join(tmp, "config.json");
     writeFileSync(
       cfg,
       JSON.stringify({
         default: "m",
+        defaults: { prompt: { instructionsAs: "user" } },
         providers: { fake: { protocol: "openai", baseUrl: model.url, apiKey: "k", models: ["m"] } },
       }),
     );
     const ok = await run(RUN, ["你好", "--json", "--effort", "low"], {
       cwd: project,
-      env: { CLAROOK_CONFIG: cfg },
+      env: { CLAROOK_CONFIG: cfg, CLAROOK_CREDENTIALS: join(tmp, "no-credentials.json") },
     });
     expect(ok.code, ok.stderr).toBe(0);
+    expect(ok.stderr).toContain(badSkill);
+    expect(ok.stderr.match(/Skipped skill /g)).toHaveLength(1);
     const out = JSON.parse(ok.stdout) as Record<string, unknown>;
     expect(out).toMatchObject({ ok: true, model: "m", text: "收到:你好", steps: 1, requests: 1 });
     expect(model.calls).toBe(1);
@@ -237,6 +244,12 @@ describe("真实入口(子进程)", () => {
     expect(Array.isArray(first.system)).toBe(true);
     expect(lines.some((l) => l.includes('"effort":"low"'))).toBe(true);
     const events = lines.map((line) => JSON.parse(line) as AgentEvent);
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "user/message" && event.text.includes("UNIQUE CLI PROJECT INSTRUCTION"),
+      ),
+    ).toHaveLength(1);
     const snapshotIndex = events.findIndex(
       (event) =>
         event.type === "ext/event" && event.source === "setup" && event.kind === "snapshot",

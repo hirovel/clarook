@@ -311,7 +311,7 @@ export const SETTINGS: readonly SettingDef[] = [
     ],
     note: "who chooses when to load a skill",
     builtin: "manual",
-    scope: "now",
+    scope: "next start",
   },
   {
     key: "prompt.skills.sources",
@@ -320,7 +320,7 @@ export const SETTINGS: readonly SettingDef[] = [
     values: onOff,
     note: "skill discovery directories; enable, add or remove sources",
     builtin: DEFAULT_SKILL_SOURCES,
-    scope: "now",
+    scope: "next start",
   },
   {
     key: "prompt.skills.include",
@@ -328,7 +328,7 @@ export const SETTINGS: readonly SettingDef[] = [
     type: "list",
     note: "automatic skill range: all includes future discoveries; a list fixes the names",
     builtin: "all",
-    scope: "now",
+    scope: "next start",
   },
   {
     key: "prompt.skills.load",
@@ -343,7 +343,7 @@ export const SETTINGS: readonly SettingDef[] = [
     ],
     note: "how the model loads a skill it picked",
     builtin: "read",
-    scope: "now",
+    scope: "next start",
   },
   // ---------- tools ----------
   {

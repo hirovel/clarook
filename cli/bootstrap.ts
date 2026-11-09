@@ -29,7 +29,13 @@ import type { SystemSection } from "../src/system-prompt.js";
 import type { Tool } from "../src/tools.js";
 import { applyPreset, type CommonArgs, parseCommonArgs } from "./args.js";
 import type { ModelChoice, ModelSettings } from "./model-settings.js";
-import { buildSystemPrompt, type DiscoverOptions, findGitRoot, type Skill } from "./prompt.js";
+import {
+  buildSystemPrompt,
+  type DiscoverOptions,
+  discoverSkills,
+  findGitRoot,
+  type Skill,
+} from "./prompt.js";
 import {
   capabilityNote,
   fetchRegistry,
@@ -307,27 +313,37 @@ type PromptArgs = Pick<
 export function systemPromptFor(
   args: PromptArgs,
   cwd = process.cwd(),
-  /** 发现目录的覆盖(测试用:临时的用户目录与仓库根)。 */
-  discover?: DiscoverOptions,
+  /** 已准备的技能可直接用于明确重建;目录覆盖用于隔离来源。 */
+  sources: DiscoverOptions & { skills?: Skill[] } = {},
 ): {
   system: SystemSection[];
   /** 改放首条 user 消息的段(--instructions-as user)。 */
   preamble: { name: string; text: string }[];
+  skills: Skill[];
+  warnings: string[];
 } {
   const read = (p: string | undefined) => (p ? readFileSync(resolve(cwd, p), "utf8") : undefined);
   const replace = read(args.systemPromptFile);
   const append = read(args.appendSystemPromptFile);
+  const warnings: string[] = [];
+  const skills =
+    sources.skills ??
+    discoverSkills(cwd, {
+      ...(args.skillsSources && { sources: args.skillsSources }),
+      ...(sources.home && { home: sources.home }),
+      ...(sources.root && { root: sources.root }),
+      onError: (error) => warnings.push(error.message),
+    });
   const built = buildSystemPrompt({
     base: BASE_PROMPT,
     cwd,
-    ...(discover && { discover }),
+    discover: sources,
     ...(replace !== undefined && { replace }),
     ...(append !== undefined && { append }),
     ...(args.promptSections && { sections: args.promptSections }),
     memory: args.memory ?? false,
     ...(args.instructionsAs && { instructionsAs: args.instructionsAs }),
-    // prepareSessionRuntime 同样扫描技能,在那里只记一次完整诊断并上屏。
-    onSkillError: () => {},
+    catalog: skills,
     skills: {
       ...(args.skillsMode && { mode: args.skillsMode }),
       ...(args.skillsInclude !== undefined && { include: args.skillsInclude }),
@@ -338,6 +354,8 @@ export function systemPromptFor(
   return {
     system: built.sections,
     preamble: built.preamble.map((s) => ({ name: s.name, text: s.text })),
+    skills,
+    warnings,
   };
 }
 
@@ -350,7 +368,13 @@ export function beginSession(
   choice: Pick<ModelChoice, "model">,
   cwd = process.cwd(),
   dir = SESSIONS_DIR,
-): { log: EventLog; sessionFile: string; resumed: boolean } {
+): {
+  log: EventLog;
+  sessionFile: string;
+  resumed: boolean;
+  skills?: Skill[];
+  preambleTarget?: number;
+} {
   const s = openSession(args, dir);
   if (!s.resumed) {
     const p = systemPromptFor(args, cwd);
@@ -361,16 +385,26 @@ export function beginSession(
       system: p.system,
     });
     recordSessionDirectory(s.log, resolve(cwd));
-    // instructionsAs = user:项目指令与记忆作为首条 user 消息进日志。
-    // 它是一条用户没打过的用户消息,所以必须像其它用户消息一样落盘、上屏,不做任何隐藏。
-    if (p.preamble.length > 0) {
+    let preambleTarget: number | undefined;
+    if (p.preamble.length) {
+      preambleTarget = s.log.events.length;
       s.log.append({
         type: "user/message",
         at: now(),
-        text: p.preamble.map((x) => x.text).join("\n\n"),
+        text: p.preamble.map((part) => part.text).join("\n\n"),
       });
     }
-    return s;
+    for (const message of p.warnings)
+      s.log.append({
+        type: "ext/event",
+        at: now(),
+        source: "skills",
+        kind: "load-error",
+        payload: { message },
+      });
+    // 仅传给本次运行准备,不写入会话事实或跨重启缓存。
+    // 前导已入日志,交接位置即可;重试不保存第二份正文或再猜来源。
+    return { ...s, skills: p.skills, ...(preambleTarget !== undefined && { preambleTarget }) };
   }
   const last = [...s.log.events]
     .reverse()

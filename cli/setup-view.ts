@@ -109,7 +109,7 @@ export class SetupView implements Component {
   }
 
   private skillNote(name: string): string {
-    if (!name) return "New installations join automatically on the next start.";
+    if (!name) return "New skills join when preparing a new session from these settings.";
     const skill = this.deps.ctx.skills.find((s) => s.name === name);
     return skill
       ? `${skill.description || "No description"}\n${skill.path}${skill.disableModelInvocation ? "\nMarked disable-model-invocation by the skill author." : ""}`

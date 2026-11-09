@@ -15,6 +15,7 @@ import {
   maxSteps,
   type TurnDeps,
 } from "./loop.js";
+import { editState } from "./messages.js";
 import type { Provider } from "./provider.js";
 import { errorMessage } from "./providers/errors.js";
 import { recordUnresolvedCalls } from "./recovery.js";
@@ -68,14 +69,20 @@ export function fork(): ContextScope {
 }
 
 /**
- * 只继承用户说过的话:去掉工具结果与助手推理。
- * 压缩事件按下标引用历史,过滤后下标失效,一并去掉。
+ * 继承原用户消息范围,包括已被压缩覆盖的早期要求,应用与父投影相同的最新编辑和排除。
+ * 压缩与编辑引用原日志下标,不复制进已过滤的子日志。
  */
 export function userMessagesOnly(): ContextScope {
-  return ({ events, system }) =>
-    events
-      .filter((e) => e.type === "session/start" || e.type === "user/message")
-      .map((e) => (e.type === "session/start" ? { ...e, system } : { ...e }));
+  return ({ events, system }) => {
+    const { edits, dropped } = editState(events);
+    const inherited: AgentEvent[] = [];
+    for (const [index, event] of events.entries()) {
+      if (event.type === "session/start") inherited.push({ ...event, system });
+      else if (event.type === "user/message" && !dropped.has(index))
+        inherited.push({ ...event, text: edits.get(index)?.content ?? event.text });
+    }
+    return inherited;
+  };
 }
 
 export const DEFAULT_SCOPES: ScopeRegistry = {
@@ -92,7 +99,7 @@ export const DEFAULT_SCOPES: ScopeRegistry = {
   userMessagesOnly: {
     scope: userMessagesOnly(),
     description:
-      "inherits only what the user said, without tool results or assistant steps. For subtasks that need the user's original intent but not the process.",
+      "inherits all prior user messages, including compacted history, with current edits and exclusions applied. Omits tool results and assistant steps. For subtasks that need the user's requirements without the process.",
   },
 };
 

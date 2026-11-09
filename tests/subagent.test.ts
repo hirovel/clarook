@@ -15,7 +15,6 @@ import {
   fork,
   inProcessRunner,
   taskOnly,
-  userMessagesOnly,
 } from "../src/subagent.js";
 import { defineTool } from "../src/tools.js";
 
@@ -42,7 +41,7 @@ const PARENT: AgentEvent[] = [
 
 const snapshot = { events: PARENT, system: "父系统提示", model: "m" };
 
-describe("ContextScope 三档", () => {
+describe("ContextScope", () => {
   it("taskOnly:只有系统提示词,缺省沿用父的", () => {
     expect(taskOnly()(snapshot)).toMatchObject([{ type: "session/start", system: "父系统提示" }]);
     expect(taskOnly("自定义")(snapshot)[0]).toMatchObject({ system: "自定义" });
@@ -58,11 +57,6 @@ describe("ContextScope 三档", () => {
       "tool/result",
       "user/message",
     ]);
-  });
-
-  it("userMessagesOnly:只留系统提示与用户消息", () => {
-    const events = userMessagesOnly()(snapshot);
-    expect(events.map((e) => e.type)).toEqual(["session/start", "user/message", "user/message"]);
   });
 });
 

@@ -113,7 +113,7 @@ export type RequestState = {
   lastTurnIndex: number;
   lastCompactionIndex: number;
   providersAt: Map<number, Provider>;
-  /** 每次请求发出前算的缓存命中上限;响应回来与实测对照。 */
+  /** 相同消息正文前缀的粗估;与实际 usage 分开,不代表缓存命中。 */
   predictedAt: Map<number, number>;
   /** 上一次正常步发出的消息:变化说明的比较基线。 */
   lastSent: Message[] | undefined;
