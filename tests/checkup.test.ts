@@ -49,7 +49,7 @@ const result = (callId: string, name: string, content: string, isError = false):
   durationMs: 5,
 });
 
-/** 首次纯估算遗漏工具定义;后续估算已有供应商用量作基准。 */
+/** 手写发送前估算与供应商回报,验证同请求对照与连续请求漂移。 */
 function clean(): AgentEvent[] {
   return [
     { type: "session/start", at, model: "m", system: "s".repeat(8000) },
@@ -115,6 +115,16 @@ describe("会话对照", () => {
     const reset = clean();
     reset.splice(5, 0, { type: "compaction", at, cleared: [4], strategy: "clear" });
     expect(byId(reset).C?.status).toBe("skip");
+    const forked = clean();
+    forked.splice(5, 0, {
+      type: "ext/event",
+      at,
+      source: "subagent",
+      kind: "identity",
+      payload: { id: "sub-1", scope: "fork", tools: ["read", "bash"] },
+    });
+    expect(analyze(forked).rows[1]?.comparable).toBe(false);
+    expect(byId(forked).C?.status).toBe("skip");
     const corruptCache = clean();
     (corruptCache[12] as { usage: Usage }).usage.cacheReadTokens = 5000;
     expect(byId(corruptCache).D?.status).toBe("fail");
@@ -122,6 +132,54 @@ describe("会话对照", () => {
     expect(text).toContain("4 requests");
     expect(text).toContain("PASS  A");
     expect(text).not.toContain("$");
+    // 固定低估九成也能保持差额稳定;报告仍须显式暴露这份已观察差额。
+    const biased = clean();
+    for (const event of biased) {
+      if (event.type === "request") event.estimatedTokens = 1000;
+      if (event.type === "assistant/message" && event.usage) event.usage.inputTokens = 10000;
+    }
+    const biasReport = analyze(biased);
+    expect(biasReport.checks.find((x) => x.id === "C")?.status).toBe("pass");
+    expect(biasReport.estimationGaps).toEqual({
+      samples: 4,
+      meanAbsoluteTokens: 9000,
+      meanAbsolutePercent: 90,
+      largestUnderestimateTokens: 9000,
+    });
+    // 一次高估不能抵消其余低估;相对差额分别使用各请求的输入作分母。
+    (biased[2] as Extract<AgentEvent, { type: "request" }>).estimatedTokens = 4000;
+    (biased[3] as { usage: Usage }).usage.inputTokens = 2000;
+    expect(analyze(biased).estimationGaps).toEqual({
+      samples: 4,
+      meanAbsoluteTokens: 7250,
+      meanAbsolutePercent: 92.5,
+      largestUnderestimateTokens: 9000,
+    });
+    // 未完成或没有正输入回报的请求既不能进样本,也不能校准下一轮漂移。
+    for (const unavailable of ["aborted", "missing", "zero"] as const) {
+      const incomplete = clean();
+      const response = incomplete[6] as Extract<AgentEvent, { type: "assistant/message" }>;
+      if (unavailable === "aborted") response.stopReason = "aborted";
+      if (unavailable === "missing") delete response.usage;
+      if (unavailable === "zero") response.usage = { inputTokens: 0, outputTokens: 20 };
+      const partial = analyze(incomplete);
+      expect(partial.estimationGaps.samples, unavailable).toBe(3);
+      expect(partial.rows[2]?.comparable, unavailable).toBe(false);
+      expect(partial.checks.find((x) => x.id === "C")?.status, unavailable).toBe("skip");
+      expect(partial.checks.find((x) => x.id === "C")?.detail, unavailable).toContain(
+        "1 request with",
+      );
+    }
+    const truncated = clean();
+    (truncated[12] as Extract<AgentEvent, { type: "assistant/message" }>).stopReason = "length";
+    expect(analyze(truncated).estimationGaps.samples).toBe(4);
+    expect(byId(truncated).C?.status).toBe("pass");
+    expect(analyze([]).estimationGaps).toEqual({
+      samples: 0,
+      meanAbsoluteTokens: null,
+      meanAbsolutePercent: null,
+      largestUnderestimateTokens: null,
+    });
   });
 
   it("前缀:末尾追加不算打断;编辑之后的重算有解释,不报错", () => {

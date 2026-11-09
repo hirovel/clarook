@@ -5,7 +5,7 @@ import * as childProcess from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { applyPreset, parseCommonArgs, resolveApproval } from "../cli/args.js";
 import { createBashTool } from "../cli/tools/bash.js";
@@ -26,6 +26,9 @@ import {
   setDefaultModel,
   updateConfig,
 } from "../src/config.js";
+import { toolOutput } from "../src/exchange.js";
+import { EventLog } from "../src/log.js";
+import { ToolOutcomeUnknownError } from "../src/tools.js";
 
 const ctx = (signal = new AbortController().signal) => ({ signal }) as never;
 
@@ -60,6 +63,11 @@ describe("配置文件", () => {
     };
     bad({ providers: {} }, /missing default or providers/);
     bad({ default: "m" }, /missing default or providers/);
+    bad({ default: "m", providers: {}, subagents: { depth: 2 } }, /moved to defaults.subagents/);
+    bad(
+      { default: "m", providers: {}, defaults: { subagents: { maxSteps: "3" } } },
+      /positive whole number/,
+    );
     bad(
       { default: "m", providers: { p: { protocol: "grpc", baseUrl: "x", models: [] } } },
       /protocol must be/,
@@ -279,10 +287,35 @@ describe("bash 工具的其它边界", () => {
     await expect(
       tool.execute({ command: "echo should-not-run" }, ctx(already.signal)),
     ).rejects.toThrow(/interrupted|aborted/);
+    tmp = mkdtempSync(join(tmpdir(), "clarook-bash-abort-"));
+    const log = new EventLog(join(tmp, "session.jsonl"));
+    const output = toolOutput(log, "abort", "bash");
+    if (!output) throw new Error("Recording output unavailable");
+    const pidFile = join(tmp, "descendant.pid");
+    const runner = join(tmp, "runner.cjs");
+    writeFileSync(
+      runner,
+      `const { spawn } = require('node:child_process');
+const { writeFileSync } = require('node:fs');
+const child = spawn(process.execPath, ['-e', "setTimeout(() => console.log('late'), 2000)"], {
+  detached: true, stdio: ['ignore', 'inherit', 'inherit']
+});
+writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
+child.unref();
+console.log('KEEP_PREFIX' + 'A'.repeat(60000) + '\\nstarted');
+setTimeout(() => {}, 5000);
+`,
+    );
     const ac = new AbortController();
-    const started = Date.now();
-    const pending = tool.execute({ command: "echo started; sleep 5; echo late" }, ctx(ac.signal));
-    setTimeout(() => {
+    const pending = tool
+      .execute({ command: `node "${runner.replace(/\\/g, "/")}"` }, { signal: ac.signal, output })
+      .then(
+        () => undefined,
+        (error: Error) => error,
+      );
+    try {
+      await vi.waitFor(() => expect(log.recording?.read(output.ref)).toContain("started"));
+      const started = Date.now();
       const originalPath = process.env.PATH;
       try {
         if (process.platform === "win32") process.env.PATH = "";
@@ -291,14 +324,30 @@ describe("bash 工具的其它边界", () => {
         if (originalPath === undefined) delete process.env.PATH;
         else process.env.PATH = originalPath;
       }
-    }, 300);
-    const failure = await pending.then(
-      () => undefined,
-      (error: Error) => error,
-    );
-    expect(failure?.message).toMatch(/command interrupted[\s\S]*started/);
-    expect(failure?.message).not.toContain("could not stop process tree");
-    expect(Date.now() - started).toBeLessThan(3000);
+      const failure = await pending;
+      expect(Date.now() - started).toBeLessThan(process.platform === "win32" ? 3000 : 1000);
+      expect(failure).toBeInstanceOf(ToolOutcomeUnknownError);
+      expect(failure?.message).toMatch(/command interrupted[\s\S]*started/);
+      expect(failure?.message).toContain(`Full output: ${output.path}`);
+      expect(failure?.message).not.toContain("could not stop process tree");
+      expect(failure?.message).not.toContain("late");
+      const received = log.recording?.read(output.ref);
+      expect(received).toContain("KEEP_PREFIX");
+      await new Promise((resolve) => setTimeout(resolve, 2100));
+      expect(log.recording?.read(output.ref)).toBe(received);
+      expect(log.recording?.read(output.ref)).not.toContain("late");
+    } finally {
+      ac.abort();
+      await pending;
+      if (existsSync(pidFile)) {
+        try {
+          process.kill(Number(readFileSync(pidFile, "utf8")), "SIGKILL");
+        } catch {
+          // 本用例的有限后代可能已经自行退出。
+        }
+      }
+      log.recording?.dispose();
+    }
   }, 20000);
 });
 

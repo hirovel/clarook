@@ -5,6 +5,7 @@ import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BodyBrowser } from "../cli/body-browser.js";
 import { resultLines } from "../cli/cards.js";
+import { RequestInspector } from "../cli/inspector.js";
 import { inputBlocks, receivedBlocks } from "../cli/inspector-bodies.js";
 import { collectRequests, eventLines, toolLines, wireLines } from "../cli/inspector-requests.js";
 import { readRequestRecording } from "../cli/session-records.js";
@@ -73,31 +74,32 @@ describe("请求层记录", () => {
         },
         { text: "done", toolCalls: [], stopReason: "end" },
       ]),
-      tools: [echo],
+      tools: [{ ...echo, description: "x".repeat(40000) }],
       compaction: { strategy: async () => null, window: 100000, reserveTokens: 20000 },
     });
     expect(types(log)).toEqual([
       "session/start",
       "user/message",
+      "tools/snapshot",
       "request",
       "assistant/message",
       "tool/result",
       "request",
       "assistant/message",
     ]);
-    const req = log.events[2];
-    if (req?.type !== "request") throw new Error("应为 request");
+    const [first, next] = collectRequests(log.events);
+    if (!first || !next) throw new Error("应有两次 request");
+    const req = first.request;
     expect(req.model).toBe("fake");
     expect(req.messages).toBe(2);
     expect(req.tools).toEqual(["echo"]);
-    expect(req.estimatedTokens).toBeGreaterThan(0);
+    expect(req.estimatedTokens).toBeGreaterThan(10000);
     expect(req.threshold).toBe(80000);
     expect(req.reason).toBe("turn");
-    const second = log.events[5];
-    if (second?.type !== "request") throw new Error("应为 request");
+    const second = next.request;
     expect(second.messages).toBe(4);
-    const resp = log.events[3];
-    if (resp?.type !== "assistant/message") throw new Error("应为 assistant/message");
+    const resp = first.response;
+    if (!resp) throw new Error("应为 assistant/message");
     expect(typeof resp.latencyMs).toBe("number");
   });
 
@@ -328,11 +330,12 @@ describe("请求层记录", () => {
     expect(types(log)).toEqual([
       "session/start",
       "user/message",
+      "tools/snapshot",
       "request",
       "retry",
       "assistant/message",
     ]);
-    const retry = log.events[3];
+    const retry = log.events.find((event) => event.type === "retry");
     if (retry?.type !== "retry") throw new Error("应为 retry");
     expect(retry.attempt).toBe(1);
     expect(retry.delayMs).toBe(120);
@@ -357,9 +360,16 @@ describe("请求层记录", () => {
           ? runTurn({ log, provider, tools: [] })
           : recordingProvider(log, provider).complete(deriveMessages(log.events), []);
       await expect(result).rejects.toBe(failure);
-      expect(types(log)).toEqual(["session/start", "user/message", "request", "request/error"]);
-      expect(log.events[2]).toMatchObject({ type: "request", reason });
-      const err = log.events[3];
+      expect(types(log)).toEqual([
+        "session/start",
+        "user/message",
+        ...(reason === "turn" ? ["tools/snapshot"] : []),
+        "request",
+        "request/error",
+      ]);
+      const [request] = collectRequests(log.events);
+      expect(request?.request).toMatchObject({ type: "request", reason });
+      const err = request?.error;
       if (err?.type !== "request/error") throw new Error("应为 request/error");
       expect(err.status).toBe(500);
     }
@@ -544,17 +554,20 @@ describe("策略请求的真实正文与策略名", () => {
       targetTokens: 50,
       provider: recordingProvider(log, summarizer, { onRequest: (body) => captured.push(body) }),
       preservation: keepRecentTokens(10),
+      instructions: "x".repeat(40000),
     });
     expect(payload?.strategy).toBe("llmSummarize(pi, replay)");
     const req = log.events.find((e) => e.type === "request");
     if (req?.type !== "request") throw new Error("应记 request");
     expect(req.reason).toBe("compaction");
+    expect(req.estimatedTokens).toBeGreaterThan(11000);
     expect(req.maxTokens).toBe(DEFAULT_COMPACTION_SETTINGS.compactionMaxTokens);
     const body = req.body;
     if (!body) throw new Error("应记 body");
     expect(body.tail).toHaveLength(1);
     expect(body.tail[0]?.role).toBe("user");
-    expect((body.tail[0] as { content: string }).content).toBe(summaryPrompt("pi"));
+    expect((body.tail[0] as { content: string }).content).toContain(summaryPrompt("pi"));
+    expect((body.tail[0] as { content: string }).content).toContain("x".repeat(40000));
     expect(body.prefixEvents).toBeGreaterThan(0);
     expect(captured).toHaveLength(1);
     expect(JSON.parse(captured[0] ?? "[]").at(-1)).toEqual(body.tail[0]);
@@ -693,6 +706,7 @@ describe("wire 层与实际发送一致", () => {
       try {
         const file = join(dir, "s.jsonl");
         const log = new EventLog(file);
+        log.append({ type: "tools/snapshot", at: "t", tools });
         const retries: number[] = [];
         await recordingProvider(log, provider).complete(messages, tools, {
           maxTokens: 321,
@@ -700,8 +714,14 @@ describe("wire 层与实际发送一致", () => {
           onRetry: (info) => retries.push(info.attempt),
         });
         const events = EventLog.load(file).events;
-        const saved = readRequestRecording(file, events, 0);
-        expect(events[0]).toMatchObject({ type: "request", reason: "compaction", maxTokens: 321 });
+        const [request] = collectRequests(events);
+        if (!request) throw new Error("应有 request");
+        const saved = readRequestRecording(file, events, request.index);
+        expect(request.request).toMatchObject({
+          type: "request",
+          reason: "compaction",
+          maxTokens: 321,
+        });
         expect(events.filter((e) => e.type === "retry")).toEqual([
           expect.objectContaining({ attempt: 1, status: 503 }),
         ]);
@@ -747,18 +767,67 @@ describe("wire 层与实际发送一致", () => {
         expect(saved?.attempts?.[0]?.response).toBe("retry".repeat(2000));
         expect(saved?.attempts?.[1]?.response.endsWith("\n\n")).toBe(true);
         expect(saved?.bodies.join("\n")).not.toContain("fixture-auth-token");
+        if (create === openaiCompat) {
+          // 真 reader 会把缺附件诊断也放进 bodies;它不能挡住事件里的历史声明。
+          const ordinaryFile = join(dir, "ordinary.jsonl");
+          const ordinary = new EventLog(ordinaryFile);
+          ordinary.append({ type: "session/start", at: "t", model: "m", system: "sys" });
+          ordinary.append({ type: "user/message", at: "t", text: "hi" });
+          await runTurn({
+            log: ordinary,
+            provider,
+            tools: [echo],
+            onRequest: (body) => captures.push(body),
+          });
+          await ordinary.checkpoint();
+          ordinary.recording?.dispose();
+          const historicalEvents = EventLog.load(ordinaryFile).events;
+          rmSync(ordinary.recording?.directory ?? "", { recursive: true, force: true });
+          const inspector = new RequestInspector({
+            events: () => historicalEvents,
+            sessions: () => [
+              {
+                name: "main",
+                events: historicalEvents,
+                recordingFor: (index, section) =>
+                  readRequestRecording(ordinaryFile, historicalEvents, index, section),
+              },
+            ],
+            providerFor: () => provider,
+            tools: () => [
+              { name: "echo", description: "current description", parameters: { changed: true } },
+            ],
+            rows: () => 50,
+            onClose() {},
+            requestRender() {},
+          });
+          inspector.showRequest(1, 4);
+          const historical = inspector.render(100).map(stripAnsi).join("\n");
+          expect(historical).toContain("Missing or unreadable recording");
+          expect(historical).toContain("Historical definitions from the tool snapshot");
+          expect(historical).toContain('"type": "object"');
+          expect(historical).not.toContain("current description");
+          inspector.showRequest(1, 5);
+          const unavailableWire = inspector.render(100).map(stripAnsi).join("\n");
+          expect(unavailableWire).toContain("Missing or unreadable recording");
+          expect(unavailableWire).toContain("ENOENT");
+          expect(unavailableWire).not.toContain("Captured before HTTP dispatch");
+          expect(unavailableWire).not.toContain("HTTP attempt 1");
+          expect(unavailableWire).not.toContain("current description");
+        }
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
       expect(captures).toEqual(sent);
-      expect(captures).toHaveLength(2);
+      expect(captures).toHaveLength(create === openaiCompat ? 3 : 2);
       expect(captures[0]).toBe(
         JSON.stringify(provider.wire?.(messages, tools, { maxTokens: 321 })),
       );
       expect(captures.join("\n")).not.toContain("fixture-auth-token");
+      const next = sent.length;
       await provider.complete(messages, tools);
-      expect(JSON.parse(sent[2] ?? "{}")[outputKey]).toBe(4000);
-      expect(sent[2]).toBe(JSON.stringify(provider.wire?.(messages, tools)));
+      expect(JSON.parse(sent[next] ?? "{}")[outputKey]).toBe(4000);
+      expect(sent[next]).toBe(JSON.stringify(provider.wire?.(messages, tools)));
     }
   });
 

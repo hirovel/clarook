@@ -7,6 +7,7 @@ import { closeSync, existsSync, mkdtempSync, openSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
+import type { ToolOutput } from "../../src/exchange.js";
 import type { ToolContext } from "../../src/tools.js";
 import { defineTool, described, ToolOutcomeUnknownError } from "../../src/tools.js";
 import { stopProcessTree } from "../process-tree.js";
@@ -25,28 +26,19 @@ export async function executeUserShell(
 ): Promise<{ content: string; isError: boolean; status: string }> {
   const shell = findBash();
   if (!shell) throw new Error("bash not found. Install Git for Windows or set CLAROOK_SHELL.");
+  const truncate = keepTail();
   const result = await run(shell, command, ctx.signal, {
     cwd,
     timeoutMs: DEFAULT_TIMEOUT_S * 1000,
+    truncate,
     closeInput: true,
     ...(onPreview && { onPreview }),
-    ...(ctx.output && { onData: (data: Buffer) => ctx.output?.write(data) }),
+    ...(ctx.output && { output: ctx.output }),
   });
-  const output = applyTruncation(result.output, keepTail(), {
-    path: ctx.output?.path ?? result.outputPath,
-    omitted: result.omitted,
-    bytes: result.bytes,
-    missingFrom: ctx.output?.ref.missingFrom,
-    exitCode: result.exitCode,
-  });
-  const status = result.aborted
-    ? "Interrupted"
-    : result.timedOut
-      ? `Timed out after ${DEFAULT_TIMEOUT_S}s`
-      : `Exit code: ${result.exitCode}`;
+  const status = `Exit code: ${result.exitCode}`;
   return {
-    content: `${output || "(no output)"}\n[${status}]`,
-    isError: result.aborted || result.timedOut || result.exitCode !== 0,
+    content: `${result.output || "(no output)"}\n[${status}]`,
+    isError: result.exitCode !== 0,
     status,
   };
 }
@@ -96,28 +88,16 @@ export function createBashTool(
       const r = await run(shell, withCwdMarker(args.command), ctx.signal, {
         timeoutMs: timeoutS > 0 ? timeoutS * 1000 : 0,
         cwd,
-        ...(recording && { onData: (data: Buffer) => recording.write(data) }),
+        truncate,
+        acceptCwd(pwd) {
+          if (samePath(pwd, cwd)) return;
+          cwd = pwd;
+          return `[cwd is now ${cwd}]`;
+        },
+        ...(recording && { output: recording }),
       });
-      const { output, pwd } = splitCwdMarker(r.output);
-      let shown = applyTruncation(output, truncate, {
-        path: ctx.output?.path ?? r.outputPath,
-        omitted: r.omitted,
-        bytes: r.bytes,
-        missingFrom: ctx.output?.ref.missingFrom,
-        exitCode: r.exitCode,
-      });
-      if (pwd && !samePath(pwd, cwd)) {
-        cwd = pwd;
-        shown = shown ? `${shown}\n[cwd is now ${cwd}]` : `[cwd is now ${cwd}]`;
-      }
-      if (r.aborted) throw new Error(`command interrupted. Output so far:\n${shown}`);
-      if (r.timedOut) {
-        throw new Error(
-          `command did not finish within ${timeoutS} s, killed. Output so far:\n${shown}`,
-        );
-      }
-      if (r.exitCode !== 0) throw new Error(`${shown}\ncommand exited with code ${r.exitCode}`);
-      return shown || "(no output)";
+      if (r.exitCode !== 0) throw new Error(`${r.output}\ncommand exited with code ${r.exitCode}`);
+      return r.output || "(no output)";
     },
   });
 }
@@ -186,12 +166,6 @@ function findBash(): string | null {
 type RunResult = {
   output: string;
   exitCode: number;
-  aborted: boolean;
-  timedOut: boolean;
-  /** 累计从 stdout/stderr 收到的字节,含内部目录标记。 */
-  bytes: number;
-  omitted: boolean;
-  outputPath?: string;
 };
 
 function run(
@@ -201,7 +175,9 @@ function run(
   limits: {
     timeoutMs: number;
     cwd: string;
-    onData?: (data: Buffer) => void;
+    truncate: TruncationPolicy;
+    output?: ToolOutput;
+    acceptCwd?: (pwd: string) => string | undefined;
     onPreview?: (text: string) => void;
     closeInput?: boolean;
   },
@@ -226,6 +202,30 @@ function run(
     let killed = false;
     let killError: Error | undefined;
 
+    const formatOutput = (exitCode: number) => {
+      let start = 0;
+      while (start < tail.length && ((tail[start] as number) & 0xc0) === 0x80) start++;
+      const raw = tail.subarray(start).toString("utf8");
+      const { output, pwd } = limits.acceptCwd ? splitCwdMarker(raw) : { output: raw };
+      // 已收到的目录事实先接受,展示截断或失败不能丢掉它。
+      const cwdNote = pwd ? limits.acceptCwd?.(pwd) : undefined;
+      let shown = output;
+      try {
+        shown = applyTruncation(output, limits.truncate, {
+          path: limits.output?.path ?? outputPath,
+          omitted,
+          bytes,
+          missingFrom: limits.output?.ref.missingFrom,
+          exitCode,
+        });
+      } catch (error) {
+        if (!killed) throw error;
+        // 展示策略或临时落盘失败也不能阻止取消完成。
+        shown += `\n[Output preview failed: ${(error as Error).message}]`;
+      }
+      return cwdNote ? (shown ? `${shown}\n${cwdNote}` : cwdNote) : shown;
+    };
+
     const killTree = () => {
       if (killed) return;
       killed = true;
@@ -235,17 +235,13 @@ function run(
       } catch (error) {
         stopDetail = (error as Error).message;
       }
-      // Windows 的后代可持有继承管道;taskkill 返回后不再等待这些句柄。
-      // 退出码未观察到,不能把命令或整棵进程树伪报为已停止。
-      if (stopDetail === undefined && process.platform !== "win32") return;
+      // 后代可能脱离进程组并继续持管道;停止请求后结束本地等待。
+      // 未核实全部后代退出,统一报告 unknown,只保留此前收到的输出。
       const reason = aborted
         ? "command interrupted"
         : timedOut
           ? `command did not finish within ${limits.timeoutMs / 1000} s`
           : (captureError?.message ?? "command stop requested");
-      killError = new ToolOutcomeUnknownError(
-        `${reason}; ${stopDetail ?? "taskkill completed; local wait ended; descendant termination not verified"}. Output so far:\n${tail.toString("utf8").slice(-4000)}`,
-      );
       cleanup();
       child.stdout.removeListener("data", onData);
       child.stderr.removeListener("data", onData);
@@ -253,14 +249,17 @@ function run(
       child.stdout.destroy();
       child.stderr.destroy();
       child.unref();
+      killError = new ToolOutcomeUnknownError(
+        `${reason}; ${stopDetail ?? "stop requested; local wait ended; descendant termination not verified"}. Output so far:\n${formatOutput(-1)}`,
+      );
       rejectPromise(killError);
     };
     const onData = (d: Buffer) => {
-      if (captureError) return;
+      if (killed || captureError) return;
       try {
-        limits.onData?.(d);
+        limits.output?.write(d);
         const combined = Buffer.concat([tail, d]);
-        if (!limits.onData) {
+        if (!limits.output) {
           if (outputFd !== undefined) writeFileSync(outputFd, d);
           else if (combined.length > PREVIEW_BYTES) {
             outputPath = join(mkdtempSync(join(tmpdir(), "kernel-bash-")), "output.txt");
@@ -322,17 +321,12 @@ function run(
       cleanup();
       if (killError) return;
       if (captureError) return rejectPromise(captureError);
-      let start = 0;
-      while (start < tail.length && ((tail[start] as number) & 0xc0) === 0x80) start++;
-      resolvePromise({
-        output: tail.subarray(start).toString("utf8"),
-        exitCode: code ?? -1,
-        aborted,
-        timedOut,
-        bytes,
-        omitted,
-        ...(outputPath && { outputPath }),
-      });
+      const exitCode = code ?? -1;
+      try {
+        resolvePromise({ output: formatOutput(exitCode), exitCode });
+      } catch (error) {
+        rejectPromise(error);
+      }
     });
   });
 }

@@ -96,7 +96,11 @@ try {
     log,
     sessionFile,
     slots: () => agent.slots,
-    current: () => ({ provider: agent.provider, tools: agent.tools }),
+    current: () => ({
+      provider: agent.provider,
+      modelLocator: `${choice.providerName}/${choice.model}`,
+      tools: agent.tools,
+    }),
     onChild: (child) => watchSaving(child.log),
   });
   runtime.activate();

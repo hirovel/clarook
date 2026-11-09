@@ -1,10 +1,11 @@
 import type { AgentEvent, Usage } from "./events.js";
 import { deriveMessages, type Message, userShellText } from "./messages.js";
+import type { ToolDef } from "./provider.js";
 
 /**
  * 上下文构成投影:当前模型可见内容按类别的 token 分布。
- * 纯函数,与消息投影同源 —— 展示的就是将要发送的,没有第二套口径。
- * token 是 chars/4 估算;若有最近一次请求的实测 usage,一并带回供对照。
+ * 纯函数,按当前消息投影与工具声明计算已知文本;图片、私有回传物与协议封装未计入。
+ * token 是 chars/4 估算;最近一次请求的历史实测 usage 独立带回供对照。
  */
 export type ContextPart = {
   label: string;
@@ -45,6 +46,25 @@ export function messageTokens(m: Message, opts: { withReasoning?: boolean } = {}
   return base + reasoning + toolCallTokens(m.toolCalls);
 }
 
+/** 只计模型可见的声明字段,不把执行器与本地描述元数据当成输入。 */
+export function toolDefinitionTokens(tools: readonly ToolDef[]): number {
+  return tools.reduce(
+    (n, { name, description, parameters }) =>
+      n + estimateTokens(JSON.stringify({ name, description, parameters })),
+    0,
+  );
+}
+
+/** 已知文本和工具声明的粗估;图片、私有回传物与协议封装未计入。 */
+export function estimateInput(
+  messages: readonly Message[],
+  tools: readonly ToolDef[] = [],
+): number {
+  return (
+    messages.reduce((n, message) => n + messageTokens(message), 0) + toolDefinitionTokens(tools)
+  );
+}
+
 /** 一条事件里模型可见文本的估算 token;只给人看的事件为 0。 */
 export function eventTokens(e: AgentEvent): number {
   switch (e.type) {
@@ -64,12 +84,16 @@ export function eventTokens(e: AgentEvent): number {
   }
 }
 
-export function contextBreakdown(events: readonly AgentEvent[], window: number): ContextBreakdown {
+export function contextBreakdown(
+  events: readonly AgentEvent[],
+  window: number,
+  tools: readonly ToolDef[] = [],
+): ContextBreakdown {
   const buckets = new Map<string, { tokens: number; count: number }>();
-  const add = (label: string, tokens: number) => {
+  const add = (label: string, tokens: number, count = 1) => {
     const b = buckets.get(label) ?? { tokens: 0, count: 0 };
     b.tokens += tokens;
-    b.count += 1;
+    b.count += count;
     buckets.set(label, b);
   };
 
@@ -89,6 +113,8 @@ export function contextBreakdown(events: readonly AgentEvent[], window: number):
         break;
     }
   }
+
+  if (tools.length > 0) add("tool definitions", toolDefinitionTokens(tools), tools.length);
 
   const estimatedTokens = [...buckets.values()].reduce((n, b) => n + b.tokens, 0);
   const measured = lastUsage(events);

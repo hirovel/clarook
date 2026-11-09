@@ -530,7 +530,11 @@ export class SetupView implements Component {
         : (def.values ?? []);
     const items: Choice[] = values.map((v) => {
       const value =
-        def.type === "bool" ? v.label === "on" : def.type === "number" ? Number(v.label) : v.label;
+        def.type === "bool"
+          ? v.label === "on"
+          : def.type === "number"
+            ? parseSetting(def, v.label)
+            : v.label;
       return { label: setupValue(def, value), value, ...(v.note && { note: v.note }) };
     });
     if (def.builtin === undefined)

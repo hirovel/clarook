@@ -267,24 +267,21 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
       expect(app.agent.localRunning).toBe(false);
       expect(log.events.at(-1)).toMatchObject({
         type: "user/shell",
-        status: process.platform === "win32" ? "Result unknown" : "Interrupted",
+        status: "Result unknown",
+        outcome: "unknown",
       });
-      if (process.platform === "win32") {
-        const completed = log.events.at(-1);
-        if (completed?.type !== "user/shell") throw new Error("Shell result missing");
-        expect(completed.content).toContain("descendant termination not verified");
-        const completedCount = log.events.length;
-        const outputStart = [...log.events]
-          .reverse()
-          .find((e) => e.type === "ext/event" && e.source === "shell");
-        if (outputStart?.type !== "ext/event") throw new Error("Shell recording missing");
-        const ref = outputStart.payload.output as { file: string; label: string };
-        const received = log.recording?.read(ref);
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        expect(log.events).toHaveLength(completedCount);
-        expect(log.recording?.read(ref)).toBe(received);
-        expect(received).not.toContain("LATE_SHELL_OUTPUT");
-      }
+      const completedCount = log.events.length;
+      const outputStart = [...log.events]
+        .reverse()
+        .find((e) => e.type === "ext/event" && e.source === "shell");
+      if (outputStart?.type !== "ext/event") throw new Error("Shell recording missing");
+      const ref = outputStart.payload.output as { file: string; label: string };
+      const received = log.recording?.read(ref);
+      expect(received).toContain("STREAM_READY");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(log.events).toHaveLength(completedCount);
+      expect(log.recording?.read(ref)).toBe(received);
+      expect(received).not.toContain("LATE_SHELL_OUTPUT");
       expect(sent).toHaveLength(2);
       term.feed("\x1bv");
       await vi.waitFor(() => expect(doc(app)).toContain("1 image(s) attached"));
@@ -312,9 +309,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
       const replay = bootB(provider, {}, restored);
       expect(doc(replay.app)).toContain("Excluded from model context");
       expect(doc(replay.app)).toContain("Included in next context");
-      expect(doc(replay.app)).toContain(
-        process.platform === "win32" ? "result unknown" : "Interrupted",
-      );
+      expect(doc(replay.app)).toContain("result unknown");
       replay.app.stop();
     } finally {
       release?.();
@@ -934,6 +929,110 @@ describe("提交", () => {
       restored.app.stop();
     }
   });
+  it("模板与技能只生成消息,附件由本次用户输入决定", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "clarook-input-source-"));
+    writeFileSync(join(tmp, "used.txt"), "USER_FILE @nested.txt");
+    writeFileSync(join(tmp, "unused.txt"), "UNUSED_ARGUMENT_FILE");
+    writeFileSync(join(tmp, "template.txt"), "TEMPLATE_FILE");
+    writeFileSync(join(tmp, "nested.txt"), "NESTED_FILE");
+    writeFileSync(join(tmp, "report notes.txt"), "QUOTED_PATH_FILE");
+    const cwd = process.cwd();
+    process.chdir(tmp);
+    const inputs = new SessionInputs(join(tmp, "input.jsonl"), true);
+    const submitted: Message[][] = [];
+    const { app, log, term } = bootB(
+      scriptedB([], {
+        async complete(messages) {
+          submitted.push(structuredClone(messages));
+          return { text: "done", toolCalls: [], stopReason: "end" };
+        },
+      }),
+      {
+        inputs,
+        readClipboard: async () => ({ image: testImage }),
+        templates: [
+          {
+            name: "literal",
+            description: "Literal text",
+            body: "!printf TEMPLATE_TEXT",
+            path: "literal.md",
+          },
+          {
+            name: "first",
+            description: "First argument",
+            body: "Review $1\nLiteral @template.txt",
+            path: "first.md",
+          },
+          {
+            name: "generated",
+            description: "Generated reference",
+            body: "Review @$1",
+            path: "generated.md",
+          },
+        ],
+        skills: [
+          {
+            name: "audit",
+            description: "Audit",
+            body: "Read @template.txt; keep $1 literal.",
+            path: "audit/SKILL.md",
+            dir: "audit",
+            disableModelInvocation: false,
+          },
+        ],
+      },
+    );
+    try {
+      await app.command("/literal");
+      expect(submitted).toHaveLength(1);
+      expect(submitted[0]).toContainEqual(
+        expect.objectContaining({ role: "user", content: "!printf TEMPLATE_TEXT" }),
+      );
+      expect(log.events.some((event) => event.type === "user/shell")).toBe(false);
+
+      await app.command("/first @used.txt @unused.txt");
+      const first =
+        submitted
+          .at(-1)
+          ?.filter((message) => message.role === "user")
+          .at(-1)?.content ?? "";
+      expect(first).toContain("Review @used.txt\nLiteral @template.txt");
+      expect(first).toContain('<file name="used.txt">\nUSER_FILE @nested.txt\n</file>');
+      expect(first).toContain('<file name="unused.txt">\nUNUSED_ARGUMENT_FILE\n</file>');
+      expect(first).not.toContain("TEMPLATE_FILE");
+      expect(first).not.toContain("NESTED_FILE");
+
+      await app.command("/generated used.txt");
+      expect(submitted.at(-1)?.at(-1)).toMatchObject({ content: "Review @used.txt" });
+
+      await app.command("/audit @used.txt @used.txt");
+      const skill = submitted.at(-1)?.at(-1)?.content ?? "";
+      expect(skill).toContain("Read @template.txt; keep $1 literal.");
+      expect(skill.match(/<file name="used.txt">/g)).toHaveLength(1);
+      expect(skill).not.toContain("TEMPLATE_FILE");
+      expect(skill).not.toContain("NESTED_FILE");
+
+      app.setDraft('/first @"report notes.txt"');
+      const inputId = inputs.draftId;
+      term.feed("\x1bv");
+      await vi.waitFor(() => expect(doc(app)).toContain("1 image(s) attached"));
+      term.feed("\r");
+      await vi.waitFor(() => expect(submitted).toHaveLength(5));
+      const quoted = submitted.at(-1)?.at(-1)?.content ?? "";
+      expect(quoted).toContain("Review @report notes.txt");
+      expect(quoted).toContain('<file name="report notes.txt">\nQUOTED_PATH_FILE\n</file>');
+      expect(submitted.at(-1)?.at(-1)).toMatchObject({ images: [testImage] });
+      expect(log.events.filter((event) => event.type === "user/message").at(-1)).toMatchObject({
+        inputId,
+      });
+      expect(app.draft()).toBe("");
+      await vi.waitFor(() => expect(app.agent.running).toBe(false));
+    } finally {
+      app.stop();
+      process.chdir(cwd);
+    }
+  });
+
   it("@路径附件:完整附入带空格路径;二进制与非法 UTF-8 提示跳过", async () => {
     tmp = mkdtempSync(join(tmpdir(), "clarook-tui-"));
     writeFileSync(join(tmp, "a.txt"), "hello");
@@ -985,6 +1084,9 @@ describe("提交", () => {
     const { app, term } = bootB(provider, {
       terminal: new VirtualTerminal(60, 24),
       readClipboard: async () => ({ image: testImage }),
+      templates: [
+        { name: "follow", description: "Follow up", body: "Follow $ARGUMENTS", path: "follow.md" },
+      ],
       info: {
         model: "m",
         providerName: "p",
@@ -996,7 +1098,12 @@ describe("提交", () => {
     expect(doc(app)).toContain("Waiting for model");
     await app.submit("second");
     expect(doc(app)).toContain("queued as steering");
-    await app.submit("third", { deliverAs: "followUp" });
+    app.setDraft("/follow third");
+    term.feed("\x1b\r");
+    expect(app.agent.pending).toContainEqual(
+      expect.objectContaining({ text: "Follow third", deliverAs: "followUp" }),
+    );
+    expect(app.draft()).toBe("");
     expect(doc(app)).toContain("delivered after the current turn");
     app.tui.renderNow(true);
     const screen = await term.screen();

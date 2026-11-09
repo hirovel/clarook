@@ -149,30 +149,26 @@ export class RuntimeStatus implements Component {
       inner,
     );
     const total = ctx.usage.totals();
-    let context = "Context · no requests yet";
+    const size = contextSize(ctx.log.events, ctx.agent.tools);
+    const used = size.tokens;
+    const threshold = Math.max(1, ctx.threshold());
+    const trigger = ctx.compaction.trigger ?? "threshold";
+    // 带用量基准仍是估算;窗口与压缩触发点是两件事,不把手动模式写成自动倒计时。
+    const context =
+      size.basis === "usage"
+        ? `Context ~${fmtTok(used)}/${fmtTok(ctx.model.contextWindow)}`
+        : `Text + tools ~${fmtTok(used)} · total unmeasured`;
     let contextMeter = "";
-    let compaction = "";
-    if (view.lastUsage || ctx.req.count > 0) {
-      const size = contextSize(ctx.log.events);
-      const used = size.tokens;
-      const threshold = Math.max(1, ctx.threshold());
-      const trigger = ctx.compaction.trigger ?? "threshold";
-      // 带用量基准仍是估算;窗口与压缩触发点是两件事,不把手动模式写成自动倒计时。
-      context =
-        size.basis === "usage"
-          ? `Context ~${fmtTok(used)}/${fmtTok(ctx.model.contextWindow)}`
-          : `Messages ~${fmtTok(used)} + ${ctx.agent.tools.length} tools · total unmeasured`;
-      if (size.basis === "usage" && inner >= 90 && ctx.model.contextWindow > 0) {
-        contextMeter = capacityMeter(used, ctx.model.contextWindow);
-      }
-      compaction =
-        trigger === "threshold"
-          ? `auto-compact ~${fmtTok(threshold)}`
-          : trigger === "manual"
-            ? "compact manual"
-            : `remind ~${fmtTok(threshold)}`;
-      if (used >= threshold && trigger !== "threshold") compaction = "/compact suggested";
+    if (size.basis === "usage" && inner >= 90 && ctx.model.contextWindow > 0) {
+      contextMeter = capacityMeter(used, ctx.model.contextWindow);
     }
+    let compaction =
+      trigger === "threshold"
+        ? `auto-compact ~${fmtTok(threshold)}`
+        : trigger === "manual"
+          ? "compact manual"
+          : `remind ~${fmtTok(threshold)}`;
+    if (used >= threshold && trigger !== "threshold") compaction = "/compact suggested";
     const pulse =
       view.pulse.length > 1
         ? view.pulse
@@ -229,8 +225,8 @@ export class RuntimeStatus implements Component {
       ? wrapTextWithAnsi(
           c.faint(
             total.cost !== undefined
-              ? `cost est. ${fmtCostApprox(total.cost)}`
-              : `cost est. unavailable (${total.costStatus})`,
+              ? `main cost est. ${fmtCostApprox(total.cost)}`
+              : `main cost est. unavailable (${total.costStatus})`,
           ),
           inner,
         ).map((line) => ` ${line}`)

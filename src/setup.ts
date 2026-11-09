@@ -38,7 +38,15 @@ export const SETUP_SECTIONS: readonly SetupSection[] = [
     id: "tools",
     title: "Tools & delegation",
     description: "What the model can do, and how each tool is described.",
-    keys: ["tools.disable", "toolPrompts", "plan", "subagent", "mcpReconnect"],
+    keys: [
+      "tools.disable",
+      "toolPrompts",
+      "plan",
+      "subagent",
+      "subagents.maxSteps",
+      "subagents.depth",
+      "mcpReconnect",
+    ],
     action: { label: "Inspect tool definitions", command: "/inspect tools" },
   },
   {
@@ -210,6 +218,23 @@ export const SETUP_GUIDE: Readonly<Record<string, Guide>> = {
     reason:
       "Off initially. Delegation adds model calls and coordination; enable it when your task benefits from independent work.",
   },
+  "subagents.maxSteps": {
+    title: "Child step limit",
+    effect:
+      "Caps model steps in each new child run. A type's limit wins, then this setting, then the parent's limit. Inherit uses the parent's limit, including no limit. Follow-ups keep the first run's limit.",
+    reason:
+      "Inherit by default. A smaller cap bounds one run but can stop useful work before completion. It does not tune model reasoning, tokens per response, or concurrency.",
+    example:
+      "With a main limit of 50: inherit gives a new child 50 steps; 20 gives it 20; a type configured for 5 gives it 5. Each explicit follow-up starts a fresh counter with the same saved limit.",
+  },
+  "subagents.depth": {
+    title: "Delegation depth",
+    effect:
+      "Sets how many child generations a new task tree may have. 1 allows children only; 2 also allows grandchildren. This does not cap the number of siblings or concurrent tasks. Follow-ups keep their original remaining depth; insufficient current depth rejects the follow-up.",
+    reason:
+      "1 by default. Enable deeper delegation when the work needs it. More generations can add model calls and coordination; depth is not a speed setting.",
+    example: "Raising depth from 2 to 3 does not give an existing child an extra generation.",
+  },
   compaction: {
     example:
       "A command returned 2,000 lines. Clear replaces old output in model context with a placeholder; the original remains in the session. Summary uses a model call to condense older history.",
@@ -307,10 +332,13 @@ export const SETUP_GUIDE: Readonly<Record<string, Guide>> = {
       "Step lets you redirect ongoing work earlier. Turn lets the current chain finish first.",
   },
   maxSteps: {
-    title: "Turn step limit",
+    title: "Main turn step limit",
     effect:
-      "Caps model steps in a turn. Unset leaves the model free to continue until it stops calling tools or you interrupt.",
-    reason: "No arbitrary limit by default. Set one when you want a bounded run.",
+      "One model response and its tool batch count as one step. The limit stops before another loop step; it does not cap individual tools, tokens, elapsed time, transport retries, or compaction requests.",
+    reason:
+      "No limit by default: continue until the model finishes or you interrupt. A low limit can leave work unfinished. It does not change the selected model or its reasoning effort.",
+    example:
+      "20 permits up to 20 loop steps in one turn; none removes the cap. A response containing three tool calls still counts as one step.",
   },
   "facts.repeats": {
     title: "Repeated-error note",
@@ -417,7 +445,10 @@ export function setupValue(def: SettingDef, value: unknown): string {
   }
   if (def.key === "model" && value === undefined) return "Configured default";
   if (def.key === "planReminder" && value === 0) return "Off";
-  if (def.key === "maxSteps" && value === undefined) return "No limit";
+  if (def.key === "maxSteps") return value == null ? "No limit" : `${value} steps / turn`;
+  if (def.key === "subagents.maxSteps")
+    return value == null ? "Inherit parent limit" : `${value} steps / run`;
+  if (def.key === "subagents.depth") return `${value} generation${value === 1 ? "" : "s"}`;
   if (def.key === "preservation" && value === undefined) return "Automatic";
   if (def.key === "effort" && value === undefined) return "Model default";
   if (def.key === "prompt.skills.include" && value === "all") return "All (including new skills)";

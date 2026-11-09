@@ -1,5 +1,5 @@
 // 子 agent 打磨项:审批继承与收紧、步数上限与续聊、类型注册表、嵌套深度、描述的注册表段。
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ToolCall } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { EventLog as Log } from "../src/log.js";
-import type { ApproveOrigin, TurnDeps } from "../src/loop.js";
+import { type ApproveOrigin, maxSteps, type TurnDeps } from "../src/loop.js";
 import { deriveMessages } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
 import { createTaskTool, type TaskToolOptions } from "../src/subagent.js";
@@ -63,11 +63,14 @@ function childProvider(model = "fake"): Provider & { tools: string[][]; seen: nu
 }
 
 /** 永远调工具的子模型:用来触发步数上限。 */
-function loopingProvider(): Provider {
+function loopingProvider(model = "fake"): Provider & { tools: string[][] } {
   let n = 0;
+  const tools: string[][] = [];
   return {
-    model: "fake",
-    async complete() {
+    model,
+    tools,
+    async complete(_messages, definitions) {
+      tools.push(definitions.map((tool) => tool.name));
       n += 1;
       return {
         text: `step ${n}`,
@@ -218,25 +221,35 @@ describe("步数上限与续聊", () => {
     expect(log?.events.filter((e) => e.type === "assistant/message")).toHaveLength(2);
   });
 
-  it("类型的 maxSteps 覆盖全局的", async () => {
+  it("非默认类型省略 type 续聊仍沿用首次模型、工具和每轮步数上限", async () => {
+    const cheap = loopingProvider("cheap");
     const { tool, logs } = mk({
-      provider: loopingProvider(),
-      tools: [echo],
+      provider: childProvider("parent"),
+      providerFor: () => ({ provider: cheap, modelLocator: "cheap" }),
+      tools: [echo, other],
       maxSteps: 5,
-      types: { quick: { description: "one step", maxSteps: 1 } },
+      types: {
+        quick: { description: "one step", model: "cheap", tools: ["echo"], maxSteps: 1 },
+      },
     });
     await tool.execute({ task: "endless", type: "quick" }, ctx());
     expect(logs[0]?.events.filter((e) => e.type === "assistant/message")).toHaveLength(1);
+    await tool.execute({ task: "follow-up", resume: "sub-1" }, ctx("c2"));
+    expect(cheap.tools).toEqual([["echo"], ["echo"]]);
+    expect(logs[1]).toBe(logs[0]);
+    expect(logs[0]?.events.filter((e) => e.type === "assistant/message")).toHaveLength(2);
   });
 
   it("续聊:同一子日志上追加简报再跑;未知 id 报错;运行中的不许续", async () => {
     const provider = childProvider();
-    const { tool, logs } = mk({ provider, tools: [echo] });
+    let slots: TurnDeps["slots"] = {};
+    const { tool, logs } = mk({ provider, tools: [echo], slots: () => slots });
     const first = await tool.execute({ task: "first" }, ctx());
     expect(first).toContain("Sub-agent sub-1 finished");
     const log = logs[0];
     const before = log?.events.length ?? 0;
 
+    slots = { termination: maxSteps(1) };
     const second = await tool.execute({ task: "follow-up", resume: "sub-1" }, ctx("c2"));
     expect(second).toContain("child done 4");
     expect(logs[1]).toBe(log);
@@ -269,6 +282,7 @@ describe("步数上限与续聊", () => {
       let toolCalls = 0;
       const restored = mk({
         parent: Log.load(parent.path as string, { attach: true }),
+        depth: 3,
         tools: [
           {
             ...echo,
@@ -280,7 +294,9 @@ describe("步数上限与续聊", () => {
         ],
         provider: {
           model: "fake",
-          async complete(messages) {
+          async complete(messages, definitions) {
+            if (messages.at(-1)?.content !== "new child")
+              expect(definitions.map((tool) => tool.name)).toEqual(["echo"]);
             if (messages.some((m) => m.role === "tool" && m.callId === "unfinished")) {
               expect(
                 messages.find((m) => m.role === "tool" && m.callId === "unfinished"),
@@ -314,6 +330,434 @@ describe("步数上限与续聊", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("同一子任务准备资源期间只接受一次续聊", async () => {
+    let requests = 0;
+    let blocked: Promise<void> | undefined;
+    let release = () => {};
+    let entered = () => {};
+    const { tool, logs } = mk({
+      provider: {
+        model: "fake",
+        async complete() {
+          requests++;
+          return { text: "done", toolCalls: [], stopReason: "end" };
+        },
+      },
+      tools: async () => {
+        entered();
+        await blocked;
+        return { tools: [], dispose: async () => {} };
+      },
+    });
+    await tool.execute({ task: "first" }, ctx());
+    blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const preparing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const firstResume = tool.execute({ task: "follow-up", resume: "sub-1" }, ctx());
+    await preparing;
+    const overlap = tool.execute({ task: "duplicate", resume: "sub-1" }, ctx());
+    release();
+    const results = await Promise.allSettled([firstResume, overlap]);
+    expect(results[0]?.status).toBe("fulfilled");
+    expect(results[1]).toMatchObject({
+      status: "rejected",
+      reason: expect.objectContaining({ message: expect.stringContaining("still preparing") }),
+    });
+    expect(requests).toBe(2);
+    expect(
+      logs[0]?.events.filter((event) => event.type === "user/message").map((event) => event.text),
+    ).toEqual(["first", "follow-up"]);
+  });
+
+  it("首次约束或资源准备失败不发布子任务或新简报,清掉候选日志后仍可派发", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "clarook-child-preparation-"));
+    const parent = new Log(join(dir, "parent.jsonl"));
+    for (const event of parentLog().events) parent.append(event);
+    let requests = 0;
+    let preparations = 0;
+    let limit = 1;
+    let modelLocator = " ";
+    let failedPath: string | undefined;
+    let fail = false;
+    const { tool, logs } = mk({
+      parent,
+      provider: {
+        model: "fake",
+        async complete() {
+          requests++;
+          return { text: "done", toolCalls: [], stopReason: "end" };
+        },
+      },
+      modelLocator: () => modelLocator,
+      slots: () => ({ termination: maxSteps(limit) }),
+      tools: async (log) => {
+        preparations++;
+        if (fail) {
+          failedPath = log.path;
+          log.append({
+            type: "ext/event",
+            at: "t",
+            source: "fixture",
+            kind: "prepare",
+            payload: {},
+          });
+          throw new Error("resource preparation failed");
+        }
+        return { tools: [], dispose: async () => {} };
+      },
+    });
+    try {
+      const nonfiniteProvider = loopingProvider();
+      const invalidDepth = mk({ parent, provider: nonfiniteProvider, tools: [], depth: Infinity });
+      await expect(invalidDepth.tool.execute({ task: "invalid depth" }, ctx())).rejects.toThrow(
+        "finite delegation depth",
+      );
+      expect(nonfiniteProvider.tools).toEqual([]);
+      expect(invalidDepth.logs).toEqual([]);
+      await expect(tool.execute({ task: "invalid model locator" }, ctx())).rejects.toThrow(
+        "non-empty model locator",
+      );
+      expect(preparations).toBe(0);
+      modelLocator = "fixture/fake";
+      limit = -Infinity;
+      await expect(tool.execute({ task: "invalid limit" }, ctx())).rejects.toThrow(
+        "finite step limit",
+      );
+      expect(preparations).toBe(0);
+      expect(requests).toBe(0);
+      expect(logs).toEqual([]);
+      limit = 1;
+      fail = true;
+      await expect(tool.execute({ task: "must not start" }, ctx())).rejects.toThrow(
+        "resource preparation failed",
+      );
+      expect(requests).toBe(0);
+      expect(logs).toEqual([]);
+      if (!failedPath) throw new Error("missing failed preparation path");
+      const candidatePath = failedPath;
+      expect(existsSync(candidatePath)).toBe(false);
+      expect(existsSync(candidatePath.replace(/\.jsonl$/, ".records"))).toBe(false);
+      const candidate = new Log(candidatePath);
+      candidate.recording?.dispose();
+      fail = false;
+      expect(await tool.execute({ task: "start" }, ctx())).toContain("finished");
+      expect(requests).toBe(1);
+      expect(
+        logs[0]?.events.filter((event) => event.type === "user/message").map((event) => event.text),
+      ).toEqual(["start"]);
+    } finally {
+      parent.recording?.dispose();
+      for (const log of logs) log.recording?.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("重建工具后继承首次实际约束,同名模型不换供应商,祖先身份和新注册表不扩权", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "clarook-child-identity-"));
+    const opened: EventLog[] = [];
+    try {
+      const parent = new Log(join(dir, "parent.jsonl"));
+      opened.push(parent);
+      for (const event of parentLog().events) parent.append(event);
+      parent.append({
+        type: "ext/event",
+        at: "t",
+        source: "subagent",
+        kind: "identity",
+        payload: {
+          id: "sub-1",
+          type: "ancestor",
+          scope: "taskOnly",
+          model: "q/same",
+          tools: ["other"],
+          maxSteps: 9,
+          remainingDepth: 0,
+        },
+      });
+      const original = loopingProvider("same");
+      const initial = mk({
+        parent,
+        provider: childProvider("parent"),
+        modelLocator: "q/parent",
+        tools: [echo, other],
+        depth: 2,
+        slots: { termination: maxSteps(2) },
+        types: {
+          research: {
+            description: "restricted",
+            model: "alias",
+            tools: ["echo", "task", "not-installed"],
+            scope: "fork",
+          },
+        },
+        providerFor: (model) => {
+          expect(model).toBe("alias");
+          return { provider: original, modelLocator: "p/same" };
+        },
+      });
+      await initial.tool.execute({ task: "first", type: "research" }, ctx());
+      expect(original.tools).toEqual([
+        ["echo", "task"],
+        ["echo", "task"],
+      ]);
+      const child = initial.logs[0];
+      if (!child) throw new Error("missing child");
+      opened.push(child);
+      child.append({ type: "context/edit", at: "t", target: 0, field: "system", value: "CHILD" });
+      for (const log of opened) {
+        log.recording?.flush();
+        log.recording?.dispose();
+      }
+
+      const requests: { tools: string[]; system: string }[] = [];
+      const lookups: string[] = [];
+      const restoredParent = Log.load(parent.path as string, { attach: true });
+      opened.push(restoredParent);
+      const restored = mk({
+        parent: restoredParent,
+        provider: childProvider("same"),
+        modelLocator: "q/same",
+        tools: async (target) => {
+          opened.push(target);
+          return { tools: [echo, other], dispose: async () => {} };
+        },
+        depth: 3,
+        slots: { termination: maxSteps(7) },
+        types: {
+          research: {
+            description: "changed",
+            model: "q/same",
+            tools: ["other", "task"],
+            maxSteps: 9,
+            system: "CHANGED",
+            scope: "taskOnly",
+          },
+        },
+        providerFor: (model) => {
+          lookups.push(model);
+          if (model !== "p/same") throw new Error(`unavailable model ${model}`);
+          return {
+            modelLocator: "p/same",
+            provider: {
+              model: "same",
+              async complete(messages, definitions) {
+                requests.push({
+                  tools: definitions.map((tool) => tool.name),
+                  system: messages.find((message) => message.role === "system")?.content ?? "",
+                });
+                const brief = messages.at(-1);
+                if (brief?.role === "user" && brief.content === "nested")
+                  return { text: "nested done", toolCalls: [], stopReason: "end" };
+                return {
+                  text: "working",
+                  toolCalls: [
+                    brief?.role === "user" && brief.content === "follow-up"
+                      ? { id: "nested", name: "task", args: { task: "nested", scope: "fork" } }
+                      : { id: "echo", name: "echo", args: { text: "x" } },
+                  ],
+                  stopReason: "tool",
+                };
+              },
+            },
+          };
+        },
+      });
+      await restored.tool.execute({ task: "follow-up", resume: "sub-1", scope: "taskOnly" }, ctx());
+      opened.push(...restored.logs);
+      expect(lookups).toEqual(["p/same"]);
+      expect(requests).toEqual([
+        { tools: ["echo", "task"], system: "CHILD" },
+        { tools: ["echo"], system: "CHILD" },
+        { tools: ["echo", "task"], system: "CHILD" },
+      ]);
+      expect(
+        restored.logs[0]?.events.filter((event) => event.type === "assistant/message"),
+      ).toHaveLength(4);
+      const beforeConflict = requests.length;
+      await expect(
+        restored.tool.execute({ task: "switch", resume: "sub-1", type: "default" }, ctx()),
+      ).rejects.toThrow('cannot resume as "default"');
+      expect(requests).toHaveLength(beforeConflict);
+      expect(
+        restored.logs[0]?.events
+          .filter((event) => event.type === "user/message")
+          .map((event) => event.text),
+      ).toEqual(["hi", "first", "follow-up"]);
+    } finally {
+      for (const log of opened) log.recording?.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("恢复缺模型、错供应商、原工具或嵌套深度均零执行且释放写锁;旧日志只允许查看", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "clarook-child-unavailable-"));
+    const opened: EventLog[] = [];
+    try {
+      const parent = new Log(join(dir, "parent.jsonl"));
+      opened.push(parent);
+      for (const event of parentLog().events) parent.append(event);
+      const initial = mk({
+        parent,
+        provider: childProvider("same"),
+        modelLocator: "p/same",
+        tools: [echo],
+        depth: 2,
+      });
+      await initial.tool.execute({ task: "first" }, ctx());
+      opened.push(...initial.logs);
+      for (const log of opened) {
+        log.recording?.flush();
+        log.recording?.dispose();
+      }
+      const childPath = join(dir, "parent-sub-1.jsonl");
+      const original = readFileSync(childPath, "utf8");
+      const originalMessages = deriveMessages(Log.load(childPath).events);
+      const resumedProvider = childProvider("same");
+      let mode: "offline" | "wrong-provider" | "missing-tools" | "available" = "offline";
+      let disposed = 0;
+      const restoredParent = Log.load(parent.path as string, { attach: true });
+      opened.push(restoredParent);
+      const shallow = mk({
+        parent: restoredParent,
+        provider: resumedProvider,
+        modelLocator: "p/same",
+        tools: [echo],
+        depth: 1,
+      });
+      await expect(
+        shallow.tool.execute({ task: "insufficient depth", resume: "sub-1" }, ctx()),
+      ).rejects.toThrow("requires delegation depth 1, but only 0 is available");
+      expect(resumedProvider.tools).toEqual([]);
+      expect(shallow.logs).toEqual([]);
+      const afterShallow = Log.load(childPath, { attach: true });
+      expect(deriveMessages(afterShallow.events)).toEqual(originalMessages);
+      afterShallow.recording?.dispose();
+      const restored = mk({
+        parent: restoredParent,
+        provider: childProvider("same"),
+        modelLocator: "q/same",
+        depth: 2,
+        providerFor: (model) => {
+          expect(model).toBe("p/same");
+          if (mode === "offline") throw new Error("Model p/same is offline");
+          return {
+            provider: resumedProvider,
+            modelLocator: mode === "wrong-provider" ? "q/same" : "p/same",
+          };
+        },
+        tools: async (log) => {
+          log.append({
+            type: "ext/event",
+            at: "t",
+            source: "fixture",
+            kind: "prepared",
+            payload: {},
+          });
+          return {
+            tools: mode === "missing-tools" ? [] : [echo, other],
+            dispose: async () => {
+              disposed++;
+            },
+          };
+        },
+      });
+      for (const [next, error] of [
+        ["offline", "is offline"],
+        ["wrong-provider", "lookup returned q/same"],
+        ["missing-tools", "requires unavailable tools: echo"],
+      ] as const) {
+        mode = next;
+        await expect(
+          restored.tool.execute({ task: "must not run", resume: "sub-1" }, ctx()),
+        ).rejects.toThrow(error);
+        expect(resumedProvider.tools).toEqual([]);
+        expect(restored.logs).toEqual([]);
+        expect(readFileSync(childPath, "utf8").startsWith(original)).toBe(true);
+        const inspect = Log.load(childPath, { attach: true });
+        expect(deriveMessages(inspect.events)).toEqual(originalMessages);
+        expect(
+          inspect.events.filter(
+            (event) => event.type === "ext/event" && event.source === "subagent",
+          ),
+        ).toHaveLength(1);
+        inspect.recording?.dispose();
+      }
+      expect(disposed).toBe(1);
+      mode = "available";
+      await restored.tool.execute({ task: "follow-up", resume: "sub-1" }, ctx());
+      opened.push(...restored.logs);
+      expect(resumedProvider.tools).toEqual([
+        ["echo", "task"],
+        ["echo", "task"],
+      ]);
+      expect(disposed).toBe(2);
+
+      const legacyPath = join(dir, "parent-sub-2.jsonl");
+      const legacy = new Log(legacyPath);
+      for (const event of parentLog().events) legacy.append(event);
+      legacy.recording?.flush();
+      legacy.recording?.dispose();
+      const beforeLegacy = readFileSync(legacyPath, "utf8");
+      await expect(
+        restored.tool.execute({ task: "guess", resume: "sub-2" }, ctx()),
+      ).rejects.toThrow("has no original execution identity");
+      expect(resumedProvider.tools).toHaveLength(2);
+      expect(readFileSync(legacyPath, "utf8")).toBe(beforeLegacy);
+      const inspectedLegacy = Log.load(legacyPath, { attach: true });
+      expect(deriveMessages(inspectedLegacy.events)).toEqual([
+        { role: "system", content: "parent system" },
+        { role: "user", content: "hi" },
+      ]);
+      inspectedLegacy.recording?.dispose();
+      for (const [index, invalid] of [
+        { maxSteps: "1" },
+        { model: " " },
+        { remainingDepth: 1 },
+        { tools: ["echo", "task"] },
+        null,
+      ].entries()) {
+        const id = `sub-${index + 3}`;
+        const invalidPath = join(dir, `parent-${id}.jsonl`);
+        const invalidLog = new Log(invalidPath);
+        for (const event of parentLog().events) invalidLog.append(event);
+        invalidLog.append({
+          type: "ext/event",
+          at: "t",
+          source: "subagent",
+          kind: "identity",
+          payload: (invalid === null
+            ? null
+            : {
+                id,
+                type: "default",
+                scope: "taskOnly",
+                model: "p/same",
+                tools: ["echo"],
+                maxSteps: null,
+                remainingDepth: 0,
+                ...invalid,
+              }) as unknown as Record<string, unknown>,
+        });
+        invalidLog.recording?.flush();
+        invalidLog.recording?.dispose();
+        const beforeInvalid = readFileSync(invalidPath, "utf8");
+        await expect(
+          restored.tool.execute({ task: "must not coerce identity", resume: id }, ctx()),
+        ).rejects.toThrow("invalid execution identity");
+        expect(resumedProvider.tools).toHaveLength(2);
+        expect(readFileSync(invalidPath, "utf8")).toBe(beforeInvalid);
+        const inspectedInvalid = Log.load(invalidPath, { attach: true });
+        inspectedInvalid.recording?.dispose();
+      }
+    } finally {
+      for (const log of opened) log.recording?.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("类型注册表与嵌套", () => {
@@ -333,7 +777,7 @@ describe("类型注册表与嵌套", () => {
       },
       providerFor: (model) => {
         expect(model).toBe("cheap");
-        return cheap;
+        return { provider: cheap, modelLocator: "cheap" };
       },
     });
     const schema = tool.parameters as unknown as {
@@ -423,7 +867,7 @@ describe("类型注册表与嵌套", () => {
     );
   });
 
-  it("depth 2:子有 task 工具,孙没有", async () => {
+  it("有限小数 depth 按逐层判断,子有 task 工具且续聊保持,孙没有", async () => {
     const seen: string[][] = [];
     let n = 0;
     const provider: Provider = {
@@ -445,12 +889,14 @@ describe("类型注册表与嵌套", () => {
     const { tool } = mk({
       provider,
       tools: [echo, other],
-      depth: 2,
+      depth: 1.5,
       types: { limited: { description: "restricted tools", tools: ["echo", "task"] } },
     });
     const out = await tool.execute({ task: "child", type: "limited" }, ctx());
     expect(out).toContain("done 3");
     expect(seen[0]).toEqual(["echo", "task"]);
     expect(seen[1]).toEqual(["echo"]);
+    await tool.execute({ task: "follow-up", resume: "sub-1" }, ctx());
+    expect(seen[3]).toEqual(["echo", "task"]);
   });
 });

@@ -201,6 +201,7 @@ export class McpClient {
   /** 全部工具,跟着 nextCursor 翻到底。 */
   async listTools(): Promise<McpToolDef[]> {
     const out: McpToolDef[] = [];
+    const seen = new Set<string>();
     let cursor: string | undefined;
     for (let page = 0; page < 100; page++) {
       const r = (await this.request("tools/list", cursor !== undefined ? { cursor } : {})) as {
@@ -208,10 +209,12 @@ export class McpClient {
         nextCursor?: string;
       };
       out.push(...(r.tools ?? []));
-      if (r.nextCursor === undefined) break;
+      if (r.nextCursor === undefined) return out;
+      if (seen.has(r.nextCursor)) throw new Error(`mcp ${this.name}: tools/list repeated cursor`);
+      seen.add(r.nextCursor);
       cursor = r.nextCursor;
     }
-    return out;
+    throw new Error(`mcp ${this.name}: tools/list exceeded 100 pages`);
   }
 
   async callTool(
@@ -462,7 +465,7 @@ export class McpClient {
     this.pending.clear();
   }
 
-  /** 关闭:先让 stdio 服务处理 EOF,仍在运行时停止整个进程树。 */
+  /** 关闭:先让 stdio 服务处理 EOF;父退出后仍清理同组后代与本地管道。 */
   close(): Promise<void> {
     if (!this.closing)
       this.closing = this.stop().catch((error) => {
@@ -476,7 +479,7 @@ export class McpClient {
     this.closed = true;
     this.failAll(new Error(`mcp ${this.name}: closed`));
     const child = this.child;
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    if (!child) return;
     await new Promise<void>((resolve, reject) => {
       let t1: NodeJS.Timeout | undefined;
       let t2: NodeJS.Timeout | undefined;
@@ -487,25 +490,40 @@ export class McpClient {
         if (t1) clearTimeout(t1);
         if (t2) clearTimeout(t2);
         child.off("exit", onExit);
+        child.stdin?.destroy();
+        child.stdout?.destroy();
+        child.stderr?.destroy();
         if (error) reject(error);
         else resolve();
       };
-      const onExit = () => done();
+      const kill = () => {
+        try {
+          stopProcessTree(child, process.platform !== "win32");
+        } catch (error) {
+          // 父退出后的空进程组已清理;其他停止失败仍允许连接池重试。
+          if (
+            (child.exitCode !== null || child.signalCode !== null) &&
+            ((error as Error).cause as NodeJS.ErrnoException | undefined)?.code === "ESRCH"
+          )
+            return;
+          done(new Error(`mcp ${this.name}: ${(error as Error).message}`, { cause: error }));
+        }
+      };
+      const onExit = () => {
+        if (process.platform !== "win32" && child.pid !== undefined) kill();
+        done();
+      };
+      if (child.exitCode !== null || child.signalCode !== null) {
+        onExit();
+        return;
+      }
       child.once("exit", onExit);
       try {
         child.stdin?.end();
       } catch {
         // 已关闭
       }
-      t1 = setTimeout(() => {
-        try {
-          stopProcessTree(child, process.platform !== "win32");
-        } catch (error) {
-          child.stdout?.destroy();
-          child.stderr?.destroy();
-          done(new Error(`mcp ${this.name}: ${(error as Error).message}`));
-        }
-      }, 1000);
+      t1 = setTimeout(kill, 1000);
       t2 = setTimeout(() => {
         done(
           new Error(

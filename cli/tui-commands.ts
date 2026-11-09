@@ -7,7 +7,7 @@ import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Marked } from "marked";
 import type { DeliverAs } from "../src/agent.js";
 import type { ModelConfig } from "../src/config.js";
-import { contextBreakdown, estimateTokens } from "../src/context.js";
+import { contextBreakdown, estimateTokens, toolDefinitionTokens } from "../src/context.js";
 import { fmtCost } from "../src/cost.js";
 import { now } from "../src/events.js";
 import { EFFORT_LEVELS, parseEffort } from "../src/provider.js";
@@ -40,7 +40,7 @@ import {
 } from "./tui-edit.js";
 import { pct, plainDisplayText } from "./tui-format.js";
 import { LoginDialog, modelUseRows, type PickRow, SAVE_MODEL_DEFAULT } from "./tui-login.js";
-import { choose, confirm, title, valueRows } from "./tui-menu.js";
+import { choose, confirm, HINT, title, valueRows } from "./tui-menu.js";
 import { Palette, type PaletteItem } from "./tui-palette.js";
 import {
   applySettingNow,
@@ -106,30 +106,48 @@ export const COMMANDS: Command[] = [
 
 // ---------- 提交 ----------
 
+/** 原始输入与生成消息共用接纳条件,读取附件前就拒绝不可接纳的提交。 */
+function inputBlocked(ctx: TuiContext): boolean {
+  if (ctx.inputReading) {
+    ctx.note(c.soft("Preparing paste; send after it appears."));
+    return true;
+  }
+  if (ctx.deps.readOnlyReason) {
+    ctx.note(c.zhu(ctx.deps.readOnlyReason));
+    return true;
+  }
+  if (ctx.agent.storagePaused) {
+    ctx.note(c.zhu("Recording buffer full. Fix saving and retry; your draft is still here."));
+    ctx.updateStatus();
+    return true;
+  }
+  return false;
+}
+
+/** 只有原始输入能选择用户 shell;展开后的正文直接进入消息提交。 */
 export async function submit(
   ctx: TuiContext,
   raw: string,
   opts: { deliverAs?: DeliverAs } = {},
 ): Promise<void> {
-  const { agent } = ctx;
-  if (ctx.inputReading) {
-    ctx.note(c.soft("Preparing paste; send after it appears."));
-    return;
-  }
-  if (ctx.deps.readOnlyReason) {
-    ctx.note(c.zhu(ctx.deps.readOnlyReason));
-    return;
-  }
-  if (agent.storagePaused) {
-    ctx.note(c.zhu("Recording buffer full. Fix saving and retry; your draft is still here."));
-    ctx.updateStatus();
-    return;
-  }
   const shell = shellDraft(ctx, raw);
   if (shell) {
+    if (inputBlocked(ctx)) return;
     await runUserShell(ctx, shell);
     return;
   }
+  await submitMessage(ctx, raw, raw, opts);
+}
+
+/** source 是用户本次调用,决定附件与草稿归属;text 是送给模型的正文。 */
+async function submitMessage(
+  ctx: TuiContext,
+  text: string,
+  source: string,
+  opts: { deliverAs?: DeliverAs },
+): Promise<void> {
+  if (inputBlocked(ctx)) return;
+  const { agent } = ctx;
   if (agent.localRunning) {
     ctx.note(c.soft("User shell is running. Wait or press Esc first; your draft is kept."));
     return;
@@ -139,8 +157,8 @@ export async function submit(
     openLogin(ctx, {});
     return;
   }
-  // @路径 展开成消息里的 <file> 块:附上的就是发出的,落盘上屏都完整。
-  const expanded = expandFileRefs(raw);
+  // 附件来自原始调用,与模板采用哪些参数无关;正文及文件内容不再次解释。
+  const expanded = expandFileRefs(source, process.cwd(), text);
   for (const a of expanded.attachments) {
     ctx.note(
       a.skipped
@@ -148,9 +166,9 @@ export async function submit(
         : c.faint(`· attached @${a.ref} (${a.bytes} bytes)`),
     );
   }
-  const text = expanded.text;
+  const message = expanded.text;
   const inputId = ctx.deps.inputs?.draftId;
-  const fromEditor = ctx.editor.getExpandedText().trim() === raw.trim();
+  const fromEditor = ctx.editor.getExpandedText().trim() === source.trim();
   const images = fromEditor ? ctx.draftImages : [];
   const clearAcceptedDraft = () => {
     if (
@@ -166,7 +184,7 @@ export async function submit(
   };
   if (agent.running) {
     void agent
-      .prompt(text, { ...opts, images, ...(fromEditor && inputId && { inputId }) })
+      .prompt(message, { ...opts, images, ...(fromEditor && inputId && { inputId }) })
       .catch(() => {});
     clearAcceptedDraft();
     ctx.note(
@@ -182,7 +200,7 @@ export async function submit(
     return;
   }
   await runInput(ctx, () => {
-    const pending = agent.prompt(text, { images, ...(fromEditor && inputId && { inputId }) });
+    const pending = agent.prompt(message, { images, ...(fromEditor && inputId && { inputId }) });
     clearAcceptedDraft();
     return pending;
   });
@@ -241,24 +259,14 @@ function helpText(ctx: TuiContext): string {
 // ---------- 查看(/inspect) ----------
 
 function toolsList(ctx: TuiContext): string {
-  // 关掉的工具也要算 token(它不在 defs() 里),按工具自己的定义算。
-  const tokOf = (name: string) => {
-    const t = ctx.tools.find((x) => x.name === name);
-    return t
-      ? Math.ceil(
-          JSON.stringify({ name: t.name, description: t.description, parameters: t.parameters })
-            .length / 4,
-        )
-      : 0;
-  };
   const off = ctx.slots.disabledTools;
-  const total = ctx.tools.filter((t) => !off.has(t.name)).reduce((s, t) => s + tokOf(t.name), 0);
+  const total = toolDefinitionTokens(ctx.agent.tools);
   const rows = ctx.tools.map((t) => {
     const params = Object.keys(
       (t.parameters as { properties?: Record<string, unknown> }).properties ?? {},
     );
     const state = off.has(t.name) ? c.zhu("off       ") : c.faint("on        ");
-    return `  ${c.ink(t.name.padEnd(10))} ${c.soft(String(tokOf(t.name)).padStart(5))} ${c.faint("tok")}  ${state} ${c.faint((t.concurrency === "parallel" ? "parallel" : "sequential").padEnd(10))} ${c.ink(t.description.split("\n")[0]?.slice(0, 60) ?? "")}\n${" ".repeat(13)}${c.faint(`params: ${params.join(", ") || "(none)"}`)}`;
+    return `  ${c.ink(t.name.padEnd(10))} ${c.soft(String(toolDefinitionTokens([t])).padStart(5))} ${c.faint("tok")}  ${state} ${c.faint((t.concurrency === "parallel" ? "parallel" : "sequential").padEnd(10))} ${c.ink(t.description.split("\n")[0]?.slice(0, 60) ?? "")}\n${" ".repeat(13)}${c.faint(`params: ${params.join(", ") || "(none)"}`)}`;
   });
   return [
     `${c.soft("Tools")} ${c.ink(`${ctx.tools.length - off.size} on`)}  ${c.faint(`≈${total} tok of definitions sent with every request · level ${ctx.slots.state.toolPrompts} (/set) · /tools switches · full JSON in Ctrl+R → tool definitions`)}`,
@@ -389,11 +397,11 @@ function renderPrompt(ctx: TuiContext): string {
 
 export function renderContext(ctx: TuiContext): string {
   const { log } = ctx;
-  const b = contextBreakdown(log.events, ctx.model.contextWindow);
+  const b = contextBreakdown(log.events, ctx.model.contextWindow, ctx.agent.tools);
   const lines = [
     `${c.soft("Context")}  ${c.ink(`estimated ${b.estimatedTokens} tok`)} ${c.faint(`/ window ${b.window} · ${pct(b.usedShare)}`)}`,
     c.faint(
-      "Projected messages only; tool definitions and provider framing are excluded. Ctrl+E shows active tools.",
+      "Known message text + current tool definitions (chars/4); total unmeasured. Images, opaque blocks and provider framing are not estimated.",
     ),
   ];
   if (b.measuredTokens !== undefined)
@@ -402,15 +410,15 @@ export function renderContext(ctx: TuiContext): string {
   if (ctx.req.count > 0) {
     lines.push(
       c.faint(
-        `session total: ${ctx.req.count} requests (${totals.requests} with usage) · in ${totals.inputTokens} · out ${totals.outputTokens} · cache read ${totals.cacheReadTokens} · cache write ${totals.cacheWriteTokens}`,
+        `main session total: ${ctx.req.count} requests (${totals.requests} with usage) · in ${totals.inputTokens} · out ${totals.outputTokens} · cache read ${totals.cacheReadTokens} · cache write ${totals.cacheWriteTokens}`,
       ),
     );
     if (ctx.deps.showCostEstimate)
       lines.push(
         c.faint(
           totals.cost !== undefined
-            ? `cost estimate ${fmtCost(totals.cost)} · reported tokens × configured/catalog rates, not a bill`
-            : `cost estimate unavailable (${totals.costStatus}) · see Ctrl+R for per-request usage`,
+            ? `main session cost estimate ${fmtCost(totals.cost)} · excludes child sessions · reported tokens × configured/catalog rates, not a bill`
+            : `main session cost estimate unavailable (${totals.costStatus}) · excludes child sessions · see Ctrl+R for per-request usage`,
         ),
       );
   }
@@ -738,6 +746,9 @@ async function setCommand(ctx: TuiContext, arg: string): Promise<void> {
     ctx,
     title(chosen, `now ${slotCurrent(ctx, chosen)} · ${SLOT_NOTES[chosen]}`),
     valueRows(values, slotCurrent(ctx, chosen)),
+    chosen === "toolprompts"
+      ? `Put task-specific preferences in messages. Definition changes may reduce prompt cache reuse.\n${HINT}`
+      : undefined,
   );
   if (!picked) return;
   const v = picked.row.label;
@@ -1161,19 +1172,10 @@ async function toolsCommand(ctx: TuiContext, arg: string): Promise<void> {
     );
     return;
   }
-  const tokOf = (name: string) => {
-    const t = ctx.tools.find((x) => x.name === name);
-    return t
-      ? Math.ceil(
-          JSON.stringify({ name: t.name, description: t.description, parameters: t.parameters })
-            .length / 4,
-        )
-      : 0;
-  };
   while (true) {
     const rows: PickRow[] = ctx.tools.map((t) => ({
       label: t.name,
-      note: `${off.has(t.name) ? c.zhu("off") : "on "} · ${tokOf(t.name)} tok · ${firstLine(t.description, 50)}`,
+      note: `${off.has(t.name) ? c.zhu("off") : "on "} · ≈${toolDefinitionTokens([t])} tok · ${firstLine(t.description, 50)}`,
     }));
     const picked = await choose(
       ctx,
@@ -1653,12 +1655,16 @@ async function settingsCommand(ctx: TuiContext, arg: string): Promise<void> {
 /**
  * 一条命令。弹了选单就返回(选单里的后续在后台走完),没弹的等做完;调用方与测试都不必等人来选。
  */
-export async function command(ctx: TuiContext, text: string): Promise<void> {
+export async function command(
+  ctx: TuiContext,
+  text: string,
+  opts: { deliverAs?: DeliverAs } = {},
+): Promise<void> {
   // 先挂信号再分发:选单可能在分发的同步段里就打开。
   const opened = new Promise<void>((resolve) => {
     ctx.dialog.onOpen = resolve;
   });
-  const flow = dispatch(ctx, text)
+  const flow = dispatch(ctx, text, opts)
     .finally(() => ctx.persistSetup())
     .catch((err: unknown) => ctx.note(c.zhu(`✗ ${errorMessage(err)}`)));
   try {
@@ -1674,7 +1680,11 @@ function commandParts(input: string): [string, string] {
   return boundary < 0 ? [input, ""] : [input.slice(0, boundary), input.slice(boundary).trim()];
 }
 
-async function dispatch(ctx: TuiContext, text: string): Promise<void> {
+async function dispatch(
+  ctx: TuiContext,
+  text: string,
+  opts: { deliverAs?: DeliverAs },
+): Promise<void> {
   const [cmd, arg] = commandParts(text.replace(/^\//, ""));
   if (
     ctx.deps.readOnlyReason &&
@@ -1683,6 +1693,23 @@ async function dispatch(ctx: TuiContext, text: string): Promise<void> {
     ctx.note(c.zhu(ctx.deps.readOnlyReason));
     return;
   }
+  // 自定义命令保留原始调用,供消息接纳后清理草稿;内置命令仍立即接管输入。
+  if (!COMMANDS.some((entry) => entry.name === cmd)) {
+    const template = ctx.templates.find((entry) => entry.name === cmd);
+    const skill = template ? undefined : ctx.skills.find((entry) => entry.name === cmd);
+    const prompt = template
+      ? { kind: "template", path: template.path, text: expandTemplate(template, arg) }
+      : skill
+        ? { kind: "skill", path: skill.path, text: expandSkill(skill, arg) }
+        : undefined;
+    if (prompt) {
+      ctx.note(c.faint(`· ${prompt.kind} /${cmd}  ${prompt.path}`));
+      await submitMessage(ctx, prompt.text, text, opts);
+      return;
+    }
+  }
+  if (cmd !== "shell" && ctx.editor.getExpandedText().trim() === text.trim())
+    ctx.editor.setText("");
   switch (cmd) {
     case "help":
       ctx.note(
@@ -1738,26 +1765,9 @@ async function dispatch(ctx: TuiContext, text: string): Promise<void> {
       await enterShell(ctx, arg);
       break;
     default:
-      await userDefined(ctx, cmd, arg);
+      ctx.note(
+        c.zhu(`unknown command /${cmd}`) +
+          c.faint("  /help lists the commands · Ctrl+K searches everything"),
+      );
   }
-}
-
-/** 提示词模板与技能:/名 参数 → 一条用户消息,工具统一走当前审批策略。 */
-async function userDefined(ctx: TuiContext, cmd: string, arg: string): Promise<void> {
-  const t = ctx.templates.find((x) => x.name === cmd);
-  if (t) {
-    ctx.note(c.faint(`· template /${t.name}  ${t.path}`));
-    await submit(ctx, expandTemplate(t, arg));
-    return;
-  }
-  const sk = ctx.skills.find((x) => x.name === cmd);
-  if (sk) {
-    ctx.note(c.faint(`· skill /${sk.name}  ${sk.path}`));
-    await submit(ctx, expandSkill(sk, arg));
-    return;
-  }
-  ctx.note(
-    c.zhu(`unknown command /${cmd}`) +
-      c.faint("  /help lists the commands · Ctrl+K searches everything"),
-  );
 }

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { readRequestRecording } from "../cli/session-records.js";
+import { contextSize } from "../src/compaction.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
@@ -164,20 +165,39 @@ describe("createTaskTool", () => {
   it("scope 参数由父模型选择:fork 让子看到父历史", async () => {
     const dir = mkdtempSync(join(tmpdir(), "clarook-fork-records-"));
     const parent = new EventLog(join(dir, "parent.jsonl"));
-    for (const event of parentLog().events) parent.append(event);
+    for (const event of parentLog().events)
+      parent.append(
+        event.type === "assistant/message"
+          ? { ...event, usage: { inputTokens: 10000, outputTokens: 20 } }
+          : event,
+      );
     let childLog: EventLog | undefined;
     let childSaw = 0;
+    let compactions = 0;
     const childProvider: Provider = {
-      model: "fake",
+      model: "m",
       async complete(messages) {
         childSaw = messages.length;
-        return { text: "ok", toolCalls: [], stopReason: "end" };
+        return {
+          text: "ok",
+          toolCalls: [],
+          stopReason: "end",
+          usage: { inputTokens: 1000, outputTokens: 4 },
+        };
       },
     };
     const task = createTaskTool({
       parent,
       provider: childProvider,
       tools: [],
+      compaction: {
+        window: 5000,
+        reserveTokens: 1000,
+        strategy: async () => {
+          compactions++;
+          return null;
+        },
+      },
       onChild: (child) => {
         childLog = child.log;
       },
@@ -199,6 +219,20 @@ describe("createTaskTool", () => {
       expect(childSaw).toBe(6);
       if (!childLog?.path || !parent.path || !parent.recording)
         throw new Error("missing recorded child");
+      expect(compactions).toBe(0);
+      const firstChildRequest = childLog.events.filter((event) => event.type === "request").at(-1);
+      expect(firstChildRequest?.estimatedTokens).toBeLessThan(100);
+      expect(firstChildRequest?.tools).toEqual([]);
+      expect(contextSize(childLog.events)).toEqual({ tokens: 1004, basis: "usage" });
+      await task.execute(
+        { task: "more", resume: "sub-1" },
+        { signal: new AbortController().signal, callId: "resume" },
+      );
+      expect(childLog.events.filter((event) => event.type === "request").at(-1)).toMatchObject({
+        estimatedTokens: 1005,
+        tools: [],
+      });
+      expect(compactions).toBe(0);
       const request = parent.events.findIndex((event) => event.type === "request");
       const expected = readRequestRecording(parent.path, parent.events, request, "input");
       expect(expected?.input?.messages).toHaveLength(5);

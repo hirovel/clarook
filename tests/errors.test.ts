@@ -8,6 +8,7 @@ import { createTuiApp } from "../cli/tui-app.js";
 import { COMMANDS } from "../cli/tui-commands.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
+import { anthropic } from "../src/providers/anthropic.js";
 import {
   classifyError,
   errorMessage,
@@ -112,10 +113,48 @@ describe("request/error 事件与错误卡", () => {
     let disconnected: false | "before" | "empty" | "partial" = false;
     let networkCalls = 0;
     let finishReason: string | undefined;
+    let finishProtocol: "chat" | "anthropic" = "chat";
+    let finishWithTools = true;
     let finishCalls = 0;
     const server = http.createServer((_req, res) => {
       if (finishReason !== undefined) {
         finishCalls++;
+        if (finishProtocol === "anthropic") {
+          const events = [
+            { type: "message_start", message: { usage: { input_tokens: 10 } } },
+            { type: "content_block_start", index: 0, content_block: { type: "text" } },
+            {
+              type: "content_block_delta",
+              index: 0,
+              delta: {
+                type: "text_delta",
+                text: finishCalls === 1 ? "Visible partial reply." : "Done.",
+              },
+            },
+            ...(finishCalls === 1 && finishWithTools
+              ? [
+                  {
+                    type: "content_block_start",
+                    index: 1,
+                    content_block: { type: "tool_use", id: "c1", name: "count" },
+                  },
+                  {
+                    type: "content_block_delta",
+                    index: 1,
+                    delta: { type: "input_json_delta", partial_json: "{}" },
+                  },
+                ]
+              : []),
+            {
+              type: "message_delta",
+              delta: { stop_reason: finishCalls === 1 ? finishReason : "end_turn" },
+            },
+            { type: "message_stop" },
+          ];
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
+          return;
+        }
         const unfinished = finishReason === "unfinished";
         const choice =
           finishCalls === 1
@@ -182,18 +221,32 @@ describe("request/error 事件与错误卡", () => {
       expect(err && "body" in err && err.body).toContain("Incorrect API key");
 
       const directory = testDirectory("clarook-network-error-");
-      for (const reason of [
-        "content_filter",
-        "network_error",
-        "unknown_reason",
-        "unfinished",
-        "tool_calls",
-        "length",
-      ]) {
+      for (const [protocol, reason, withTools] of [
+        ["chat", "content_filter", true],
+        ["chat", "network_error", true],
+        ["chat", "unknown_reason", true],
+        ["chat", "unfinished", true],
+        ["chat", "tool_calls", true],
+        ["chat", "length", true],
+        ["anthropic", "refusal", true],
+        ["anthropic", "pause_turn", true],
+        ["anthropic", "unknown_reason", true],
+        ["anthropic", "tool_use", true],
+        ["anthropic", "max_tokens", true],
+        ["anthropic", "model_context_window_exceeded", true],
+        ["anthropic", "max_tokens", false],
+        ["anthropic", "model_context_window_exceeded", false],
+        ["anthropic", "end_turn", false],
+        ["anthropic", "stop_sequence", false],
+        ["anthropic", "end_turn", true],
+        ["anthropic", "tool_use", false],
+      ] as const) {
         finishReason = reason;
+        finishProtocol = protocol;
+        finishWithTools = withTools;
         finishCalls = 0;
         let executed = 0;
-        const file = join(directory, `${reason}.jsonl`);
+        const file = join(directory, `${protocol}-${reason}-${withTools ? "tools" : "text"}.jsonl`);
         const finishLog = new EventLog(file);
         const count = defineTool({
           name: "count",
@@ -207,10 +260,43 @@ describe("request/error 事件与错误卡", () => {
         try {
           finishLog.append({ type: "session/start", at: "", model: "m", system: "s" });
           finishLog.append({ type: "user/message", at: "", text: "count" });
-          const turn = runTurn({ log: finishLog, provider, tools: [count] });
-          if (reason === "tool_calls" || reason === "length") {
-            await turn;
-            expect(executed).toBe(reason === "tool_calls" ? 1 : 0);
+          const turn = runTurn({
+            log: finishLog,
+            provider:
+              protocol === "chat"
+                ? provider
+                : anthropic({ baseUrl: `http://127.0.0.1:${port}`, apiKey: "bad", model: "m" }),
+            tools: [count],
+          });
+          const executes = withTools && (reason === "tool_calls" || reason === "tool_use");
+          const truncated = ["length", "max_tokens", "model_context_window_exceeded"].includes(
+            reason,
+          );
+          if (
+            executes ||
+            truncated ||
+            (!withTools && (reason === "end_turn" || reason === "stop_sequence"))
+          ) {
+            const outcome = await turn;
+            expect(executed).toBe(executes ? 1 : 0);
+            expect(finishCalls).toBe(withTools ? 2 : 1);
+            if (withTools) {
+              expect(outcome).toBe("idle");
+              expect(finishLog.events.find((e) => e.type === "tool/result")).toMatchObject({
+                isError: truncated,
+              });
+            } else {
+              expect(outcome).toEqual(
+                truncated ? { stopped: expect.stringContaining("Response incomplete") } : "idle",
+              );
+              expect(finishLog.events.filter((e) => e.type === "assistant/message")).toEqual([
+                expect.objectContaining({
+                  text: "Visible partial reply.",
+                  stopReason: truncated ? "length" : "end",
+                  extras: { stop_reason: reason },
+                }),
+              ]);
+            }
             expect(finishLog.events.some((e) => e.type === "request/error")).toBe(false);
           } else {
             await expect(turn).rejects.toMatchObject({ name: "ProviderError", retryable: false });
@@ -233,6 +319,31 @@ describe("request/error 事件与错误卡", () => {
           finishLog.recording?.dispose();
         }
       }
+
+      // 流式文字已显示后取消,异常终止分类也不能吞掉用户要求保留的半截回答。
+      finishProtocol = "anthropic";
+      finishReason = "refusal";
+      finishWithTools = true;
+      finishCalls = 0;
+      const cancel = new AbortController();
+      const cancelledLog = new EventLog();
+      cancelledLog.append({ type: "user/message", at: "", text: "cancel after text" });
+      expect(
+        await runTurn({
+          log: cancelledLog,
+          provider: anthropic({ baseUrl: `http://127.0.0.1:${port}`, apiKey: "bad", model: "m" }),
+          tools: [],
+          signal: cancel.signal,
+          onDelta: () => cancel.abort(),
+        }),
+      ).toBe("aborted");
+      expect(cancelledLog.events.find((e) => e.type === "assistant/message")).toMatchObject({
+        text: "Visible partial reply.",
+        toolCalls: [],
+        stopReason: "aborted",
+      });
+      expect(cancelledLog.events.some((e) => e.type === "request/error")).toBe(false);
+      expect(finishCalls).toBe(1);
       finishReason = undefined;
 
       // 界面层:错误卡

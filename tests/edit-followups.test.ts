@@ -154,19 +154,30 @@ describe("/retry", () => {
     expect(drops[1]).toBe(log.events.length - 4);
   });
 
-  it("没有助手消息时报错", async () => {
-    const log = new EventLog();
-    log.append({ type: "session/start", at: "", model: "m", system: "S" });
-    const agent = new Agent({
-      log,
-      provider: {
-        model: "m",
-        async complete() {
-          return { text: "", toolCalls: [], stopReason: "end" };
+  it("当前投影没有助手消息时拒绝重试,不重新发送被摘要覆盖的回答", async () => {
+    for (const history of [
+      [{ type: "session/start", at: "", model: "m", system: "S" }],
+      [
+        ...base(),
+        { type: "compaction", at: "", summary: "Earlier work", coversFrom: 2, coversUpTo: 7 },
+      ],
+    ] as AgentEvent[][]) {
+      const log = new EventLog();
+      for (const event of history) log.append(event);
+      let calls = 0;
+      const agent = new Agent({
+        log,
+        provider: {
+          model: "m",
+          async complete() {
+            calls++;
+            return { text: "", toolCalls: [], stopReason: "end" };
+          },
         },
-      },
-      tools: [],
-    });
-    await expect(agent.retry()).rejects.toThrow(/no assistant message to retry/);
+        tools: [],
+      });
+      await expect(agent.retry()).rejects.toThrow(/no assistant message to retry/);
+      expect(calls).toBe(0);
+    }
   });
 });

@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { RequestInspector } from "../cli/inspector.js";
@@ -86,7 +89,7 @@ function build(log: EventLog, provider: Provider, rows = 30, currentDefs = defs)
         name: "main",
         events: log.events,
         recordingFor: (i) =>
-          i === 2
+          i === log.events.findIndex((event) => event.type === "request")
             ? {
                 bodies: [],
                 attempts: [
@@ -167,7 +170,9 @@ describe("请求检视器", () => {
 
   it("详情六分区:概要 / 决策 / 发送(折叠可切) / 工具定义 / 线路 JSON / 接收", async () => {
     const { log, provider } = await session();
-    const { insp, text } = build(log, provider, 40);
+    const { insp, text } = build(log, provider, 40, [
+      { name: "echo", description: "replacement description", parameters: { replacement: true } },
+    ]);
     insp.handleInput("\x1b[H"); // 选到 #1
     insp.handleInput("\r");
     let doc = text();
@@ -217,6 +222,8 @@ describe("请求检视器", () => {
     expect(doc).toContain("echo");
     expect(doc).toContain("回显文本");
     expect(doc).toContain('"type": "object"');
+    expect(doc).toContain('"text": {');
+    expect(doc).not.toContain("replacement");
 
     insp.handleInput("5");
     doc = text();
@@ -260,6 +267,39 @@ describe("请求检视器", () => {
       expect(screen).toContain("Enter collapse");
       expect(screen).toContain("Esc back");
       expect(screen).toContain("[−] 1. system");
+    }
+
+    // 重载不附带 Recording;旧请求不能借后来同名工具的描述与 schema。
+    log.append({ type: "user/message", at: "t", text: "next task" });
+    await runTurn({
+      log,
+      provider: scripted([{ text: "new result", toolCalls: [], stopReason: "end" }]),
+      tools: [
+        defineTool({
+          name: "echo",
+          description: "replacement description",
+          parameters: Type.Object({ replacement: Type.Boolean() }),
+          async execute() {
+            return "unused";
+          },
+        }),
+      ],
+    });
+    const directory = mkdtempSync(join(tmpdir(), "clarook-inspector-history-"));
+    try {
+      const file = join(directory, "session.jsonl");
+      writeFileSync(file, `${log.events.map((event) => JSON.stringify(event)).join("\n")}\n`);
+      const loaded = EventLog.load(file);
+      const restored = build(loaded, provider, 40, []);
+      restored.insp.showRequest(1, 4);
+      expect(restored.text()).toContain("回显文本");
+      expect(restored.text()).toContain('"text": {');
+      expect(restored.text()).not.toContain("replacement");
+      restored.insp.showRequest(3, 4);
+      expect(restored.text()).toContain("replacement description");
+      expect(restored.text()).toContain('"replacement": {');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 
@@ -355,6 +395,7 @@ describe("请求检视器", () => {
       { type: "user/message", at: "t", text: "U1" },
       { type: "assistant/message", at: "t", text: "A1", toolCalls: [], stopReason: "end" },
       { type: "user/message", at: "t", text: "U2" },
+      { type: "tools/snapshot", at: "t", tools: defs },
       {
         type: "request",
         at: "t",
@@ -385,9 +426,26 @@ describe("请求检视器", () => {
     expect(doc).not.toContain("U2"); // 前缀只到第 3 条事件
     insp.handleInput("5");
     expect(text()).toContain("请压缩以上对话");
+    insp.handleInput("4");
+    expect(text()).toContain("No tools were sent");
+    expect(text()).not.toContain("回显文本");
     insp.handleInput("1");
     expect(text()).toContain("strategy");
     expect(text()).toContain("llmSummarize(structuredFull, replay)");
+    log.append({
+      type: "request",
+      at: "t",
+      model: "fake",
+      messages: 2,
+      tools: ["echo"],
+      estimatedTokens: 10,
+      reason: "compaction",
+    });
+    insp.showRequest(2, 4);
+    expect(text()).toContain("Historical tool definitions are unavailable");
+    expect(text()).not.toContain("回显文本");
+    insp.handleInput("5");
+    expect(text()).toContain("Cannot reconstruct");
   });
 
   it("没有请求时给出提示而不崩", () => {
@@ -408,18 +466,22 @@ describe("请求检视器", () => {
     insp.handleInput("\r");
     insp.handleInput("5");
     expect(text()).toContain("This provider has no wire()");
-    // 历史请求有工具,当前已找不到定义:不能伪造一份少工具的历史线路正文。
-    const missing = build(log, scripted([]), 30, []);
+    // 旧日志没有完整声明,即使当前仍有同名工具也不能冒充历史。
+    const legacy = new EventLog();
+    for (const event of log.events) if (event.type !== "tools/snapshot") legacy.append(event);
+    const missing = build(legacy, scripted([]), 30);
     missing.insp.handleInput("\r");
     missing.insp.handleInput("4");
-    expect(missing.text()).toContain("Unavailable definitions: echo");
+    expect(missing.text()).toContain("Historical tool definitions are unavailable");
+    expect(missing.text()).toContain("Recorded tool names: echo");
+    expect(missing.text()).not.toContain("回显文本");
     expect(missing.text()).not.toContain("No tools were sent");
     missing.insp.handleInput("5");
     expect(missing.text()).not.toContain('"stream": true');
     expect(missing.text()).toContain("Cannot reconstruct");
 
     // 请求尚未返回时,旁路记录会变化而事件数不变;不能让缓存一直显示未捕获。
-    const events = log.events.slice(0, 3);
+    const events = legacy.events.slice(0, 3);
     const trace: RequestRecording = { bodies: [], attempts: [] };
     const live = new RequestInspector({
       events: () => events,
@@ -507,11 +569,14 @@ describe("请求检视器", () => {
         {
           name: "main",
           events: log.events,
-          recordingFor: (i) => {
+          recordingFor: (i, section) => {
             const rec = records.find((r) => r.index === i);
             return rec
               ? {
-                  bodies: [],
+                  bodies:
+                    section === "wire" && rec.n === 2
+                      ? ['{"tools":[{"name":"echo","description":"captured HTTP definition"}]}']
+                      : [],
                   input: {
                     messages: messagesFor(log.events, rec),
                     tools: [
@@ -534,6 +599,19 @@ describe("请求检视器", () => {
     expect(compared).toContain("Same message prefix");
     expect(compared).toContain("Added since previous input");
     expect(compared).toContain("Cache hit: not reported");
+    recorded.showRequest(1, 4);
+    const savedDefinitions = recorded.render(100).map(stripAnsi).join("\n");
+    expect(savedDefinitions).toContain("Definitions saved with this request's adapter input");
+    expect(savedDefinitions).toContain("old");
+    expect(savedDefinitions).not.toContain("回显文本");
+    recorded.showRequest(2, 4);
+    const capturedDefinitions = recorded.render(100).map(stripAnsi).join("\n");
+    expect(capturedDefinitions).toContain("captured HTTP definition");
+    expect(capturedDefinitions).not.toContain("adapter input");
+    recorded.showRequest(2, 5);
+    const capturedBody = recorded.render(100).map(stripAnsi).join("\n");
+    expect(capturedBody).toContain("captured HTTP definition");
+    expect(capturedBody).not.toContain("Reconstructed preview");
     log.append({
       type: "context/edit",
       at: "t",

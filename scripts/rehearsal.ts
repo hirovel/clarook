@@ -132,11 +132,31 @@ const failures: string[] = [];
 // ---------- 轮 4:自动压缩 ----------
 {
   const { app, log, sessionFile } = boot("4-compaction", 4000);
+  // 小窗口场景显式缩小近期保留量,否则默认 20k 会把整段历史都保留下来。
+  await app.command("/set preservation tokens 1000");
   await app.submit("Read the README and answer at length (长).");
   await app.submit("Now what did you keep?");
   await tick();
   shots.push(...divider("round 4 · the context crossed the threshold and compacted"), ...app.lines(W).slice(-20));
   const bad = judge("round 4  automatic compaction", log, sessionFile);
+  const compacted = log.events.findIndex((e) => e.type === "compaction" && e.summary);
+  const summary = log.events[compacted];
+  if (summary?.type !== "compaction" || !summary.summary) {
+    failures.push("round 4: automatic compaction did not produce a summary");
+  } else {
+    const text = summary.summary;
+    const next = log.events.findIndex(
+      (e, i) => i > compacted && e.type === "request" && e.reason === "turn",
+    );
+    const recording = readRequestRecording(sessionFile, log.events, next, "wire");
+    const sent = recording?.bodies.some((body) => {
+      const wire = JSON.parse(body) as { messages?: { content?: unknown }[] };
+      return wire.messages?.some(
+        (m) => typeof m.content === "string" && m.content.includes(text),
+      );
+    });
+    if (!sent) failures.push("round 4: the next HTTP request did not contain the summary");
+  }
   if (bad.length > 0) failures.push(`round 4: ${bad.map((b) => b.id).join(", ")}`);
   app.inspector.openComposition();
   shots.push(...divider("round 4 · Ctrl+E: the summary in place, the covered messages folded under it"), ...app.inspector.lines(W));

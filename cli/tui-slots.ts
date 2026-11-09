@@ -576,7 +576,7 @@ function toolPromptsSlot(ctx: TuiContext, v: string): string {
         new TextEditor(
           ctx,
           `Edit tool description · ${name}`,
-          "Changes future requests. Use save to keep as a default.",
+          "Put task-specific preferences in messages. Definition changes affect future requests and may reduce prompt cache reuse. Use save to keep as a default.",
           t.description,
           (text) => {
             cfg.descriptions = { ...cfg.descriptions, [name]: text };

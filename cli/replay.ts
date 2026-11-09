@@ -116,14 +116,17 @@ if (compactionFlag >= 0) {
 }
 
 if (flags.includes("--messages")) {
-  console.log(`\n${"─".repeat(72)}\ncurrent projection (what the next request will send):`);
+  console.log(`\n${"─".repeat(72)}\ncurrent message projection (reconstructed from events):`);
   for (const l of sentLines(deriveMessages(log.events), false, sections)) console.log(l);
 }
 
 console.log(`\n${"─".repeat(72)}`);
 const b = contextBreakdown(log.events, Number(process.env.CLAROOK_CONTEXT_WINDOW ?? 131072));
 console.log(
-  `breakdown (est. ${b.estimatedTokens} tok, ${Math.round(b.usedShare * 100)}% of window):`,
+  `known message text (est. ${b.estimatedTokens} tok, ${Math.round(b.usedShare * 100)}% of window):`,
+);
+console.log(
+  "Tool definitions unavailable for the current projection. Images, opaque blocks and provider framing are not estimated.",
 );
 for (const p of b.parts) {
   console.log(

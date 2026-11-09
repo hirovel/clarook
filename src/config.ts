@@ -22,7 +22,7 @@ import type { EffortLevel, Provider } from "./provider.js";
 import { anthropic, type ThinkingMode } from "./providers/anthropic.js";
 import { type OpenAIDialect, openaiCompat } from "./providers/openai-chat.js";
 import { openaiResponses } from "./providers/openai-responses.js";
-import { defaultPreset } from "./settings.js";
+import { defaultPreset, positiveIntegerSetting } from "./settings.js";
 import type { StatusStyle } from "./status-bar.js";
 import type { SubagentApproval, SubagentType } from "./subagent.js";
 import type { DescriptionLevel } from "./tools.js";
@@ -180,6 +180,8 @@ export type Preset = {
   appendSystemPromptFile?: string;
   subagent?: boolean;
   maxSteps?: number | null;
+  /** null 表示继承父步数上限;类型仍可单独指定上限。 */
+  subagents?: { maxSteps?: number | null; depth?: number };
   prompt?: PromptConfig;
   /** 工具描述风格。 */
   toolPrompts?: ToolPromptStyle;
@@ -224,10 +226,6 @@ export type KernelConfig = {
 export type SubagentsConfig = {
   /** 子的工具调用怎么过审:inherit(缺省)沿用父的;allow 不问;{ deny: [...] } 在父的基础上再收紧。 */
   approval?: SubagentApproval;
-  /** 子的步数上限;不给就不设上限,靠续聊与人的打断。 */
-  maxSteps?: number;
-  /** 嵌套深度,缺省 1:子没有 task 工具。 */
-  depth?: number;
   /** 缺省类型,缺省 default。 */
   defaultType?: string;
   /** 类型注册表:名 → 说明、系统提示词、工具子集、模型、缺省范围、步数上限;叠在内置 default 之上。 */
@@ -250,7 +248,6 @@ export const CONFIG_TEMPLATE: KernelConfig = {
   defaults: defaultPreset(),
   subagents: {
     approval: "inherit",
-    depth: 1,
     defaultType: "default",
     types: {},
   },
@@ -475,11 +472,21 @@ function validate(raw: unknown, path: string): KernelConfig {
   if (!c || typeof c !== "object" || typeof c.default !== "string" || !c.providers) {
     throw new Error(`config is missing default or providers: ${path}`);
   }
+  if (c.subagents && ("maxSteps" in c.subagents || "depth" in c.subagents))
+    throw new Error(
+      "subagents.maxSteps and subagents.depth moved to defaults.subagents; remove the old top-level fields.",
+    );
   for (const values of [c.defaults, ...Object.values(c.presets ?? {})]) {
     if (values && "trace" in values)
       throw new Error(
         "Remove obsolete trace from defaults/presets; session recording is now always enabled",
       );
+    if (values?.maxSteps !== undefined && values.maxSteps !== null)
+      positiveIntegerSetting("maxSteps", values.maxSteps);
+    if (values?.subagents?.maxSteps !== undefined && values.subagents.maxSteps !== null)
+      positiveIntegerSetting("subagents.maxSteps", values.subagents.maxSteps);
+    if (values?.subagents?.depth !== undefined)
+      positiveIntegerSetting("subagents.depth", values.subagents.depth);
   }
   for (const [name, p] of Object.entries(c.providers)) {
     if (

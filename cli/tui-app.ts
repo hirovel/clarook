@@ -9,7 +9,6 @@
 //   tui-slots     策略槽切换与审批提示
 // 本文件只做:建组件树、建 Agent、建 ctx、接检视器与按键、回放历史、返回 TuiApp 接口。
 import {
-  CombinedAutocompleteProvider,
   type Component,
   Container,
   Editor,
@@ -38,6 +37,7 @@ import type { EffortLevel, Provider, ToolDef } from "../src/provider.js";
 import { mergeSetup } from "../src/setup.js";
 import type { ChildInfo } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
+import { createAutocompleteProvider } from "./autocomplete.js";
 import { DEFAULT_RESULT_VIEWS, firstRunLines, thinkingLines } from "./cards.js";
 import { type ClipboardInput, imageFromPath, readClipboardInput } from "./clipboard-input.js";
 import { RequestInspector, type SessionSource } from "./inspector.js";
@@ -186,6 +186,7 @@ export type TuiApp = {
   draft(): string;
   setDraft(text: string): void;
   setup(): SessionSetup;
+  modelLocator(): string;
   choose(title: string, rows: { label: string; note?: string }[]): Promise<string | undefined>;
   reviewSetup(setup: SessionSetup, missing: string[]): Promise<SessionSetup | undefined>;
   showText(title: string, text: string): Promise<void>;
@@ -274,7 +275,7 @@ export function createTuiApp(
   const editor = new Editor(tui, editorTheme, { paddingX: 1 });
   const templates = deps.templates ?? [];
   editor.setAutocompleteProvider(
-    new CombinedAutocompleteProvider(
+    createAutocompleteProvider(
       [
         ...COMMANDS,
         ...templates
@@ -708,7 +709,6 @@ export function createTuiApp(
       if (!text && !ctx.draftImages.length) return;
       editor.addToHistory(text);
       if (text.startsWith("/")) {
-        if (!/^\/shell(?:\s|$)/.test(text)) editor.setText("");
         void command(ctx, text);
       } else void submit(ctx, text);
     };
@@ -941,8 +941,7 @@ export function createTuiApp(
         if (!text && !ctx.draftImages.length) return { consume: true };
         editor.addToHistory(text);
         if (text.startsWith("/")) {
-          if (!/^\/shell(?:\s|$)/.test(text)) editor.setText("");
-          void command(ctx, text);
+          void command(ctx, text, { deliverAs: "followUp" });
         } else void submit(ctx, text, { deliverAs: "followUp" });
         return { consume: true };
       }
@@ -1025,6 +1024,7 @@ export function createTuiApp(
         } else ctx.dialog.close();
       },
       setup: () => captureSessionSetup(ctx),
+      modelLocator: () => `${ctx.model.info.providerName}/${ctx.model.info.model}`,
       choose: (heading, rows) =>
         sessionDialog<string>(
           (done) =>

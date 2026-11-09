@@ -7,16 +7,17 @@ export const ATTACH_MAX_BYTES = 50 * 1024;
 
 export type Attachment = { ref: string; path: string; bytes: number; skipped?: string };
 
-/** 找出文本里的 @引用并读取;返回展开后的文本与每个引用的处理结果。 */
+/** 只读取 source 中的 @引用,把附件加到 message 后;生成正文不参与引用解释。 */
 export function expandFileRefs(
-  text: string,
+  source: string,
   cwd = process.cwd(),
+  message = source,
 ): { text: string; attachments: Attachment[] } {
   const attachments: Attachment[] = [];
   const blocks: string[] = [];
   // 引号明确界定含空格的路径,不从后续自然语言猜测文件名。
   const re = /(^|\s)@(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s@"'`<>]+))/g;
-  for (const m of text.matchAll(re)) {
+  for (const m of source.matchAll(re)) {
     const ref = (m[2] ?? m[3] ?? m[4]) as string;
     const path = resolve(cwd, ref);
     if (attachments.some((a) => a.path === path && !a.skipped)) continue;
@@ -77,7 +78,7 @@ export function expandFileRefs(
     }
   }
   return {
-    text: blocks.length > 0 ? `${text}\n\n${blocks.join("\n\n")}` : text,
+    text: blocks.length > 0 ? `${message}\n\n${blocks.join("\n\n")}` : message,
     attachments,
   };
 }

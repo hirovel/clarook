@@ -70,11 +70,11 @@ export function discoverTemplates(
   return [...byName.values()];
 }
 
-/** 参数切分:空格分隔,双引号或单引号包起来的算一个。 */
+/** 参数切分:引号中的空格属于同一参数;@文件引用也保留完整路径。 */
 export function splitArgs(s: string): string[] {
   const out: string[] = [];
-  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
-  for (const m of s.matchAll(re)) out.push(m[1] ?? m[2] ?? m[3] ?? "");
+  const re = /(@?)(?:"([^"]*)"|'([^']*)')|(\S+)/g;
+  for (const m of s.matchAll(re)) out.push(m[4] ?? `${m[1] ?? ""}${m[2] ?? m[3] ?? ""}`);
   return out;
 }
 

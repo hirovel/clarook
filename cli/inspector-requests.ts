@@ -1,7 +1,7 @@
 // 请求视图:一行一请求 → 七分区(概要 / 决策 / 发送 / 工具定义 / 线路 JSON / 接收 / 写入),
 // 以及事件视图的行与详情。消息按请求边界重建;HTTP 正文优先读取实录,否则明确标记为当前适配器重建。
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { estimateTokens } from "../src/context.js";
+import { toolDefinitionTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
 import {
   compactionState,
@@ -96,6 +96,7 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
       case "session/recovered":
       case "session/model":
       case "session/slot":
+      case "tools/snapshot":
       case "context/edit":
       case "context/drop":
         pending.push(e);
@@ -243,7 +244,7 @@ export function summaryLines(rec: RequestRecord, messages: Message[]): string[] 
     ),
     row(
       "estimate",
-      "Last usage plus new messages when available; otherwise messages only. Current tool definitions and provider framing are excluded until the provider reports input usage.",
+      "Recorded local estimate: valid prior usage plus a text tail, or known message text and tool definitions (chars/4). Older recordings may omit tools. Images, opaque blocks and provider framing have no local estimate.",
     ),
   ];
   if (rec.compaction?.strategy) lines.push(row("strategy", rec.compaction.strategy));
@@ -356,6 +357,9 @@ export function decisionLines(rec: RequestRecord): string[] {
       case "session/slot":
         lines.push(`${c.soft("·")} slot ${e.slot} → ${e.value}`);
         break;
+      case "tools/snapshot":
+        lines.push(`${c.soft("·")} tool definitions captured: ${e.tools.length} tools`);
+        break;
       case "context/edit":
         lines.push(
           `${c.zhu("·")} the user edited event #${e.target}.${e.field} (${e.value.length} chars${e.note ? `; ${e.note}` : ""})`,
@@ -378,7 +382,9 @@ export function decisionLines(rec: RequestRecord): string[] {
   if (rec.error) lines.push(`${c.zhu("✗")} failed: ${rec.error.status ?? ""} ${rec.error.error}`);
   if (rec.response?.stopReason === "length")
     lines.push(
-      `${c.soft("·")} output truncated: tool calls in this step are not executed; the model is asked to resend`,
+      rec.response.toolCalls.length > 0
+        ? `${c.soft("·")} output truncated: tool calls in this step are not executed; each receives an error result`
+        : `${c.soft("·")} response incomplete: output or context limit reached; no automatic continuation`,
     );
   if (rec.response?.stopReason === "aborted")
     lines.push(`${c.zhu("·")} response interrupted: the partial text is in the log`);
@@ -491,44 +497,71 @@ export function messageBodyLines(
 }
 
 export function toolLines(
-  defs: ToolDef[],
-  names = defs.map((d) => d.name),
+  defs: readonly ToolDef[] | undefined,
+  names = defs?.map((d) => d.name) ?? [],
   recording?: RequestRecording,
 ): string[] {
-  if (recording?.bodies.length)
-    return recording.bodies.flatMap((body, i) => {
-      try {
-        const payload = JSON.parse(body) as { tools?: unknown };
-        return [
-          c.bold(c.ink(`Captured tools · HTTP attempt ${i + 1}`)),
-          ...visibleSourceText(JSON.stringify(payload.tools ?? null, null, 2))
-            .split("\n")
-            .map((l) => c.ink(l)),
-          c.faint("Provider format; complete body in 5 wire JSON."),
-          "",
-        ];
-      } catch {
-        return [c.zhu("Captured body is not readable JSON; see 5 wire JSON.")];
-      }
-    });
-  if (names.length === 0) return [c.faint("No tool names recorded for this request.")];
-  const missing = names.filter((name) => !defs.some((d) => d.name === name));
+  const evidence = recording?.error ? [c.zhu(recording.error)] : [];
+  if (recording?.bodies.length) {
+    let readable = false;
+    evidence.push(
+      ...recording.bodies.flatMap((body, i) => {
+        try {
+          const payload = JSON.parse(body) as { tools?: unknown };
+          const tools = JSON.stringify(payload.tools ?? null, null, 2);
+          readable = true;
+          return [
+            c.bold(c.ink(`Captured tools · HTTP attempt ${i + 1}`)),
+            ...visibleSourceText(tools)
+              .split("\n")
+              .map((l) => c.ink(l)),
+            c.faint("Provider format; complete body in 5 wire JSON."),
+            "",
+          ];
+        } catch {
+          return [
+            c.zhu(
+              `HTTP attempt ${i + 1}: captured tool definitions are unreadable; see 5 wire JSON.`,
+            ),
+          ];
+        }
+      }),
+    );
+    if (readable) return evidence;
+  }
+  if (defs === undefined)
+    return [
+      ...evidence,
+      c.jin("Historical tool definitions are unavailable for this request."),
+      ...(names.length
+        ? [c.soft(`Recorded tool names: ${visibleSourceText(names.join(", "))}`)]
+        : [c.faint("No tool names recorded; the historical definitions are unknown.")]),
+    ];
+  if (defs.length === 0)
+    return [
+      ...evidence,
+      c.soft(
+        recording?.input
+          ? "The saved adapter input declares an empty tool list."
+          : "The recorded request explicitly declares an empty tool list.",
+      ),
+      c.faint("No tools were sent in this request."),
+    ];
+  const origin = recording?.input
+    ? c.soft("Definitions saved with this request's adapter input.")
+    : c.soft("Historical definitions from the tool snapshot before this request.");
   const lines: string[] = [
+    ...evidence,
     c.soft(`Recorded tool names: ${visibleSourceText(names.join(", "))}`),
-    recording?.input
-      ? c.soft("Definitions saved with this request's adapter input.")
-      : c.jin("Historical definitions were not captured. Current definitions below may differ."),
-    ...(missing.length
-      ? [c.zhu(`Unavailable definitions: ${visibleSourceText(missing.join(", "))}`)]
-      : []),
+    origin,
     c.faint(
-      `${defs.length} current tool definitions, estimated ${defs.reduce((n, d) => n + estimateTokens(JSON.stringify(d)), 0)} tok.`,
+      `${defs.length} historical tool definitions, estimated ${toolDefinitionTokens(defs)} tok. Provider framing is not estimated.`,
     ),
     "",
   ];
   for (const d of defs) {
     lines.push(
-      `${c.ink(visibleSourceText(d.name))}  ${c.soft(`${estimateTokens(JSON.stringify(d))} tok`)}`,
+      `${c.ink(visibleSourceText(d.name))}  ${c.soft(`≈${toolDefinitionTokens([d])} tok`)}`,
     );
     lines.push(
       ...indent(visibleSourceText(d.description || "(no description)")).map((l) => c.ink(l)),
@@ -544,7 +577,7 @@ export function toolLines(
 export function wireLines(
   provider: Provider | undefined,
   messages: Message[],
-  defs: ToolDef[],
+  defs: readonly ToolDef[] | undefined,
   effort?: string,
   recording?: RequestRecording,
   missing: string[] = [],
@@ -553,28 +586,37 @@ export function wireLines(
   const warnings = recording?.error ? [c.zhu(recording.error)] : [];
   if (recording?.bodies.length)
     return [
-      c.soft("Captured before HTTP dispatch; delivery is not proven. No auth headers captured."),
       ...warnings,
       ...recording.bodies.flatMap((body, i) => {
-        let json = body;
         try {
-          json = JSON.stringify(JSON.parse(body), null, 2);
+          const json = JSON.stringify(JSON.parse(body), null, 2);
+          return [
+            "",
+            c.soft(
+              "Captured before HTTP dispatch; delivery is not proven. No auth headers captured.",
+            ),
+            c.bold(c.ink(`HTTP attempt ${i + 1} · ${body.length} chars · formatted for viewing`)),
+            ...visibleSourceText(json)
+              .split("\n")
+              .map((l) => c.ink(l)),
+          ];
         } catch {
-          /* 原文仍可查看。 */
+          return [
+            "",
+            c.zhu("HTTP request capture is unavailable or unreadable."),
+            ...visibleSourceText(body)
+              .split("\n")
+              .map((l) => c.ink(l)),
+          ];
         }
-        return [
-          "",
-          c.bold(c.ink(`HTTP attempt ${i + 1} · ${body.length} chars · formatted for viewing`)),
-          ...visibleSourceText(json)
-            .split("\n")
-            .map((l) => c.ink(l)),
-        ];
       }),
     ];
-  if (missing.length)
+  if (defs === undefined || missing.length)
     return [
       ...warnings,
-      c.zhu(`Cannot reconstruct: unavailable tool definitions: ${missing.join(", ")}`),
+      c.zhu(
+        `Cannot reconstruct: historical tool definitions are unavailable${missing.length ? `: ${visibleSourceText(missing.join(", "))}` : "."}`,
+      ),
       c.faint("3 sent still shows messages reconstructed from the log."),
     ];
   if (!provider?.wire) {
@@ -586,7 +628,7 @@ export function wireLines(
     ];
   }
   const level = effort ? parseEffort(effort) : undefined;
-  const body = provider.wire(messages, defs, {
+  const body = provider.wire(messages, [...defs], {
     ...(level && { effort: level }),
     ...(maxTokens !== undefined && { maxTokens }),
   });
@@ -595,7 +637,7 @@ export function wireLines(
     ...warnings,
     c.faint(`Reconstructed preview · ${json.length} chars · not a captured HTTP body.`),
     c.jin(
-      "Uses available provider settings and current tool definitions; historical values may differ.",
+      "Uses historical tool definitions and available provider settings; historical provider settings may differ.",
     ),
     "",
     ...visibleSourceText(json)

@@ -3,7 +3,7 @@ import { now } from "./events.js";
 import type { ImageInput } from "./images.js";
 import type { EventLog } from "./log.js";
 import { runTurn, type TurnDeps, type TurnOutcome } from "./loop.js";
-import { editState } from "./messages.js";
+import { composeContext } from "./messages.js";
 import type { EffortLevel, Provider } from "./provider.js";
 import { RECORDING_FULL } from "./recording.js";
 import type { Tool } from "./tools.js";
@@ -252,15 +252,15 @@ export class Agent {
     if (this.active) throw new Error("cannot retry while running; interrupt first");
     this.ensureStorage();
     const events = this.opts.log.events;
-    const dropped = editState(events).dropped;
+    const context = composeContext(events);
     let target = -1;
-    for (let i = events.length - 1; i >= 0; i--) {
-      if (events[i]?.type === "assistant/message" && !dropped.has(i)) {
-        target = i;
+    for (let i = context.messages.length - 1; i >= 0; i--) {
+      if (context.messages[i]?.role === "assistant") {
+        target = context.provenance[i]?.event ?? -1;
         break;
       }
     }
-    if (target < 0) throw new Error("no assistant message to retry");
+    if (target < 0) throw new Error("no assistant message to retry in current context");
     this.opts.log.append({ type: "context/drop", at: now(), target, note: "retry" });
     return this.run();
   }

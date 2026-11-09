@@ -15,8 +15,10 @@ import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
+import { anthropic } from "../src/providers/anthropic.js";
 import { openaiCompat } from "../src/providers/openai-chat.js";
 import { defineTool } from "../src/tools.js";
+import { testImage } from "./helpers/image.js";
 import { testDirectory } from "./helpers/setup.js";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -175,7 +177,7 @@ describe("留言投递方式:steer 步边界,followUp 等到 turn 边界", () =>
 });
 
 describe("上下文口径:实测优先", () => {
-  it("实测加新增估算;压缩、编辑或排除后重算,新实测到来再接替", () => {
+  it("实测不重复加工具;已知输入条件变化后重算,新实测到来再接替", () => {
     const events: AgentEvent[] = [
       { type: "session/start", at: "", model: "m", system: "x".repeat(400) },
       { type: "user/message", at: "", text: "hi" },
@@ -197,25 +199,51 @@ describe("上下文口径:实测优先", () => {
       },
     ];
     expect(contextTokens(events)).toBe(5000 + 20 + 100);
+    expect(
+      contextTokens(events, [{ name: "r", description: "x".repeat(40000), parameters: {} }]),
+    ).toBe(5120);
     expect(contextSize(events).basis).toBe("usage");
     expect(contextTokens(events.slice(0, 2))).toBe(estimateAfter(events.slice(0, 2)));
-    expect(contextSize(events.slice(0, 2)).basis).toBe("messages");
+    expect(contextSize(events.slice(0, 2)).basis).toBe("estimate");
     expect(
       contextSize([
         ...events.slice(0, 2),
         {
           type: "assistant/message",
           at: "",
-          text: "no usage",
+          text: "unmeasured input",
           toolCalls: [],
           stopReason: "end",
-          usage: { inputTokens: 0, outputTokens: 0 },
+          usage: { inputTokens: 0, outputTokens: 9 },
         },
       ]).basis,
-    ).toBe("messages");
+    ).toBe("estimate");
+    const partial: AgentEvent = {
+      type: "assistant/message",
+      at: "",
+      text: "p".repeat(40000),
+      toolCalls: [],
+      stopReason: "aborted",
+      usage: { inputTokens: 1000, outputTokens: 1 },
+    };
+    expect(contextSize([...events, partial])).toEqual({ tokens: 15120, basis: "usage" });
+    expect(contextSize([...events.slice(0, 2), partial])).toEqual({
+      tokens: 10101,
+      basis: "estimate",
+    });
+    expect(contextSize([...events, { ...partial, stopReason: "length" }])).toEqual({
+      tokens: 1001,
+      basis: "usage",
+    });
     const after: AgentEvent[] = [...events, { type: "compaction", at: "", cleared: [3] }];
     expect(contextTokens(after)).toBe(estimateAfter(after));
-    expect(contextSize(after).basis).toBe("messages");
+    expect(contextSize(after).basis).toBe("estimate");
+    expect(
+      contextSize([
+        ...events,
+        { type: "session/slot", at: "", slot: "compactionTrigger", value: "manual" },
+      ]),
+    ).toEqual({ tokens: 5120, basis: "usage" });
     const changes: { event: AgentEvent; expected: number }[] = [
       {
         event: {
@@ -232,10 +260,28 @@ describe("上下文口径:实测优先", () => {
         expected: 209,
       },
       { event: { type: "context/drop", at: "", target: 2 }, expected: 101 },
+      { event: { type: "session/model", at: "", model: "different" }, expected: 210 },
+      { event: { type: "session/slot", at: "", slot: "tools", value: "off: r" }, expected: 210 },
+      {
+        event: { type: "session/slot", at: "", slot: "toolPrompts", value: "reset r" },
+        expected: 210,
+      },
+      {
+        event: {
+          type: "ext/event",
+          at: "",
+          source: "mcp",
+          kind: "tools",
+          payload: { server: "fixture", added: ["new"], removed: [], total: 1 },
+        },
+        expected: 210,
+      },
+      { event: { type: "user/message", at: "", text: "next", images: [testImage] }, expected: 211 },
     ];
     for (const { event, expected } of changes) {
       const revised = [...events, event];
       expect(contextTokens(revised)).toBe(expected);
+      expect(contextSize(revised).basis).toBe("estimate");
       const fresh: AgentEvent[] = [
         ...revised,
         {
@@ -249,6 +295,87 @@ describe("上下文口径:实测优先", () => {
         { type: "user/message", at: "", text: "more" },
       ];
       expect(contextTokens(fresh)).toBe(8005);
+    }
+  });
+
+  it("真实 Anthropic 流取消后保留初始 usage,半截正文仍能触发下次自动压缩", async () => {
+    const log = new EventLog();
+    log.append({ type: "session/start", at: "", model: "m", system: "S" });
+    log.append({ type: "user/message", at: "", text: "go" });
+    const partial = "p".repeat(40000);
+    let requests = 0;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const first = requests++ === 0;
+      const events = [
+        {
+          type: "message_start",
+          message: { usage: { input_tokens: first ? 1000 : 10004, output_tokens: 1 } },
+        },
+        { type: "content_block_start", index: 0, content_block: { type: "text" } },
+        {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: first ? partial : "done" },
+        },
+        ...(!first
+          ? [
+              { type: "message_delta", delta: { stop_reason: "end_turn" } },
+              { type: "message_stop" },
+            ]
+          : []),
+      ];
+      const sse = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
+      if (!first) return new Response(sse);
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(sse));
+            init?.signal?.addEventListener("abort", () => {
+              controller.error(new DOMException("The request was aborted.", "AbortError"));
+            });
+          },
+        }),
+      );
+    });
+    try {
+      const provider = anthropic({ apiKey: "bad", model: "m" });
+      const cancel = new AbortController();
+      expect(
+        await runTurn({
+          log,
+          provider,
+          tools: [],
+          signal: cancel.signal,
+          onDelta: () => cancel.abort(),
+        }),
+      ).toBe("aborted");
+      expect(log.events.find((event) => event.type === "assistant/message")).toMatchObject({
+        text: partial,
+        stopReason: "aborted",
+        usage: { inputTokens: 1000, outputTokens: 1 },
+      });
+      log.append({ type: "user/message", at: "", text: "continue" });
+      let compactions = 0;
+      await runTurn({
+        log,
+        provider,
+        tools: [],
+        compaction: {
+          window: 5000,
+          reserveTokens: 1000,
+          strategy: async () => {
+            compactions++;
+            return null;
+          },
+        },
+      });
+      expect(compactions).toBe(1);
+      expect(log.events.filter((event) => event.type === "request").at(-1)).toMatchObject({
+        estimatedTokens: 10004,
+        threshold: 4000,
+      });
+    } finally {
+      fetch.mockRestore();
     }
   });
 });

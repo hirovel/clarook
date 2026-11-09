@@ -15,6 +15,7 @@ import { toAnthropicWire } from "../src/providers/anthropic.js";
 import { isRetryable, ProviderError } from "../src/providers/errors.js";
 import { feedChunk, finishAcc, newAcc } from "../src/providers/openai-chat.js";
 import { StreamStall, sseData, sseEvents, streamError } from "../src/providers/sse.js";
+import { ToolOutcomeUnknownError } from "../src/tools.js";
 
 const enc = new TextEncoder();
 async function* chunks(parts: string[], delayMs = 0): AsyncGenerator<Uint8Array> {
@@ -165,11 +166,16 @@ describe("Anthropic 线路", () => {
 });
 
 describe("bash 工具的边界", () => {
-  it("超时 → 杀进程树,错误里带已产出的输出", async () => {
+  it("超时 → 请求停止并报告 unknown,错误里带已产出的输出", async () => {
     const tool = createBashTool({ defaultTimeoutS: 1 });
-    await expect(
-      tool.execute({ command: "echo before; sleep 5; echo after" }, ctx),
-    ).rejects.toThrow(/did not finish within 1 s[\s\S]*before/);
+    const failure = await tool.execute({ command: "echo before; sleep 5; echo after" }, ctx).then(
+      () => undefined,
+      (error: Error) => error,
+    );
+    expect(failure).toBeInstanceOf(ToolOutcomeUnknownError);
+    expect(failure?.message).toMatch(/did not finish within 1 s[\s\S]*before/);
+    expect(failure?.message).not.toContain("killed");
+    expect(failure?.message).not.toContain("after");
   }, 15000);
 
   it("超过旧 10 MiB 上限仍跑完;模型只见尾部,Recording 保留完整原文", async () => {

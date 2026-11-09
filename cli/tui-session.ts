@@ -230,6 +230,7 @@ export async function startTuiSession(options: {
       current: () =>
         binding.view && {
           provider: binding.view.agent.provider,
+          modelLocator: binding.view.modelLocator(),
           tools: binding.view.agent.tools,
         },
       ...(setup?.descriptions && { descriptions: setup.descriptions }),

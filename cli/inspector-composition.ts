@@ -4,6 +4,7 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentEvent } from "../src/events.js";
 import {
   type Composition,
+  compactionState,
   composeContext,
   contextFields,
   editState,
@@ -116,6 +117,38 @@ export type ContextAction =
 
 export type ActionItem = { action: ContextAction; label: string; hint: string };
 
+/** 以当前投影判断修改能否生效;历史查看不受限制。 */
+export function contextEditRestriction(context: Composition, target: number): string | undefined {
+  const omitted = context.omitted.find((item) => item.event === target);
+  if (omitted?.reason === "covered")
+    return `event #${target} is in compacted history; changing its original does not change the summary`;
+  if (omitted?.reason === "dropped")
+    return `event #${target} is excluded from current input; its original stays in history`;
+  if (context.provenance.some((item) => item.event === target && item.stages.includes("cleared")))
+    return `event #${target} was cleared from current input; changing its original does not replace the placeholder`;
+  return undefined;
+}
+
+export function rewindRestriction(
+  events: readonly AgentEvent[],
+  target: number,
+): string | undefined {
+  const compacted = compactionState(events);
+  if (compacted.summary && target < compacted.coversUpTo - 1)
+    return `cannot rewind to event #${target}: compacted history includes later messages; the summary is kept`;
+  return undefined;
+}
+
+/** 摘要在投影中的位置早于来源事件;按事件回退无法兑现该行的截止位置。 */
+export function contextRewindRestriction(
+  events: readonly AgentEvent[],
+  row: CompositionRow,
+): string | undefined {
+  if (row.stages.some((stage) => stage.startsWith("summary")))
+    return "cannot rewind to a summary row: its source event follows retained messages";
+  return rewindRestriction(events, row.event);
+}
+
 /** 这条消息能做的动作。不能做的不列:没编辑过就没有 compare/restore,最后一条没有 rewind。 */
 export function actionsFor(
   events: readonly AgentEvent[],
@@ -124,8 +157,10 @@ export function actionsFor(
 ): ActionItem[] {
   const src = events[r.event];
   const state = editState(events);
+  const context = composeContext(events);
+  const restricted = contextEditRestriction(context, r.event);
   const edited = state.edits.has(r.event);
-  const fields = contextFields(src);
+  const fields = restricted ? [] : contextFields(src);
   const out: ActionItem[] = [
     {
       action: "view",
@@ -143,7 +178,7 @@ export function actionsFor(
     out.push({
       action: "edit-reasoning",
       label: "Edit thinking",
-      hint: "full thinking is echoed back, so this steers the model",
+      hint: "edit full thinking; the provider controls what is sent",
     });
   if (edited) {
     out.push({
@@ -151,16 +186,18 @@ export function actionsFor(
       label: "Compare with original",
       hint: "line diff, original vs current",
     });
-    out.push({
-      action: "restore",
-      label: "Restore original text",
-      hint: "recorded as another edit; nothing is deleted",
-    });
+    if (!restricted)
+      out.push({
+        action: "restore",
+        label: "Restore original text",
+        hint: "recorded as another edit; nothing is deleted",
+      });
   }
   if (
-    src?.type === "user/message" ||
-    src?.type === "assistant/message" ||
-    (src?.type === "user/shell" && !src.excludeFromContext)
+    !restricted &&
+    (src?.type === "user/message" ||
+      src?.type === "assistant/message" ||
+      (src?.type === "user/shell" && !src.excludeFromContext))
   )
     out.push({
       action: "drop",
@@ -169,6 +206,7 @@ export function actionsFor(
     });
   if (
     r.i < total &&
+    !contextRewindRestriction(events, r) &&
     events.some(
       (e, i) =>
         i > r.event &&
@@ -183,7 +221,7 @@ export function actionsFor(
       label: "Keep input through here",
       hint: `exclude later messages from input; keep event #${r.event}`,
     });
-  if (events.some((e, i) => e.type === "assistant/message" && !state.dropped.has(i)))
+  if (context.messages.some((message) => message.role === "assistant"))
     out.push({
       action: "retry",
       label: "Retry latest reply",

@@ -6,7 +6,10 @@ import { unresolvedCalls } from "./recovery.js";
  * 内部消息模型:自有类型,不绑任何 provider 的 wire 格式。
  * 它只描述"模型将看到什么",翻译成 OpenAI/Anthropic 格式是适配器的事。
  */
-export type Message =
+export type Message = {
+  /** 此消息之前有可见内容被丢弃;不表示正文被编辑。 */
+  prefixChanged?: true;
+} & (
   | { role: "system"; content: string; edited?: true }
   | { role: "user"; content: string; edited?: true; images?: ImageInput[] }
   | {
@@ -27,7 +30,8 @@ export type Message =
       content: string;
       isError: boolean;
       edited?: true;
-    };
+    }
+);
 
 export type EditField = Extract<AgentEvent, { type: "context/edit" }>["field"];
 
@@ -235,9 +239,12 @@ export function composeContext(
       break;
     }
   }
+  let prefixChanged = false;
   const push = (m: Message, event: number, stages: string[]) => {
     if (m.role !== "tool") flushUnknown();
-    messages.push(m);
+    // 仅克隆删除后的第一条保留消息,不能改变历史投影共用的缓存对象。
+    messages.push(prefixChanged ? { ...m, prefixChanged: true } : m);
+    prefixChanged = false;
     provenance.push({ event, stages });
   };
   for (let i = 0; i < upTo; i++) {
@@ -261,7 +268,10 @@ export function composeContext(
       continue;
     }
     if (ed.dropped.has(i)) {
-      if (isProjected(e)) omitted.push({ event: i, reason: "dropped" });
+      if (isProjected(e)) {
+        omitted.push({ event: i, reason: "dropped" });
+        prefixChanged = true;
+      }
       continue;
     }
     const edit = ed.edits.get(i);
@@ -355,6 +365,7 @@ export function composeContext(
       case "ext/event":
       case "session/model":
       case "session/slot":
+      case "tools/snapshot":
       case "compaction":
       case "context/edit":
       case "context/drop":

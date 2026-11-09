@@ -1,10 +1,16 @@
 // 编辑上下文:改的是投影,不是历史。每个动作都是追加一条 context/edit 或 context/drop 事件,
 // 原文永远留在数组里。/edit /drop /compare /restore /rewind /retry /edits /fork,以及上下文面板的动作菜单。
 import { now } from "../src/events.js";
-import { contextFields, type EditField, editState } from "../src/messages.js";
+import { composeContext, contextFields, type EditField, editState } from "../src/messages.js";
 import { errorMessage } from "../src/providers/errors.js";
 import { forkSession, SESSIONS_DIR } from "./bootstrap.js";
-import type { CompositionRow, ContextAction } from "./inspector-composition.js";
+import {
+  type CompositionRow,
+  type ContextAction,
+  contextEditRestriction,
+  contextRewindRestriction,
+  rewindRestriction,
+} from "./inspector-composition.js";
 import { sectionStates, systemWithSections } from "./prompt-sections.js";
 import { c, G } from "./theme.js";
 import type { TuiContext } from "./tui-context.js";
@@ -23,7 +29,7 @@ function editConsequences(ctx: TuiContext, target: number): string[] {
     out.push("this message's opaque block is no longer sent");
   if (ctx.agent.provider.fields?.protocol.startsWith("anthropic")) {
     out.push(
-      "Anthropic thinking signatures bind the prefix: thinking blocks after this point are no longer echoed back",
+      "Anthropic: thinking blocks after this point are no longer echoed back after context edits",
     );
   }
   return out;
@@ -50,6 +56,8 @@ function editContext(ctx: TuiContext, target: number, field?: EditField, value?:
   const event = log.events[target];
   if (!event)
     return c.zhu(`no event #${target} (${log.events.length} events; Ctrl+E shows event numbers)`);
+  const restriction = contextEditRestriction(composeContext(log.events), target);
+  if (restriction) return c.zhu(restriction);
   const fields = contextFields(event, editState(log.events).edits.get(target));
   if (fields.length === 0)
     return c.zhu(`event #${target} is ${event.type}; it never reaches the model, nothing to edit`);
@@ -65,6 +73,8 @@ function editContext(ctx: TuiContext, target: number, field?: EditField, value?:
   const apply = (value: string) => {
     if (ctx.deps.readOnlyReason) throw new Error(ctx.deps.readOnlyReason);
     if (agent.running) throw new Error(BUSY);
+    const restriction = contextEditRestriction(composeContext(log.events), target);
+    if (restriction) throw new Error(restriction);
     log.append({ type: "context/edit", at: now(), target, field: spec.field, value });
     return consequenceLines(ctx, target).join("\n");
   };
@@ -91,6 +101,8 @@ export function dropCommand(ctx: TuiContext, arg: string): string {
   const target = Number(m[1]);
   const e = log.events[target];
   if (!e) return c.zhu(`no event #${target}`);
+  const restriction = contextEditRestriction(composeContext(log.events), target);
+  if (restriction) return c.zhu(restriction);
   if (
     e.type !== "user/message" &&
     e.type !== "assistant/message" &&
@@ -138,6 +150,8 @@ export function restoreCommand(ctx: TuiContext, arg: string): string {
   const { log, agent } = ctx;
   if (agent.running) return c.zhu(BUSY);
   const target = Number(arg);
+  const restriction = contextEditRestriction(composeContext(log.events), target);
+  if (restriction) return c.zhu(restriction);
   const cur = editState(log.events).edits.get(target) ?? {};
   const specs = contextFields(log.events[target], cur);
   if (!Number.isInteger(target) || specs.length === 0) return c.faint("Usage: /edit restore N");
@@ -168,6 +182,8 @@ export function rewindCommand(ctx: TuiContext, arg: string): string {
   const target = Number(arg);
   if (!Number.isInteger(target) || !log.events[target])
     return c.faint("Usage: /edit rewind N  (drops every message after event N)");
+  const restriction = rewindRestriction(log.events, target);
+  if (restriction) return c.zhu(restriction);
   const dropped = editState(log.events).dropped;
   const victims = log.events
     .map((e, i) => ({ e, i }))
@@ -323,9 +339,11 @@ export async function contextAction(
     case "drop":
       ctx.note(dropCommand(ctx, String(target)));
       break;
-    case "rewind":
-      ctx.note(rewindCommand(ctx, String(target)));
+    case "rewind": {
+      const restriction = contextRewindRestriction(ctx.log.events, row);
+      ctx.note(restriction ? c.zhu(restriction) : rewindCommand(ctx, String(target)));
       break;
+    }
     case "retry":
       await retryStep(ctx);
       break;

@@ -1,6 +1,8 @@
 // 现代终端能力:备用屏布局真的画到了 xterm 的备用缓冲区;焦点事件与通知;/copy 的 OSC 52;
 // 路径的 OSC 8 链接;流式合帧;提示标记在整行最前。
-import { describe, expect, it } from "vitest";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
 import { fileUrl, osc8, PROMPT_MARK } from "../cli/terminal-extras.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import { Block } from "../cli/tui-block.js";
@@ -8,6 +10,7 @@ import { codeBlocks } from "../cli/tui-commands.js";
 import { formatArgs } from "../cli/tui-format.js";
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
+import { testDirectory } from "./helpers/setup.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
 const tick = () => new Promise((r) => setTimeout(r, 5));
@@ -246,5 +249,40 @@ describe("合帧", () => {
     const doc = app.lines(100).map(stripAnsi).join("\n");
     expect(doc).toMatch(/^ {3}abcd\b/m);
     app.stop();
+  });
+});
+
+describe("文件补全", () => {
+  it("真实输入补全两个 @ 文件和带空格路径,选择只更新草稿", async () => {
+    const root = testDirectory("tui-completion-");
+    writeFileSync(join(root, "alpha.txt"), "FILE_BODY");
+    writeFileSync(join(root, "report notes.txt"), "SECOND_BODY");
+    const cwd = process.cwd();
+    process.chdir(root);
+    vi.stubEnv("CLAROOK_CREDENTIALS", join(root, "missing-credentials.json"));
+    const term = new VirtualTerminal(100, 24);
+    const { app, log } = boot(term);
+    try {
+      for (const char of "@alpha") term.feed(char);
+      await vi.waitFor(async () => {
+        app.tui.renderNow(true);
+        expect((await term.screen()).join("\n")).toContain("alpha.txt");
+      });
+      term.feed("\t");
+      expect(app.draft()).toBe("@alpha.txt ");
+      for (const char of '@"report n') term.feed(char);
+      await vi.waitFor(async () => {
+        app.tui.renderNow(true);
+        expect((await term.screen()).join("\n")).toContain("report notes.txt");
+      });
+      term.feed("\t");
+      expect(app.draft()).toBe('@alpha.txt @"report notes.txt" ');
+      expect(log.events.some((event) => event.type === "user/message")).toBe(false);
+      expect(app.lines(100).map(stripAnsi).join("\n")).not.toContain("FILE_BODY");
+    } finally {
+      app.stop();
+      process.chdir(cwd);
+      vi.unstubAllEnvs();
+    }
   });
 });

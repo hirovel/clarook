@@ -177,6 +177,8 @@ describe("setup data and persistence", () => {
         prompt: { sections: [] },
 
         subagent: true,
+        maxSteps: 4,
+        subagents: { maxSteps: 2, depth: 2 },
         approve: "all",
         extensions: [extension],
       },
@@ -193,6 +195,7 @@ describe("setup data and persistence", () => {
     const seen: { model: string; tools: string[] }[] = [];
     let duringRequest = async () => {};
     const choose = (name = "p/old") => {
+      if (!name.startsWith("p/")) throw new Error(`Expected qualified model: ${name}`);
       const model = name.replace("p/", "");
       const provider: Provider = {
         model,
@@ -204,6 +207,12 @@ describe("setup data and persistence", () => {
           options?.onRaw?.('data: {"fixture":true}');
           seen.push({ model, tools: tools.map((t) => t.name) });
           const last = messages.at(-1);
+          if (messages.some((m) => m.role === "user" && m.content === "bounded-probe"))
+            return {
+              text: "working",
+              stopReason: "tool",
+              toolCalls: [{ id: "read", name: "read", args: {} }],
+            };
           if (last?.role === "user" && last.content === "trace-root")
             return { text: "done", toolCalls: [], stopReason: "end" };
           if (last?.role !== "user") return { text: "done", toolCalls: [], stopReason: "end" };
@@ -281,14 +290,34 @@ describe("setup data and persistence", () => {
         expect(request.tools).toContain("read");
         expect(request.tools).toContain("skill");
         expect(request.tools).toContain("mcp__fixture__echo");
+        expect(request.tools).toContain("task");
         expect(request.tools).not.toContain("write");
       }
       duringRequest = async () => {};
-      await task.execute({ task: "resume", resume: "sub-1" }, ctx);
-      expect(seen[2]?.model).toBe("old");
-      expect(seen[2]?.tools).not.toContain("read");
-      expect(seen[2]?.tools).not.toContain("skill");
       const childFile = running.file().replace(/\.jsonl$/, "-sub-1.jsonl");
+      const beforeUnavailable = readFileSync(childFile, "utf8");
+      await expect(task.execute({ task: "blocked resume", resume: "sub-1" }, ctx)).rejects.toThrow(
+        "requires unavailable tools",
+      );
+      expect(seen).toHaveLength(2);
+      expect(readFileSync(childFile, "utf8").startsWith(beforeUnavailable)).toBe(true);
+      const afterUnavailable = EventLog.load(childFile).events;
+      expect(
+        afterUnavailable
+          .filter((event) => event.type === "user/message")
+          .map((event) => event.text),
+      ).toEqual(["first"]);
+      expect(afterUnavailable.filter((event) => event.type === "assistant/message")).toHaveLength(
+        2,
+      );
+      await running.app().command("/tools on read");
+      await running.app().command("/tools on write");
+      await running.app().command("/settings prompt.skills.mode auto");
+      await task.execute({ task: "resume", resume: "sub-1" }, ctx);
+      expect(seen[2]?.model).toBe("new");
+      expect(seen[2]?.tools).toContain("read");
+      expect(seen[2]?.tools).toContain("skill");
+      expect(seen[2]?.tools).not.toContain("write");
       const child = EventLog.load(childFile);
       const results = child.events.filter((e) => e.type === "tool/result");
       expect(results.find((e) => e.callId === "skill")?.content).toContain(
@@ -307,7 +336,7 @@ describe("setup data and persistence", () => {
         process.cwd().replace(/\\/g, "/").toLowerCase(),
         process.cwd().replace(/\\/g, "/").toLowerCase(),
       ]);
-      expect(child.events.some((e) => e.type === "session/model" && e.model === "old")).toBe(true);
+      expect(child.events.some((e) => e.type === "session/model" && e.model === "old")).toBe(false);
       expect(child.events.some((e) => e.type === "ext/event" && e.source === "fixture")).toBe(true);
       expect(
         child.events.some(
@@ -344,6 +373,9 @@ describe("setup data and persistence", () => {
         "Captured before HTTP dispatch",
       );
       running.app().inspector.close();
+      const beforeBounded = seen.length;
+      expect(await task.execute({ task: "bounded-probe" }, ctx)).toContain("step limit 2 reached");
+      expect(seen).toHaveLength(beforeBounded + 2);
       const history = createTuiApp({
         terminal: new VirtualTerminal(60, 30),
         log: parentLog,
@@ -1034,7 +1066,13 @@ describe("setup data and persistence", () => {
     const config: KernelConfig = {
       default: "p/m",
       providers: {},
-      defaults: { prompt: { sections: [] }, facts: { slow: false }, planReminder: 4, model: "p/m" },
+      defaults: {
+        prompt: { sections: [] },
+        facts: { slow: false },
+        planReminder: 4,
+        model: "p/m",
+        subagents: { maxSteps: 8, depth: 2 },
+      },
     };
     const args = applyPreset(parseCommonArgs(["--screen", "main"]), config);
     const snapshot = settingsFromArgs(args);
@@ -1043,6 +1081,7 @@ describe("setup data and persistence", () => {
     expect(snapshot.facts?.slow).toBe(false);
     expect(snapshot.planReminder).toBe(4);
     expect(snapshot.model).toBe("p/m");
+    expect(snapshot.subagents).toEqual({ maxSteps: 8, depth: 2 });
     for (const def of SETTINGS)
       expect(
         getSetting(snapshot, def.key) === undefined ||
@@ -1110,12 +1149,16 @@ describe("setup data and persistence", () => {
     snapshot.preservation = "auto";
     boot.settings.savePreset?.("automatic", snapshot);
     boot.settings.saveSetting?.("maxSteps", 21);
+    boot.settings.saveSetting?.("subagents.maxSteps", 9);
+    boot.settings.saveSetting?.("subagents.depth", 3);
     boot.settings.saveSetting?.("effort", "high");
     boot.settings.saveSetting?.("preservation", "tokens 4000");
     boot.settings.saveSetting?.("model", "p/other");
     const restarted = bootstrap();
     const args = restarted.resolve(parseCommonArgs(["--preset", "automatic"]));
     expect(args.maxSteps).toBeUndefined();
+    expect(args.subagentMaxSteps).toBeNull();
+    expect(args.subagentDepth).toBe(1);
     expect(args.effort).toBeUndefined();
     expect(args.preservation).toBe("auto");
     expect(args.model).toBeUndefined();
@@ -1136,6 +1179,8 @@ describe("setup data and persistence", () => {
     restarted.settings.usePreset?.("automatic");
     const loaded = restarted.resolve(parseCommonArgs([]));
     expect(loaded.maxSteps).toBe(args.maxSteps);
+    expect(loaded.subagentMaxSteps).toBe(args.subagentMaxSteps);
+    expect(loaded.subagentDepth).toBe(args.subagentDepth);
     expect(loaded.effort).toBe(args.effort);
     expect(loaded.preservation).toBe(args.preservation);
     expect(loaded.model).toBe(args.model);

@@ -1,7 +1,8 @@
 // subagent:可选装能力。内核任何模块都不引用本文件;组装者按需 import 并挂成一个工具。
 // 子 agent = 同一内核的递归实例化:独立事件日志、独立会话文件,replay 与构成投影零改动可用。
 import { existsSync, rmSync } from "node:fs";
-import { type TSchema, Type } from "@sinclair/typebox";
+import { type Static, type TSchema, Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import { Agent } from "./agent.js";
 import { outsideCwd, ruleMatches } from "./approval.js";
 import { type AgentEvent, now } from "./events.js";
@@ -97,8 +98,8 @@ export const DEFAULT_SCOPES: ScopeRegistry = {
 // ---------- 类型注册表:子是哪一种专门的 agent,由父模型在调用时选 ----------
 
 /**
- * 子类型:自己的系统提示词、工具子集、模型、缺省范围与步数上限。
- * 每一项都可省略,省略即沿用父的;内置的 default 类型什么都不改。
+ * 子类型:首次派发时解析自己的系统提示词、工具子集、模型、缺省范围与步数上限。
+ * 每一项都可省略,省略即沿用父的;续聊取首次实际约束,不重新套注册表。
  */
 export type SubagentType = {
   /** 给父模型看的说明:什么任务该派给这一类。 */
@@ -180,6 +181,7 @@ export type ChildInfo = {
   /** 子的 id(sub-N),续聊与会话文件名都用它。 */
   id: string;
   task: string;
+  /** 首次派发的上下文来源;续聊不重新应用范围槽。 */
   scope: string;
   type: string;
   /** 这次是续聊(同一子日志上再跑一次)。 */
@@ -246,6 +248,8 @@ function lastAssistantText(events: readonly AgentEvent[]): string {
 export type TaskToolOptions = {
   parent: EventLog;
   provider: Provider | (() => Provider);
+  /** 可重新解析的实际模型定位符;多供应商宿主须提供 provider/model,不能只给裸模型名。 */
+  modelLocator?: string | (() => string);
   /** 每次派发装配自己的资源,结束时释放。数组适用于无状态的内核工具。 */
   tools: Tool[] | ((log: EventLog) => Promise<ChildTools>);
   runner?: SubagentRunner;
@@ -254,11 +258,11 @@ export type TaskToolOptions = {
   /** 类型注册表,叠在内置的 default 之上。 */
   types?: SubagentTypeRegistry;
   defaultType?: string;
-  /** 类型指定了 model 时据此取 provider;不给则该类型报错回喂。 */
-  providerFor?: (model: string) => Provider;
+  /** 解析模型选择与实际定位符;续聊用首次定位符查找,不能再按裸模型名改选供应商。 */
+  providerFor?: (model: string) => { provider: Provider; modelLocator: string };
   /** 给了就要求子以符合此 schema 的 JSON 收尾,并校验后随结果返回。 */
   outputSchema?: TSchema;
-  /** 嵌套深度:1(缺省)= 子没有 task 工具;2 = 子有,孙没有。 */
+  /** 嵌套深度:1(缺省)= 子没有 task 工具;2 = 子有,孙没有。续聊保留首次剩余层数,当前不足则报错。 */
   depth?: number;
   /** 本工具所在层级,根会话的 task 工具是 1;嵌套时由上一层填。 */
   level?: number;
@@ -270,7 +274,7 @@ export type TaskToolOptions = {
   approval?: SubagentApproval;
   /** 收紧规则里的路径按此目录解析;缺省进程工作目录。 */
   cwd?: string;
-  /** 子的步数上限的全局缺省;类型可覆盖;都不给就不设上限。 */
+  /** 子每次运行的步数上限缺省;类型可覆盖,再沿用父的数值限制。不是累计预算。 */
   maxSteps?: number;
   compaction?: CompactionConfig;
   /** 子 agent 一开跑就通知:界面订阅子日志,实时显示。 */
@@ -287,10 +291,42 @@ export type ChildTools = {
 /** task 工具对象:描述分段,suffix 是注册表生成的类型与范围列表,任何风格都附在末尾。 */
 export type TaskTool = Tool & { describe: DescriptionParts };
 
+const IDENTITY_SCHEMA = Type.Object({
+  id: Type.String(),
+  type: Type.String(),
+  scope: Type.String(),
+  model: Type.String({ pattern: "\\S" }),
+  tools: Type.Array(Type.String(), { uniqueItems: true }),
+  maxSteps: Type.Union([Type.Number(), Type.Null()]),
+  remainingDepth: Type.Integer({ minimum: 0 }),
+});
+type ChildIdentity = Static<typeof IDENTITY_SCHEMA>;
+
+function isIdentity(event: AgentEvent): event is Extract<AgentEvent, { type: "ext/event" }> {
+  return event.type === "ext/event" && event.source === "subagent" && event.kind === "identity";
+}
+
+function childIdentity(log: EventLog, id: string): ChildIdentity {
+  const own = log.events.filter((event) => isIdentity(event) && event.payload?.inherited !== true);
+  const event = own[0];
+  if (own.length !== 1 || !event || !isIdentity(event))
+    throw new Error(
+      `Sub-agent ${id} has no original execution identity; its log can be viewed, but it cannot be resumed.`,
+    );
+  if (
+    !Value.Check(IDENTITY_SCHEMA, event.payload) ||
+    event.payload.id !== id ||
+    event.payload.tools.includes("task") !== event.payload.remainingDepth > 0
+  )
+    throw new Error(`Sub-agent ${id} has an invalid execution identity; it cannot be resumed.`);
+  return event.payload;
+}
+
 const DESCRIPTION: Omit<DescriptionParts, "suffix"> = {
   core:
     "Delegate a bounded subtask to a sub-agent that runs in its own context and returns only its final reply; its intermediate steps stay out of this conversation. " +
     "The reply ends with the sub-agent id and its session log path; call task again with resume set to that id to give the same sub-agent a follow-up. " +
+    "Follow-ups keep its original type, model, tool allowlist, delegation depth and per-run step limit; unavailable original resources cause an error. " +
     "A sub-agent stopped by a step limit returns its work so far and can be resumed the same way.",
   guidance:
     "Good for research, search and verification that reads a lot; not for edits that depend on decisions being made here. " +
@@ -317,6 +353,7 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
   let counter = 0;
   /** 已派出的子,按 id;结束后日志留在这里供续聊,进程结束才释放。 */
   const children = new Map<string, { log: EventLog; running: boolean }>();
+  const preparing = new Set<string>();
 
   const list = (names: string[], reg: Record<string, { description: string }>, def: string) =>
     names
@@ -340,14 +377,16 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
       type: Type.Optional(
         Type.Union(
           typeNames.map((n) => Type.Literal(n)),
-          { description: `Which kind of sub-agent; default ${defaultType}` },
+          {
+            description: `Type for a new sub-agent; default ${defaultType}. Follow-ups keep the original type and reject a different one.`,
+          },
         ),
       ),
       scope: Type.Optional(
         Type.Union(
           scopeNames.map((n) => Type.Literal(n)),
           {
-            description: `How much of this conversation the sub-agent sees; default ${defaultScope}`,
+            description: `Context inherited by a new sub-agent; default ${defaultScope}. Ignored on resume, which keeps the existing history.`,
           },
         ),
       ),
@@ -359,54 +398,30 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
       ),
     }),
     async execute(args, ctx) {
-      const typeName = args.type ?? defaultType;
-      const type = types[typeName];
-      if (!type)
-        throw new Error(`Unknown sub-agent type "${typeName}"; one of: ${typeNames.join(", ")}`);
-      const scopeName = args.scope ?? type.scope ?? defaultScope;
-      const entry = scopes[scopeName];
-      if (!entry) throw new Error(`Unknown scope "${scopeName}"; one of: ${scopeNames.join(", ")}`);
-      let provider = typeof opts.provider === "function" ? opts.provider() : opts.provider;
-      if (type.model) {
-        if (!opts.providerFor && type.model !== provider.model)
-          throw new Error(
-            `Sub-agent type "${typeName}" asks for model ${type.model}, but no provider lookup is configured.`,
-          );
-        if (opts.providerFor) provider = opts.providerFor(type.model);
-      }
-      const inherited = parentSlots() ?? {};
-      const compaction = opts.compaction && { ...opts.compaction };
-      const limit = type.maxSteps ?? opts.maxSteps;
-      const slots: NonNullable<TurnDeps["slots"]> = {
-        ...inherited,
-        approve: childApprove(opts.approval, inherited.approve, cwd),
-        ...(limit !== undefined && { termination: maxSteps(limit) }),
-      };
-
       const parentPath = opts.parent.path;
       const pathFor = (id: string) =>
         parentPath ? `${parentPath.replace(/\.jsonl$/, "")}-${id}.jsonl` : undefined;
-
-      // 新建或续聊:续聊沿用原日志(内存里的,或从父会话路径重新打开)。
       let id: string;
-      let log: EventLog;
-      let resumed = false;
+      let log: EventLog | undefined;
+      let opened = false;
+      const resumed = !!args.resume;
       if (args.resume) {
         id = args.resume;
+        if (preparing.has(id))
+          throw new Error(`Sub-agent ${id} is still preparing; wait for its result.`);
         const known = children.get(id);
         if (known?.running)
           throw new Error(`Sub-agent ${id} is still running; wait for its result.`);
         if (known) log = known.log;
         else {
           const path = pathFor(id);
-          if (!/^sub-\d+$/.test(id) || !path || !existsSync(path)) {
+          if (!/^sub-\d+$/.test(id) || !path || !existsSync(path))
             throw new Error(
               `Unknown sub-agent id "${id}". Ids come from earlier task results in this session.`,
             );
-          }
           log = EventLog.load(path, { attach: true });
+          opened = true;
         }
-        resumed = true;
       } else {
         // 会话恢复会重建工具实例,内存计数不能覆盖已经存在的子日志。
         let path: string | undefined;
@@ -415,20 +430,103 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
           id = `sub-${counter}`;
           path = pathFor(id);
         } while (children.has(id) || (path && existsSync(path)));
-        const parentSnapshot: ParentSnapshot = {
-          events: opts.parent.events,
-          system:
-            deriveMessages(opts.parent.events).find((m) => m.role === "system")?.content ?? "",
-          model: provider.model,
+      }
+
+      let resources: ChildTools | undefined;
+      let info: ChildInfo | undefined;
+      let record: { log: EventLog; running: boolean } | undefined;
+      let res: SubagentResult;
+      preparing.add(id);
+      try {
+        const identity = resumed && log ? childIdentity(log, id) : undefined;
+        if (identity && args.type !== undefined && args.type !== identity.type)
+          throw new Error(
+            `Sub-agent ${id} was created with type "${identity.type}"; it cannot resume as "${args.type}".`,
+          );
+        const typeName = identity?.type ?? args.type ?? defaultType;
+        const type = identity ? undefined : types[typeName];
+        if (!identity && !type)
+          throw new Error(`Unknown sub-agent type "${typeName}"; one of: ${typeNames.join(", ")}`);
+        const scopeName = identity?.scope ?? args.scope ?? type?.scope ?? defaultScope;
+        const entry = scopes[scopeName];
+        if (!identity && !entry)
+          throw new Error(`Unknown scope "${scopeName}"; one of: ${scopeNames.join(", ")}`);
+
+        let provider = typeof opts.provider === "function" ? opts.provider() : opts.provider;
+        let modelLocator =
+          (typeof opts.modelLocator === "function" ? opts.modelLocator() : opts.modelLocator) ??
+          provider.model;
+        const requestedModel = identity?.model ?? type?.model;
+        if (requestedModel !== undefined) {
+          if (opts.providerFor) {
+            const selected = opts.providerFor(requestedModel);
+            if (identity && selected.modelLocator !== requestedModel)
+              throw new Error(
+                `Sub-agent ${id} requires model ${requestedModel}, but lookup returned ${selected.modelLocator}.`,
+              );
+            provider = selected.provider;
+            modelLocator = selected.modelLocator;
+          } else if (requestedModel !== modelLocator) {
+            if (identity)
+              throw new Error(
+                `Sub-agent ${id} requires model ${requestedModel}, but it is unavailable.`,
+              );
+            if (requestedModel !== provider.model)
+              throw new Error(
+                `Sub-agent type "${typeName}" asks for model ${requestedModel}, but no provider lookup is configured.`,
+              );
+          }
+        }
+        if (!modelLocator.trim())
+          throw new Error(`Sub-agent ${id} requires a non-empty model locator.`);
+        if (!Number.isFinite(depth) || !Number.isFinite(level))
+          throw new Error(`Sub-agent ${id} requires a finite delegation depth.`);
+        // 递归每次递增一层;ceil 保留有限小数 depth 的原有 level < depth 行为。
+        const availableDepth = Math.max(0, Math.ceil(depth - level));
+        if (identity && identity.remainingDepth > availableDepth)
+          throw new Error(
+            `Sub-agent ${id} requires delegation depth ${identity.remainingDepth}, but only ${availableDepth} is available.`,
+          );
+        const inherited = parentSlots() ?? {};
+        const limit = identity
+          ? identity.maxSteps
+          : (type?.maxSteps ?? opts.maxSteps ?? inherited.termination?.maxSteps ?? null);
+        if (limit !== null && !Number.isFinite(limit))
+          throw new Error(
+            `Sub-agent ${id} requires a finite step limit; received ${String(limit)}.`,
+          );
+        const slots: NonNullable<TurnDeps["slots"]> = {
+          ...inherited,
+          approve: childApprove(opts.approval, inherited.approve, cwd),
+          ...(limit !== null && { termination: maxSteps(limit) }),
+          // 首轮无数值限制时,续聊不能从新父模型重新继承一个步数限制。
+          ...(identity &&
+            limit === null &&
+            inherited.termination?.maxSteps !== undefined && {
+              termination: () => null,
+            }),
         };
-        const start = entry.scope(parentSnapshot);
-        log = new EventLog(path);
-        try {
+        const compaction = opts.compaction && { ...opts.compaction };
+        if (!log) {
+          const start = (entry as ScopeEntry).scope({
+            events: opts.parent.events,
+            system:
+              deriveMessages(opts.parent.events).find((m) => m.role === "system")?.content ?? "",
+            model: provider.model,
+          });
+          log = new EventLog(pathFor(id));
+          opened = true;
           log.recording?.copyAttachments(start, opts.parent.recording);
-          for (const e of start) log.append(e);
-          // 显式覆盖在继承之后生效,避免继承的旧编辑再次改写它;续聊不重置子会话。
-          const systemTarget = start.findIndex((e) => e.type === "session/start");
-          if (type.system !== undefined && systemTarget >= 0)
+          for (const event of start) {
+            // 保留下标与上下文引用,只标记复制来的身份,不把祖先当成本子。
+            log.append(
+              isIdentity(event)
+                ? { ...event, payload: { ...event.payload, inherited: true } }
+                : event,
+            );
+          }
+          const systemTarget = start.findIndex((event) => event.type === "session/start");
+          if (type?.system !== undefined && systemTarget >= 0)
             log.append({
               type: "context/edit",
               at: now(),
@@ -436,103 +534,138 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
               field: "system",
               value: type.system,
             });
-        } catch (error) {
-          log.recording?.dispose();
-          if (path) rmSync(path, { force: true });
-          if (log.recording) rmSync(log.recording.directory, { recursive: true, force: true });
-          throw error;
         }
-      }
-
-      const lastModel = [...log.events]
-        .reverse()
-        .find((e) => e.type === "session/start" || e.type === "session/model");
-      if (lastModel && "model" in lastModel && lastModel.model !== provider.model)
-        log.append({ type: "session/model", at: now(), model: provider.model });
-
-      const task = opts.outputSchema
-        ? `${args.task}\n\nWhen done, end with a \`\`\`json code block holding a result that matches this JSON Schema:\n${JSON.stringify(opts.outputSchema)}`
-        : args.task;
-
-      // 续聊与主会话恢复采用同一事实:缺少结果不等于未执行,不自动重跑。
-      if (resumed) recordUnresolvedCalls(log);
-      const info: ChildInfo = {
-        log,
-        id,
-        task: args.task,
-        scope: scopeName,
-        type: typeName,
-        resumed,
-        index: Number(id.slice(4)),
-        state: { status: "running" },
-        ...(ctx.callId && { callId: ctx.callId }),
-      };
-      const record = { log, running: true };
-      children.set(id, record);
-      let res: SubagentResult;
-      try {
-        const resources = Array.isArray(opts.tools)
-          ? { tools: opts.tools, dispose: async () => {}, fork: undefined }
-          : await opts.tools(log);
-        try {
-          let childTools = resources.tools.filter(
-            (t) => t.name !== "task" && (!type.tools || type.tools.includes(t.name)),
-          );
-          if (level < depth && (!type.tools || type.tools.includes("task"))) {
-            const { onChild: _drop, ...rest } = opts;
-            const allowed = new Set(childTools.map((t) => t.name));
-            const factory = resources.fork ?? opts.tools;
-            childTools = [
-              ...childTools,
-              createTaskTool({
-                ...rest,
-                parent: log,
-                provider,
-                slots,
-                level: level + 1,
-                tools:
-                  typeof factory === "function"
-                    ? async (nestedLog) => {
-                        const nested = await factory(nestedLog);
-                        return {
-                          ...nested,
-                          tools: nested.tools.filter((t) => allowed.has(t.name)),
-                        };
-                      }
-                    : childTools,
-              }),
-            ];
-          }
-          res = await runner({
-            task,
-            log,
-            provider,
-            tools: childTools,
-            signal: ctx.signal,
-            agent: id,
-            slots,
-            ...(opts.onChild && { onLog: () => opts.onChild?.(info) }),
-            ...(compaction && { compaction }),
+        const childLog = log;
+        resources = Array.isArray(opts.tools)
+          ? { tools: opts.tools, dispose: async () => {} }
+          : await opts.tools(childLog);
+        const permitted = identity?.tools ?? type?.tools;
+        const remainingDepth =
+          identity?.remainingDepth ??
+          (!permitted || permitted.includes("task") ? availableDepth : 0);
+        let childTools = resources.tools.filter(
+          (tool) => tool.name !== "task" && (!permitted || permitted.includes(tool.name)),
+        );
+        if (remainingDepth > 0) {
+          const { onChild: _drop, ...rest } = opts;
+          const allowed = new Set(childTools.map((tool) => tool.name));
+          const factory = resources.fork ?? opts.tools;
+          childTools = [
+            ...childTools,
+            createTaskTool({
+              ...rest,
+              parent: childLog,
+              provider,
+              modelLocator,
+              slots,
+              depth: level + remainingDepth,
+              level: level + 1,
+              tools:
+                typeof factory === "function"
+                  ? async (nestedLog) => {
+                      const nested = await factory(nestedLog);
+                      return {
+                        ...nested,
+                        tools: nested.tools.filter((tool) => allowed.has(tool.name)),
+                      };
+                    }
+                  : childTools,
+            }),
+          ];
+        }
+        if (identity) {
+          const available = new Set(childTools.map((tool) => tool.name));
+          const missing = identity.tools.filter((name) => !available.has(name));
+          if (missing.length)
+            throw new Error(
+              `Sub-agent ${id} requires unavailable tools: ${missing.join(", ")}. Restore them before resuming.`,
+            );
+        } else {
+          log.append({
+            type: "ext/event",
+            at: now(),
+            source: "subagent",
+            kind: "identity",
+            payload: {
+              id,
+              type: typeName,
+              scope: scopeName,
+              model: modelLocator,
+              tools: childTools.map((tool) => tool.name),
+              maxSteps: limit,
+              remainingDepth,
+            } satisfies ChildIdentity,
           });
-        } catch (error) {
+        }
+        const lastModel = [...log.events]
+          .reverse()
+          .find((event) => event.type === "session/start" || event.type === "session/model");
+        if (lastModel && "model" in lastModel && lastModel.model !== provider.model)
+          log.append({ type: "session/model", at: now(), model: provider.model });
+        // 验证资源后才追加恢复事实、标 running 或给 runner 新简报。
+        if (resumed) recordUnresolvedCalls(log);
+        info = {
+          log,
+          id,
+          task: args.task,
+          scope: scopeName,
+          type: typeName,
+          resumed,
+          index: Number(id.slice(4)),
+          state: { status: "running" },
+          ...(ctx.callId && { callId: ctx.callId }),
+        };
+        record = { log, running: true };
+        children.set(id, record);
+        preparing.delete(id);
+        const task = opts.outputSchema
+          ? `${args.task}\n\nWhen done, end with a \`\`\`json code block holding a result that matches this JSON Schema:\n${JSON.stringify(opts.outputSchema)}`
+          : args.task;
+        const childInfo = info;
+        res = await runner({
+          task,
+          log,
+          provider,
+          tools: childTools,
+          signal: ctx.signal,
+          agent: id,
+          slots,
+          ...(opts.onChild && { onLog: () => opts.onChild?.(childInfo) }),
+          ...(compaction && { compaction }),
+        });
+      } catch (error) {
+        let failure = error;
+        if (resources) {
           try {
             await resources.dispose();
           } catch (cleanupError) {
-            throw new AggregateError(
+            failure = new AggregateError(
               [error, cleanupError],
               `Sub-agent failed and cleanup failed: ${errorMessage(error)}; ${errorMessage(cleanupError)}`,
             );
           }
-          throw error;
         }
-        await resources.dispose();
-      } catch (err) {
-        record.running = false;
-        info.state = { status: "partial", reason: errorMessage(err) };
-        throw err;
+        if (record) record.running = false;
+        if (info) info.state = { status: "partial", reason: errorMessage(failure) };
+        if (!record && opened && log) {
+          log.recording?.dispose();
+          if (!resumed && log.path) {
+            rmSync(log.path, { force: true });
+            if (log.recording) rmSync(log.recording.directory, { recursive: true, force: true });
+          }
+        }
+        preparing.delete(id);
+        throw failure;
       }
-      record.running = false;
-      info.state = { status: res.status, ...(res.reason && { reason: res.reason }) };
+      try {
+        await resources?.dispose();
+      } catch (error) {
+        if (record) record.running = false;
+        if (info) info.state = { status: "partial", reason: errorMessage(error) };
+        throw error;
+      }
+      if (record) record.running = false;
+      if (info) info.state = { status: res.status, ...(res.reason && { reason: res.reason }) };
 
       let out = res.text;
       let structuredError: string | undefined;

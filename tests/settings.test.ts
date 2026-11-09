@@ -27,6 +27,8 @@ describe("开关登记表", () => {
     expect(getSetting(defaultPreset(), "facts.repeats")).toBe(true);
     expect(getSetting(defaultPreset(), "prompt.skills.load")).toBe("read");
     expect(getSetting(defaultPreset(), "tools.disable")).toBeUndefined();
+    expect(getSetting(defaultPreset(), "subagents.maxSteps")).toBeNull();
+    expect(getSetting(defaultPreset(), "subagents.depth")).toBe(1);
   });
 
   it("命令行解析认得表里的每个键:写进 defaults 的非缺省值都到了参数里", () => {
@@ -64,6 +66,8 @@ describe("开关登记表", () => {
       toolPrompts: "rules",
       subagent: true,
       maxSteps: 42,
+      "subagents.maxSteps": 12,
+      "subagents.depth": 3,
       approve: "ask",
       compaction: "clear",
       compactionTrigger: "manual",
@@ -112,6 +116,8 @@ describe("开关登记表", () => {
       toolPrompts: args.toolPrompts,
       subagent: args.subagent,
       maxSteps: args.maxSteps,
+      "subagents.maxSteps": args.subagentMaxSteps,
+      "subagents.depth": args.subagentDepth,
       approve: args.approve,
       compaction: args.compaction,
       compactionTrigger: args.compactionTrigger,
@@ -124,6 +130,38 @@ describe("开关登记表", () => {
       model: args.model,
     };
     for (const s of SETTINGS) expect(seen[s.key], s.key).toEqual(probe[s.key]);
+    const explicitLimits = applyPreset(
+      parseCommonArgs([
+        "--max-steps",
+        "none",
+        "--subagent-max-steps",
+        "inherit",
+        "--subagent-depth",
+        "2",
+      ]),
+      config({ maxSteps: 20, subagents: { maxSteps: 5, depth: 3 } }),
+    );
+    expect(explicitLimits.maxSteps).toBeUndefined();
+    expect(explicitLimits).toMatchObject({ subagentMaxSteps: null, subagentDepth: 2 });
+    expect(() => parseCommonArgs(["--max-steps", "0"])).toThrow("positive whole number");
+    expect(
+      applyPreset(
+        { ...parseCommonArgs([]), preset: "nested" },
+        {
+          ...config({ subagents: { maxSteps: 5, depth: 1 } }),
+          presets: { nested: { subagents: { depth: 3 } } },
+        },
+      ),
+    ).toMatchObject({ subagentMaxSteps: 5, subagentDepth: 3 });
+    expect(
+      applyPreset(
+        { ...parseCommonArgs([]), preset: "inherit" },
+        {
+          ...config({ subagents: { maxSteps: 5 } }),
+          presets: { inherit: { subagents: { maxSteps: null } } },
+        },
+      ).subagentMaxSteps,
+    ).toBeNull();
     expect(
       applyPreset(parseCommonArgs(["--hide-cost-estimate"]), config({ showCostEstimate: true }))
         .showCostEstimate,
@@ -184,6 +222,12 @@ describe("开关登记表", () => {
     for (const bad of ["-0.1", "1", "many", "none", ""])
       expect(() => parseSetting(def("compactionRatio"), bad)).toThrow("compactionRatio");
     expect(parseSetting(def("maxSteps"), "none")).toBeUndefined();
+    expect(parseSetting(def("subagents.maxSteps"), "inherit")).toBeNull();
+    for (const key of ["maxSteps", "subagents.maxSteps", "subagents.depth"])
+      for (const bad of ["0", "-1", "1.5", "Infinity", ""])
+        expect(() => parseSetting(def(key), bad)).toThrow("positive whole number");
+    expect(() => parseSetting(def("subagents.depth"), "none")).toThrow("positive whole number");
+    expect(formatSetting(def("subagents.maxSteps"), null)).toBe("inherit");
     expect(parseSetting(def("notify"), "always")).toBe("always");
     expect(parseSetting(def("results"), "read head bash all")).toEqual({
       read: "head",

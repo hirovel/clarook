@@ -1,3 +1,4 @@
+import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import {
   clearToolResults,
@@ -14,6 +15,7 @@ import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
 import { CLEARED_PLACEHOLDER, deriveMessages, type Message } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
+import type { Tool } from "../src/tools.js";
 
 function ev(events: Partial<AgentEvent>[]): AgentEvent[] {
   return events as AgentEvent[];
@@ -454,12 +456,23 @@ describe("循环触发", () => {
     return l;
   }
 
-  it("超阈值时自动压缩,压缩事件先于下一次请求落盘", async () => {
+  it("工具声明使输入超阈值时自动压缩,压缩事件先于下一次请求落盘", async () => {
     const l = log();
     const turns: AssistantTurn[] = [{ text: "好", toolCalls: [], stopReason: "end" }];
+    let availableTools: Tool[] = [
+      {
+        name: "read",
+        description: "x".repeat(40000),
+        parameters: Type.Object({}),
+        async execute() {
+          return "unused";
+        },
+      },
+    ];
     const provider: Provider = {
       model: "fake",
-      async complete() {
+      async complete(_messages, tools) {
+        expect(tools).toHaveLength(0);
         const t = turns.shift();
         if (!t) throw new Error("越界");
         return t;
@@ -468,18 +481,22 @@ describe("循环触发", () => {
     await runTurn({
       log: l,
       provider,
-      tools: [],
+      tools: () => availableTools,
       compaction: {
-        strategy: clearToolResults({ keepRecent: 0, clearAtLeast: 10 }),
-        window: 3000, // 余量线 2900 不触发;比例线 150 触发。
+        strategy: async (input) => {
+          const result = await clearToolResults({ keepRecent: 0, clearAtLeast: 10 })(input);
+          availableTools = [];
+          return result;
+        },
+        window: 3000, // 纯消息未达比例线,工具声明计入后才触发。
         reserveTokens: 100,
-        ratio: 0.05,
+        ratio: 0.5,
       },
     });
     const types = l.events.map((e) => e.type);
     expect(types).toContain("compaction");
     expect(types.indexOf("compaction")).toBeLessThan(types.lastIndexOf("assistant/message"));
-    expect(l.events.filter((e) => e.type === "request").at(-1)).toMatchObject({ threshold: 150 });
+    expect(l.events.filter((e) => e.type === "request").at(-1)).toMatchObject({ threshold: 1500 });
   });
 
   it("溢出恢复:压缩取得进展才重试,后续工具续做标记普通请求", async () => {

@@ -3,6 +3,7 @@
 // 描述没有最优解:各家的文案长短差一个量级,效果随模型而变,所以做成槽而不是定案。
 // 内核不知道这一层;buildTools 装上,/toolprompts 会话中切换,切换记 session/slot 事件,下一次请求起生效。
 import type { ToolPromptStyle, ToolPromptsConfig } from "../src/config.js";
+import { toolDefinitionTokens } from "../src/context.js";
 import { composeDescription, DESCRIPTION_LEVELS, type Tool } from "../src/tools.js";
 
 export const TOOL_PROMPT_STYLES: ToolPromptStyle[] = DESCRIPTION_LEVELS;
@@ -56,17 +57,12 @@ export function describeToolPrompts(cfg: ToolPromptsConfig | undefined): string 
 
 /** 一套风格下全部工具定义的 token 估算(字符数 / 4),给 /toolprompts 的对照表。 */
 export function styleTokens(tools: Tool[], cfg: ToolPromptsConfig | undefined): number {
-  return tools.reduce(
-    (s, t) =>
-      s +
-      Math.ceil(
-        JSON.stringify({
-          name: t.name,
-          description: styledDescription(t, cfg),
-          parameters: t.parameters,
-        }).length / 4,
-      ),
-    0,
+  return toolDefinitionTokens(
+    tools.map((t) => ({
+      name: t.name,
+      description: styledDescription(t, cfg),
+      parameters: t.parameters,
+    })),
   );
 }
 

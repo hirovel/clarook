@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { RequestInspector } from "../cli/inspector.js";
 import { compositionLines, compositionRows } from "../cli/inspector-composition.js";
+import { messagesFor } from "../cli/inspector-requests.js";
 import { legalizeCut } from "../src/compaction.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
@@ -212,35 +213,94 @@ describe("wireMap", () => {
 });
 
 describe("组装槽", () => {
-  it("assemble 换了投影,request.body 记下差异,检视器仍能重建", async () => {
-    const log = new EventLog();
-    log.append({ type: "session/start", at: "", model: "m", system: "S" });
-    log.append({ type: "user/message", at: "", text: "hi" });
-    let seen: unknown;
-    const provider: Provider = {
-      model: "m",
-      async complete(messages): Promise<AssistantTurn> {
-        seen = messages;
-        return { text: "ok", toolCalls: [], stopReason: "end" };
-      },
-    };
-    await runTurn({
-      log,
-      provider,
-      tools: [],
-      slots: {
-        assemble: (events) => [
-          ...deriveMessages(events),
-          { role: "user", content: "(reminder) be brief" },
-        ],
-      },
-    });
-    expect((seen as unknown[]).length).toBe(3);
-    const req = log.events.find((e) => e.type === "request");
-    expect(req?.type === "request" && req.body).toEqual({
-      prefixEvents: 2,
-      tail: [{ role: "user", content: "(reminder) be brief" }],
-    });
+  it("assemble 增删投影时记录实际粗估,其 usage 不污染标准请求,恒等组装继续用新实测", async () => {
+    for (const mode of ["append", "replace"] as const) {
+      const log = new EventLog();
+      log.append({ type: "session/start", at: "", model: "m", system: "S" });
+      log.append({ type: "user/message", at: "", text: "hi" });
+      const inputs = [1000, mode === "append" ? 11000 : 2, 500, 500];
+      let seen: unknown[] = [];
+      const provider: Provider = {
+        model: "m",
+        async complete(messages): Promise<AssistantTurn> {
+          seen = messages;
+          const inputTokens = inputs.shift();
+          if (inputTokens === undefined) throw new Error("unexpected provider request");
+          return {
+            text: "ok",
+            toolCalls: [],
+            stopReason: "end",
+            usage: { inputTokens, outputTokens: 4 },
+          };
+        },
+      };
+      let compactions = 0;
+      const deps = {
+        log,
+        provider,
+        tools: [],
+        compaction: {
+          window: 5000,
+          reserveTokens: 1000,
+          strategy: async () => {
+            compactions++;
+            return null;
+          },
+        },
+      };
+      await runTurn(deps);
+      log.append({ type: "user/message", at: "", text: "next" });
+      let assemblies = 0;
+      await runTurn({
+        ...deps,
+        slots: {
+          assemble: (events) => {
+            assemblies++;
+            return mode === "append"
+              ? [...deriveMessages(events), { role: "user", content: "r".repeat(40000) }]
+              : [
+                  { role: "system", content: "S" },
+                  { role: "user", content: "tiny" },
+                ];
+          },
+        },
+      });
+      expect(seen.length).toBe(mode === "append" ? 5 : 2);
+      const request = log.events.filter((event) => event.type === "request").at(-1);
+      if (!request) throw new Error("Expected recorded request");
+      const requestIndex = log.events.indexOf(request);
+      expect(request.estimatedTokens).toBe(mode === "append" ? 10004 : 2);
+      expect(messagesFor(log.events, { index: requestIndex, request })).toEqual(seen);
+      expect(request?.body).toEqual({
+        prefixEvents: mode === "append" ? requestIndex : 1,
+        tail: [{ role: "user", content: mode === "append" ? "r".repeat(40000) : "tiny" }],
+      });
+
+      log.append({ type: "user/message", at: "", text: "more" });
+      await runTurn(deps);
+      expect(log.events.filter((event) => event.type === "request").at(-1)).toMatchObject({
+        estimatedTokens: 6,
+      });
+      log.append({ type: "user/message", at: "", text: "same" });
+      await runTurn({
+        ...deps,
+        slots: {
+          assemble: (events) => {
+            assemblies++;
+            return deriveMessages(events);
+          },
+        },
+      });
+      const identity = log.events.filter((event) => event.type === "request").at(-1);
+      expect(identity?.estimatedTokens).toBe(505);
+      expect(identity?.body).toBeUndefined();
+      if (!identity) throw new Error("Expected identity request");
+      expect(
+        messagesFor(log.events, { index: log.events.indexOf(identity), request: identity }),
+      ).toEqual(seen);
+      expect(assemblies).toBe(2);
+      expect(compactions).toBe(0);
+    }
   });
 });
 
@@ -275,7 +335,7 @@ describe("检视器组装视图", () => {
     insp.handleInput("\t");
     expect(insp.currentMode).toBe("composition");
     const screen = insp.render(120).map(plain).join("\n");
-    expect(screen).toContain("Context · Next request");
+    expect(screen).toContain("Context · Current projection");
     // 前两行是系统提示词与工具定义;摘要行带 ≈,它下面折一行被覆盖的消息
     expect(screen).toMatch(/#0\s+system/);
     expect(screen).toMatch(/tools\s+0 definitions/);
@@ -283,7 +343,7 @@ describe("检视器组装视图", () => {
     expect(screen).toContain("#2–#5  4 messages · ");
     expect(screen).toContain("→ summary · Enter shows them");
     // 底部预览:最后一条的来历
-    expect(screen).toContain("next request messages[4] · from event user/message");
+    expect(screen).toContain("projected messages[4] · from event user/message");
     expect(screen).toContain("not sent yet");
     // Enter 先开动作菜单,第一项"View full message"再 Enter 才进全文
     insp.handleInput("\r");

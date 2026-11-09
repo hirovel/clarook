@@ -416,6 +416,7 @@ export async function changeCompactionReference(
 }
 
 function validate(def: SettingDef, value: unknown): void {
+  if (def.key === "subagents.maxSteps" && value === null) return;
   if (def.key === "prompt.skills.sources") parseSkillSources(value);
   if (
     def.key === "prompt.skills.include" &&

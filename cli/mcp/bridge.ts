@@ -290,12 +290,12 @@ export async function connectMcpServers(
       let installed: string[] = [];
       const install = () => {
         if (closed) return;
-        const before = installed;
+        const before = new Set(installed);
         const definitions = connection.definitions.filter((d) =>
           toolAllowed(d.name, server.config.enabledTools, server.config.disabledTools),
         );
         const occupied = new Set(
-          opts.tools.filter((tool) => !before.includes(tool.name)).map((tool) => tool.name),
+          opts.tools.filter((tool) => !before.has(tool.name)).map((tool) => tool.name),
         );
         const fresh: Tool[] = definitions.map((definition) => {
           const name = bridgedName(server.name, definition.name);
@@ -348,16 +348,25 @@ export async function connectMcpServers(
             },
           };
         });
-        for (let i = opts.tools.length - 1; i >= 0; i--)
-          if (before.includes(opts.tools[i]?.name ?? "")) opts.tools.splice(i, 1);
-        for (const name of before) names.delete(name);
-        opts.tools.push(...fresh);
+        const remaining = new Map(fresh.map((tool) => [tool.name, tool]));
+        for (let i = opts.tools.length - 1; i >= 0; i--) {
+          const name = opts.tools[i]?.name ?? "";
+          if (!before.has(name)) continue;
+          const replacement = remaining.get(name);
+          if (replacement) {
+            opts.tools[i] = replacement;
+            remaining.delete(name);
+          } else opts.tools.splice(i, 1);
+        }
+        opts.tools.push(...remaining.values());
         installed = fresh.map((t) => t.name);
-        for (const name of installed) names.add(name);
         status.phase = connection.status.phase;
         status.toolCount = fresh.length;
-        const added = installed.filter((name) => !before.includes(name));
-        const removed = before.filter((name) => !installed.includes(name));
+        const added = installed.filter((name) => !before.has(name));
+        const current = new Set(installed);
+        const removed = [...before].filter((name) => !current.has(name));
+        for (const name of removed) names.delete(name);
+        for (const name of added) names.add(name);
         if (added.length || removed.length)
           emit(opts.log, {
             kind: "tools",

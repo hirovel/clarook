@@ -55,7 +55,7 @@ function scripted(steps: Step[], model = "fake-agent"): Provider {
     wireMap: (messages) => messages.map((_, i) => i),
     async complete(messages, _tools, opts: CompleteOptions = {}) {
       const last = messages.at(-1);
-      if (last?.role === "user" && /Compress the conversation above/.test(last.content)) {
+      if (last?.role === "user" && /Summarize only the conversation before this instruction\./.test(last.content)) {
         return {
           text: "## Task and intent\nInspect the repository and report.\n## Files and code state\nsrc/loop.ts read.\n## Next steps\nContinue with the third task.",
           toolCalls: [],
@@ -315,21 +315,24 @@ scene = "4";
     { text: "Read done.", toolCalls: [], stopReason: "end", usage: { inputTokens: 7400, outputTokens: 30 } },
     { text: "Second answer after compaction.", toolCalls: [], stopReason: "end", usage: { inputTokens: 1800, outputTokens: 20 } },
   ]);
-  const { app } = boot(provider, {
+  const { app, log } = boot(provider, {
     tools: [bash, bigRead, echo],
     compaction: { strategy: llmSummarize(), window: 8000, reserveTokens: 1000, trigger: "remind" },
     reserveTokens: 1000,
     compactionName: "llm",
   });
   const shots: string[] = [];
+  await app.command("/set preservation tokens 500");
   await app.submit("Read the README and tell me what this is.");
   shots.push(...divider("trigger = remind: past the threshold, the status bar asks for /compact"), ...app.lines(W));
   await app.command("/set compaction manual");
   await app.command("/compact keep the file names");
-  shots.push(...divider("/compaction manual then /compact with an instruction"), ...app.lines(W).slice(-14));
+  if (!log.events.some((e) => e.type === "compaction" && e.summary))
+    throw new Error("Compaction preview did not produce a summary");
+  shots.push(...divider("/set compaction manual then /compact with an instruction"), ...app.lines(W).slice(-14));
   await app.submit("What did you keep?");
   await app.command("/inspect usage");
-  shots.push(...divider("next request after compaction and /context"), ...app.lines(W).slice(-30));
+  shots.push(...divider("next request after compaction and /inspect usage"), ...app.lines(W).slice(-30));
   app.inspector.openCompactions();
   shots.push(...divider("Ctrl+R Tab Tab: compactions"), ...app.inspector.lines(W));
   app.inspector.key("\r");

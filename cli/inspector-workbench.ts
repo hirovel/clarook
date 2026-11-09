@@ -3,14 +3,19 @@
 // 上次请求相同前缀到哪一条,就在那条下面画一条线,改动发生在线上方时线上移变金。
 // 全部是纯函数:输入是事件、上次发出的消息、工具定义;没有自己的状态,每次事件到达重画一遍。
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { estimateTokens, eventTokens } from "../src/context.js";
+import {
+  estimateTokens,
+  eventTokens,
+  messageTokens,
+  toolDefinitionTokens,
+} from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
 import { compactionState, editState, type Message } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
 import { firstLine, unchangedPrefix } from "./cards.js";
 import { type CompositionRow, compositionRows } from "./inspector-composition.js";
 import { eventSummary } from "./inspector-events.js";
-import { fmtTok, messageTokens } from "./inspector-format.js";
+import { fmtTok } from "./inspector-format.js";
 import { SECTION_LABELS } from "./prompt.js";
 import { c, G, selectedText } from "./theme.js";
 
@@ -34,7 +39,7 @@ export type WorkbenchRow =
 
 export type Workbench = {
   rows: WorkbenchRow[];
-  /** 下一次请求的估算总量(消息加工具定义)。 */
+  /** 已知消息文本与当前工具声明的粗估;媒体、私有回传物与协议封装未计入。 */
   total: number;
   /** 相同前缀的估算 token(上次前缀里未变的部分)。 */
   prefixTokens: number | undefined;
@@ -57,10 +62,6 @@ export type WorkbenchInput = {
 export function shortSection(name: string): string {
   const hit = (Object.entries(SECTION_LABELS) as [string, string][]).find(([, v]) => v === name);
   return hit ? hit[0] : name;
-}
-
-export function toolTokens(defs: ToolDef[]): number {
-  return defs.reduce((n, d) => n + estimateTokens(JSON.stringify(d)), 0);
 }
 
 export function workbench(input: WorkbenchInput): Workbench {
@@ -138,7 +139,7 @@ export function workbench(input: WorkbenchInput): Workbench {
         sections,
         edited: ed.edits.has(r.event),
       });
-      const ttok = toolTokens(tools);
+      const ttok = toolDefinitionTokens(tools);
       total += ttok;
       rows.push({ kind: "tools", count: tools.length, names: tools.map((t) => t.name), tok: ttok });
     } else rows.push({ kind: "message", row: r, tok });
@@ -476,9 +477,7 @@ export function previewLines(
         );
       }
       if (m.role === "assistant" && m.reasoning)
-        meta.push(
-          `thinking ${m.reasoningKind ?? "?"} ${estimateTokens(m.reasoning)} tok${m.edited ? ", not echoed back after an edit" : ""}`,
-        );
+        meta.push(`thinking ${m.reasoningKind ?? "?"} ${estimateTokens(m.reasoning)} tok`);
       if (r.row.stages.some((s) => s.startsWith("summary"))) meta.push("written by the compaction");
       if (r.row.stages.includes("cleared"))
         meta.push("placeholder · the original stays in the event");
@@ -489,7 +488,7 @@ export function previewLines(
           ? "position unknown"
           : r.row.wire < 0
             ? "top-level field"
-            : `next request messages[${r.row.wire}]`,
+            : `projected messages[${r.row.wire}]`,
       );
       if (src) meta.push(`from event ${src.type}`);
       out.push(head(`#${r.row.event} ${roleOf(m)}`, meta.join(" · ")));

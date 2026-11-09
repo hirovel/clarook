@@ -71,6 +71,8 @@ export type CommonArgs = {
   systemPromptFile?: string;
   appendSystemPromptFile?: string;
   maxSteps?: number;
+  subagentMaxSteps?: number | null;
+  subagentDepth?: number;
   json: boolean;
   help: boolean;
   /** 审批槽:all(缺省)= 不问;policy = 按规则裁决,ask 的才问人;ask = 每个调用都问。 */
@@ -119,6 +121,7 @@ export type CommonArgs = {
   compactionExplicit?: boolean;
   approveExplicit?: boolean;
   subagentExplicit?: boolean;
+  maxStepsExplicit?: boolean;
   foldExplicit?: boolean;
 };
 
@@ -126,6 +129,8 @@ export type CommonArgs = {
 export function settingsFromArgs(args: CommonArgs): Preset {
   const values: Record<string, unknown> = {
     ...args,
+    "subagents.maxSteps": args.subagentMaxSteps,
+    "subagents.depth": args.subagentDepth,
     "tools.disable": args.disabledTools,
     "facts.repeats": args.facts?.repeats,
     "facts.slow": args.facts?.slow,
@@ -236,8 +241,20 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
       case "--append-system-prompt":
         out.appendSystemPromptFile = takeValue(i++, a);
         break;
-      case "--max-steps":
-        out.maxSteps = Number(takeValue(i++, a));
+      case "--max-steps": {
+        const limit = parseRegisteredSetting("maxSteps", takeValue(i++, a)) as number | undefined;
+        if (limit === undefined) delete out.maxSteps;
+        else out.maxSteps = limit;
+        out.maxStepsExplicit = true;
+        break;
+      }
+      case "--subagent-max-steps":
+        out.subagentMaxSteps = parseRegisteredSetting("subagents.maxSteps", takeValue(i++, a)) as
+          | number
+          | null;
+        break;
+      case "--subagent-depth":
+        out.subagentDepth = parseRegisteredSetting("subagents.depth", takeValue(i++, a)) as number;
         break;
       case "--subagent":
         out.subagent = true;
@@ -444,8 +461,10 @@ Options
   --compaction-max-tokens N      summary output limit (default 13107); 0 uses provider configuration
   --compaction-acceptance complete|smaller|reduced   apply complete summaries (default), or require size reduction
   --extension <module.mjs>       load an extension module (repeatable): add tools, replace slot implementations
-  --max-steps N                  termination guard (default: no limit)
+  --max-steps N|none             model steps per main turn (default: no limit)
   --subagent                     add the task tool (sub-agents)
+  --subagent-max-steps N|inherit  steps per child run; a type may override (default: inherit parent)
+  --subagent-depth N             child generations from main; 1 means children cannot delegate (default: 1)
   --no-save-inputs               disable local draft and pending-input saving (default: on)
   --fold                         tool results start folded (the default; config fold: false starts unfolded; Ctrl+O toggles)
   --show-cost-estimate           show a token-based estimate, not the provider bill (default: off)
@@ -538,10 +557,28 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
       out.systemPromptFile = layer.systemPromptFile;
     if (out.appendSystemPromptFile === undefined && layer.appendSystemPromptFile)
       out.appendSystemPromptFile = layer.appendSystemPromptFile;
-    if (out.maxSteps === undefined && !settled.has("maxSteps") && layer.maxSteps !== undefined) {
-      if (layer.maxSteps !== null) out.maxSteps = layer.maxSteps;
+    if (
+      out.maxSteps === undefined &&
+      open("maxSteps", args.maxStepsExplicit) &&
+      layer.maxSteps !== undefined
+    ) {
+      if (layer.maxSteps !== null)
+        out.maxSteps = parseRegisteredSetting("maxSteps", String(layer.maxSteps)) as number;
       settled.add("maxSteps");
     }
+    if (out.subagentMaxSteps === undefined && layer.subagents?.maxSteps !== undefined)
+      out.subagentMaxSteps =
+        layer.subagents.maxSteps === null
+          ? null
+          : (parseRegisteredSetting(
+              "subagents.maxSteps",
+              String(layer.subagents.maxSteps),
+            ) as number);
+    if (out.subagentDepth === undefined && layer.subagents?.depth !== undefined)
+      out.subagentDepth = parseRegisteredSetting(
+        "subagents.depth",
+        String(layer.subagents.depth),
+      ) as number;
     if (out.execution === undefined && layer.execution) out.execution = layer.execution;
     if (out.steering === undefined && layer.steering) out.steering = layer.steering;
     if (

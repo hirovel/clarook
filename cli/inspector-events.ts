@@ -37,8 +37,9 @@ const KERNEL = new Set([
   "session/model",
   "session/interrupt",
   "session/recovered",
+  "tools/snapshot",
 ]);
-const CHANGES = new Set(["context/edit", "context/drop", "compaction"]);
+const CHANGES = new Set(["context/edit", "context/drop", "compaction", "tools/snapshot"]);
 
 export function eventPasses(e: AgentEvent, filter: EventFilter): boolean {
   switch (filter) {
@@ -144,6 +145,12 @@ export function eventSummary(
         tok: eventTokens(e),
       };
     }
+    case "tools/snapshot":
+      return {
+        sign: G.note,
+        text: `tool definitions · ${plural(e.tools.length, "tool")}${e.tools.length ? ` · ${e.tools.map((tool) => tool.name).join(" ")}` : ""}`,
+        tok: undefined,
+      };
     case "request": {
       // 类型列已经写着 request,正常步不再重复一遍;只有压缩与溢出重发要点名。
       const kind =
@@ -389,6 +396,10 @@ export function eventViewLines(
       out.push(row("call", e.callId));
       out.push(row("size", `${e.content.length} chars · ≈${eventTokens(e)} tok`));
       out.push(...block("content", e.content));
+      break;
+    case "tools/snapshot":
+      out.push(row("tools", e.tools.map((tool) => tool.name).join(" ") || "(none)"));
+      out.push(...block("definitions", JSON.stringify(e.tools, null, 2)));
       break;
     case "request":
       out.push(row("reason", e.reason));

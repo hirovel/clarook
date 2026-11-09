@@ -1,16 +1,21 @@
 // 编辑上下文:投影层的编辑与丢弃、回传物丢弃、Anthropic 前缀绑定、界面命令与拒绝条件。
 import { describe, expect, it } from "vitest";
+import { actionsFor, compositionRows } from "../cli/inspector-composition.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import { EventLog } from "../src/log.js";
-import { deriveMessages, editState } from "../src/messages.js";
+import { composeContext, deriveMessages, editState, type Message } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
-import { toAnthropicWire } from "../src/providers/anthropic.js";
+import { anthropic, toAnthropicWire } from "../src/providers/anthropic.js";
+import { openaiCompat } from "../src/providers/openai-chat.js";
 import { VirtualTerminal } from "./helpers/virtual-terminal.js";
 
 const thinking = (model: string) => ({
   kind: "anthropic-thinking",
   model,
-  blocks: [{ type: "thinking", thinking: "t", signature: "sig" }],
+  blocks: [
+    { type: "thinking", thinking: "t", signature: "sig" },
+    { type: "redacted_thinking", data: "redacted" },
+  ],
 });
 
 function sample(): EventLog {
@@ -79,14 +84,78 @@ describe("投影应用编辑", () => {
     expect(editState(log.events).edits.get(2)).toEqual({ reasoning: "再改一次" });
   });
 
-  it("drop 助手消息连同它的工具结果一起跳过;drop 用户消息只跳过自己", () => {
-    const log = sample();
-    log.append({ type: "context/drop", at: "", target: 2 });
-    let roles = deriveMessages(log.events).map((m) => m.role);
-    expect(roles).toEqual(["system", "user", "assistant", "user"]);
-    log.append({ type: "context/drop", at: "", target: 5 });
-    roles = deriveMessages(log.events).map((m) => m.role);
-    expect(roles).toEqual(["system", "user", "assistant"]);
+  it("drop 只移除目标与所属工具结果,Anthropic 仅丢后继思考块,Chat reasoning 与旧请求保持", () => {
+    const log = new EventLog();
+    const events = sample().events;
+    for (const e of events.slice(0, 2)) log.append(e);
+    log.append({
+      type: "assistant/message",
+      at: "",
+      text: "before",
+      toolCalls: [],
+      stopReason: "end",
+      reasoning: "before reasoning",
+      reasoningKind: "full",
+      opaque: thinking("m"),
+    });
+    log.append({ type: "user/message", at: "", text: "middle user" });
+    for (const e of events.slice(2)) log.append(e);
+    const provider = anthropic({ apiKey: "", model: "m", promptCache: false });
+    const wire = (messages: Message[]) =>
+      provider.wire?.(messages, []) as { messages: ReturnType<typeof toAnthropicWire>["messages"] };
+    const assistantBlocks = (messages: Message[]) =>
+      wire(messages)
+        .messages.filter((m) => m.role === "assistant")
+        .map((m) => m.content.map((b) => b.type));
+    const chat = openaiCompat({
+      apiKey: "",
+      baseUrl: "http://unused",
+      model: "m",
+      reasoningField: "reasoning_content",
+    });
+    for (const { target, contents, blocks, reasoning } of [
+      {
+        target: 3,
+        contents: ["S", "u1", "before", "a1", "R1", "a2", "u2"],
+        blocks: [["thinking", "redacted_thinking", "text"], ["text", "tool_use"], ["text"]],
+        reasoning: ["before reasoning", "想法一", "想法二"],
+      },
+      {
+        target: 4,
+        contents: ["S", "u1", "before", "middle user", "a2", "u2"],
+        blocks: [["thinking", "redacted_thinking", "text"], ["text"]],
+        reasoning: ["before reasoning", "想法二"],
+      },
+      {
+        target: 7,
+        contents: ["S", "u1", "before", "middle user", "a1", "R1", "a2"],
+        blocks: [
+          ["thinking", "redacted_thinking", "text"],
+          ["thinking", "redacted_thinking", "text", "tool_use"],
+          ["thinking", "redacted_thinking", "text"],
+        ],
+        reasoning: ["before reasoning", "想法一", "想法二"],
+      },
+    ]) {
+      const dropped = new EventLog();
+      for (const e of log.events) dropped.append(e);
+      const upTo = dropped.events.length;
+      const original = structuredClone(composeContext(dropped.events));
+      const originalWire = wire(original.messages);
+      dropped.append({ type: "context/drop", at: "", target });
+      const current = composeContext(dropped.events);
+      expect(current.messages.map((m) => m.content)).toEqual(contents);
+      expect(assistantBlocks(current.messages)).toEqual(blocks);
+      expect(current.messages.some((m) => m.edited)).toBe(false);
+      const chatWire = chat.wire?.(current.messages, []) as {
+        messages: { role: string; reasoning_content?: string }[];
+      };
+      expect(
+        chatWire.messages.filter((m) => m.role === "assistant").map((m) => m.reasoning_content),
+      ).toEqual(reasoning);
+      expect(composeContext(dropped.events, upTo)).toEqual(original);
+      expect(wire(composeContext(dropped.events, upTo).messages)).toEqual(originalWire);
+    }
   });
 
   it("Anthropic:前缀里有编辑过的消息,之后所有思考块都不再回传;编辑点之前的照常", () => {
@@ -101,11 +170,12 @@ describe("投影应用编辑", () => {
 });
 
 describe("界面命令", () => {
-  function app(log: EventLog) {
+  function app(log: EventLog, sent: Message[][] = []) {
     const provider: Provider = {
       model: "m",
       fields: { protocol: "anthropic(messages)", sends: [], reads: [], ignores: [] },
-      async complete(): Promise<AssistantTurn> {
+      async complete(messages): Promise<AssistantTurn> {
+        sent.push(structuredClone(messages));
         return { text: "", toolCalls: [], stopReason: "end" };
       },
     };
@@ -127,6 +197,67 @@ describe("界面命令", () => {
       .lines(100)
       .map((l) => l.replace(ansi, ""))
       .join("\n");
+
+  it("摘要覆盖区不接受无效修改或跨区回退,可见区修改仍进入下一请求", async () => {
+    const log = sample();
+    log.append({ type: "context/edit", at: "", target: 2, field: "text", value: "edited a1" });
+    log.append({
+      type: "compaction",
+      at: "",
+      summary: "Earlier work including a2",
+      coversFrom: 2,
+      coversUpTo: 5,
+    });
+    log.append({ type: "user/message", at: "", text: "message after compaction" });
+    const sent: Message[][] = [];
+    const a = app(log, sent);
+    try {
+      const before = deriveMessages(log.events);
+      const events = log.events.length;
+      const rows = compositionRows(log.events).rows;
+      const summary = rows.find((row) => row.stages.some((stage) => stage.startsWith("summary")));
+      if (!summary) throw new Error("Missing summary row");
+      expect(actionsFor(log.events, summary, rows.length).map((item) => item.action)).not.toContain(
+        "rewind",
+      );
+      for (const operation of ["2 text new answer", "drop 2", "restore 2", "rewind 2"]) {
+        await a.command(`/edit ${operation}`);
+        expect(log.events).toHaveLength(events);
+        expect(deriveMessages(log.events)).toEqual(before);
+      }
+      expect(text(a)).toContain("compacted");
+      await a.command("/edit 5 content updated tail");
+      await a.submit("Confirm current input");
+      expect(sent[0]).toContainEqual(expect.objectContaining({ content: "updated tail" }));
+      expect(sent[0]).toContainEqual(
+        expect.objectContaining({ content: expect.stringContaining("Earlier work including a2") }),
+      );
+      await a.command(`/edit rewind ${summary.event}`);
+      const rewound = deriveMessages(log.events);
+      expect(rewound).toContainEqual(expect.objectContaining({ content: "updated tail" }));
+      expect(rewound).not.toContainEqual(
+        expect.objectContaining({ content: "message after compaction" }),
+      );
+    } finally {
+      a.stop();
+    }
+  });
+
+  it("已清除的工具结果拒绝无效编辑,保留模型实际看到的占位内容", async () => {
+    const log = sample();
+    log.append({ type: "compaction", at: "", cleared: [3] });
+    const a = app(log);
+    try {
+      const before = deriveMessages(log.events);
+      const events = log.events.length;
+      await a.command("/edit 3 content replacement result");
+      expect(log.events).toHaveLength(events);
+      expect(deriveMessages(log.events)).toEqual(before);
+      expect(text(a)).toContain("cleared from current input");
+    } finally {
+      a.stop();
+    }
+  });
 
   it("/edit 内联文本追加 context/edit 并打印后果;摘要思考拒绝编辑;/drop;/edits", async () => {
     const log = sample();

@@ -37,7 +37,7 @@ export async function prepareSessionRuntime(options: {
   connections?: McpConnections;
   onChild?: (child: ChildInfo) => void;
   slots?: () => TurnDeps["slots"];
-  current?: () => { provider: Provider; tools: readonly Tool[] } | undefined;
+  current?: () => { provider: Provider; modelLocator: string; tools: readonly Tool[] } | undefined;
   allowUnavailable?: boolean;
   descriptions?: Record<string, string>;
   confirmProjectMcp?: (review: ProjectMcpReview) => Promise<boolean>;
@@ -194,16 +194,26 @@ export async function prepareSessionRuntime(options: {
     throw error;
   }
   try {
+    const slots: TurnDeps["slots"] = {
+      ...root.slots,
+      ...(args.maxSteps !== undefined && { termination: maxSteps(args.maxSteps) }),
+      ...(args.execution && { execution: args.execution }),
+      ...(args.steering === "turn" && { steering: queueToTurnEnd }),
+    };
     const current = () =>
       options.current?.() ?? {
         provider: choice.provider,
+        modelLocator: `${choice.providerName}/${choice.model}`,
         tools: root.tools.filter((t) => !args.disabledTools?.includes(t.name)),
       };
     if (args.subagent && !root.tools.some((t) => t.name === "task")) {
       const task = createTaskTool({
         ...boot.config.subagents,
+        ...(args.subagentMaxSteps != null && { maxSteps: args.subagentMaxSteps }),
+        ...(args.subagentDepth !== undefined && { depth: args.subagentDepth }),
         parent: log,
         provider: () => current().provider,
+        modelLocator: () => current().modelLocator,
         tools: (childLog) => {
           // 初始化前固定名称与描述;执行闭包由 assemble 重新创建。
           const enabled = current().tools;
@@ -229,19 +239,19 @@ export async function prepareSessionRuntime(options: {
           return fork(childLog);
         },
         compaction,
-        providerFor: (model) => boot.choose(model).provider,
+        providerFor: (model) => {
+          const selected = boot.choose(model);
+          return {
+            provider: selected.provider,
+            modelLocator: `${selected.providerName}/${selected.model}`,
+          };
+        },
         ...(options.onChild && { onChild: options.onChild }),
-        ...(options.slots && { slots: options.slots }),
+        slots: () => options.slots?.() ?? slots,
       });
       applyToolPrompts([task], toolPrompts);
       root.tools.push(task);
     }
-    const slots: TurnDeps["slots"] = {
-      ...root.slots,
-      ...(args.maxSteps !== undefined && { termination: maxSteps(args.maxSteps) }),
-      ...(args.execution && { execution: args.execution }),
-      ...(args.steering === "turn" && { steering: queueToTurnEnd }),
-    };
     return {
       choice,
       compaction,

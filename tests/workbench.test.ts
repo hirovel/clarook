@@ -269,7 +269,7 @@ describe("工作台的界面", () => {
     await tick();
     expect(app.inspector.isOpen()).toBe(true);
     let s = ins();
-    expect(s).toContain("Context · Next request");
+    expect(s).toContain("Context · Current projection");
     expect(s).toMatch(/≈\d+ tok of 100k/);
     expect(s).toMatch(/#0\s+system\s+role · env/);
     expect(s).toMatch(/tools\s+1 definition\s+echo/);

@@ -1,4 +1,4 @@
-// 两个工具入口共用一个可取消的 rg 进程;只在此处决定遍历范围与忽略目录。
+// 搜索工具与文件补全共用可取消的 rg 遍历;只在此处决定范围与忽略目录。
 import { spawn } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { basename, dirname, resolve, sep } from "node:path";
@@ -90,6 +90,31 @@ function globToRegExp(pattern: string): RegExp {
 
 const capLine = capLineLength(500);
 
+/** 只列文件名;补全与 glob 共享忽略规则和 20000 个文件的扫描边界。 */
+export async function listFiles(
+  root: string,
+  signal: AbortSignal,
+): Promise<{ paths: string[]; limited: boolean }> {
+  if (!existsSync(root)) return { paths: [], limited: false };
+  const rootIsFile = statSync(root).isFile();
+  const paths: string[] = [];
+  let limited = false;
+  await searchLines(
+    ["--files", rootIsFile ? basename(root) : "."],
+    rootIsFile ? dirname(root) : root,
+    signal,
+    (line) => {
+      if (paths.length >= 20000) {
+        limited = true;
+        return false;
+      }
+      paths.push(line.split(sep).join("/").replace(/^\.\//, ""));
+      return true;
+    },
+  );
+  return { paths, limited };
+}
+
 export function createGrepTool(opts: { maxResults?: number } = {}) {
   const maxResults = opts.maxResults ?? 200;
   return defineTool({
@@ -180,27 +205,9 @@ export const globTool = defineTool({
   concurrency: "parallel",
   async execute(args, ctx) {
     const root = resolve(args.path ?? ".");
-    if (!existsSync(root)) return "(no matches)";
-    const rootIsFile = statSync(root).isFile();
     const re = globToRegExp(args.pattern);
-    const files: string[] = [];
-    let scanned = 0;
-    let scanLimited = false;
-    await searchLines(
-      ["--files", rootIsFile ? basename(root) : "."],
-      rootIsFile ? dirname(root) : root,
-      ctx.signal,
-      (line) => {
-        if (scanned >= 20000) {
-          scanLimited = true;
-          return false;
-        }
-        scanned++;
-        const path = line.split(sep).join("/").replace(/^\.\//, "");
-        if (re.test(path)) files.push(path);
-        return true;
-      },
-    );
+    const { paths, limited: scanLimited } = await listFiles(root, ctx.signal);
+    const files = paths.filter((path) => re.test(path));
     files.sort();
     if (files.length === 0)
       return scanLimited ? "(no matches in first 20000 files; scan incomplete)" : "(no matches)";

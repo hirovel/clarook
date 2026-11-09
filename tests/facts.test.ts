@@ -1,5 +1,7 @@
 // 事实附注与计划复述:代码算的事实贴在产生它的事件上,模型写的计划只在压缩后或久未更新时复述到末尾;
 // 两者都只追加,前缀不动。还量了三种注入方式的重算代价,证明"贴在事件上"是缓存代价最低的一种。
+import { readFileSync, rmSync } from "node:fs";
+import { dirname } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { buildTools } from "../cli/bootstrap.js";
@@ -12,7 +14,8 @@ import { runTurn } from "../src/loop.js";
 import { deriveMessages, type Message } from "../src/messages.js";
 import { planState, planText, planTool, stepsSincePlan } from "../src/plan.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
-import { defineTool } from "../src/tools.js";
+import { defineTool, ToolOutcomeUnknownError } from "../src/tools.js";
+import { testDirectory } from "./helpers/setup.js";
 
 function scripted(turns: AssistantTurn[]): Provider {
   let i = 0;
@@ -176,7 +179,8 @@ describe("事实附注", () => {
     expect(next?.type === "user/message" && next.text).toMatch(
       /^The date is now \d{4}-\d{2}-\d{2}\.$/,
     );
-    expect(log.events[i + 2]?.type).toBe("request");
+    const request = log.events.slice(i + 2).find((event) => event.type !== "tools/snapshot");
+    expect(request?.type).toBe("request");
   });
 
   it("bash 的工作目录跨调用保持:cd 之后下一次从那里起,结果末尾说目录变了", async () => {
@@ -202,6 +206,31 @@ describe("事实附注", () => {
       expect(pwd.replace(/\\/g, "/").toLowerCase()).toBe(
         process.cwd().replace(/\\/g, "/").toLowerCase(),
       );
+    }
+    const target = testDirectory("kernel-bash-cwd-").replace(/\\/g, "/");
+    const failure = await tool
+      .execute(
+        {
+          command: `cd "${target}"; sleep 2 & printf 'CWD_CAPTURE_PREFIX'; printf '%060000d\\n' 0; echo DONE`,
+          timeout: 0.2,
+        },
+        { signal },
+      )
+      .then(
+        () => undefined,
+        (error: Error) => error,
+      );
+    const captured = failure?.message.match(/Full output: (.+)\]/)?.[1];
+    try {
+      expect(failure).toBeInstanceOf(ToolOutcomeUnknownError);
+      expect.soft(failure?.message).toContain(`[cwd is now ${target}]`);
+      expect.soft(failure?.message).not.toContain("\u001f");
+      expect(failure?.message).toContain("DONE");
+      expect(captured && readFileSync(captured, "utf8")).toContain("CWD_CAPTURE_PREFIX");
+      const after = await tool.execute({ command: "pwd -W 2>/dev/null || pwd" }, { signal });
+      expect.soft(after.replace(/\\/g, "/").toLowerCase()).toBe(target.toLowerCase());
+    } finally {
+      if (captured) rmSync(dirname(captured), { recursive: true, force: true });
     }
   });
 });

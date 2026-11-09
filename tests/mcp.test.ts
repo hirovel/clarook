@@ -38,6 +38,7 @@ import type { AgentEvent } from "../src/events.js";
 import { toolOutput } from "../src/exchange.js";
 import { priorFailures } from "../src/facts.js";
 import { EventLog } from "../src/log.js";
+import type { ToolDef } from "../src/provider.js";
 import { Recording } from "../src/recording.js";
 import { recordUnresolvedCalls, unresolvedCalls } from "../src/recovery.js";
 import type { Tool } from "../src/tools.js";
@@ -159,6 +160,76 @@ setInterval(() => {}, 1000);
             process.kill(pid, "SIGKILL");
           } catch {
             /* already stopped */
+          }
+        }
+      }
+    },
+    10000,
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "父进程已退或关闭期间退出,close 仍停止同组后代并释放本地管道",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "clarook-mcp-exit-"));
+      tempDirs.push(dir);
+      const script = join(dir, "server.mjs");
+      const driver = join(dir, "close.mts");
+      const pidFile = join(dir, "pids.json");
+      writeFileSync(
+        script,
+        `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+  stdio: ["ignore", "inherit", "inherit"],
+});
+writeFileSync(process.argv[2], JSON.stringify([process.pid, helper.pid]));
+createInterface({ input: process.stdin }).on("line", line => {
+  const message = JSON.parse(line);
+  if (message.method !== "server/discover") return;
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { supportedVersions: ["2026-07-28"] } }) + "\\n");
+  if (process.argv[3] === "before") setImmediate(() => process.exit(0));
+}).on("close", () => process.exit(0));
+`,
+      );
+      writeFileSync(
+        driver,
+        `import { McpClient } from ${JSON.stringify(pathToFileURL(resolve("cli/mcp/client.ts")).href)};
+let exited;
+const parentExited = new Promise(resolve => { exited = resolve; });
+const client = new McpClient("tree", {
+  command: process.execPath,
+  args: [${JSON.stringify(script)}, ${JSON.stringify(pidFile)}, process.argv[2]],
+}, { onExit: exited });
+await client.connect(3000);
+if (process.argv[2] === "before") await parentExited;
+await client.close();
+console.log("closed");
+`,
+      );
+      for (const mode of ["before", "during"]) {
+        const result = spawnSync(process.execPath, ["--import", "tsx", driver, mode], {
+          encoding: "utf8",
+          timeout: 4000,
+        });
+        const [parentPid, helperPid] = JSON.parse(readFileSync(pidFile, "utf8")) as number[];
+        try {
+          expect(result.error).toBeUndefined();
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.stdout).toContain("closed");
+          await expect
+            .poll(() => {
+              const status = spawnSync("ps", ["-o", "stat=", "-p", String(helperPid)], {
+                encoding: "utf8",
+              }).stdout.trim();
+              return status === "" || status.startsWith("Z");
+            })
+            .toBe(true);
+        } finally {
+          try {
+            process.kill(-(parentPid as number), "SIGKILL");
+          } catch {
+            /* 本例拥有的进程组已经退出。 */
           }
         }
       }
@@ -301,13 +372,41 @@ setInterval(() => {}, 1000);
     await connections.close();
   });
 
-  it("legacy:initialize 握手;第一次调用后 list_changed → 工具表原地刷新并记 mcp/tools", async () => {
+  it("legacy:initialize 握手;list_changed 刷新目录,分页失败保留旧工具", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "clarook-mcp-refresh-"));
+    tempDirs.push(dir);
+    const script = join(dir, "refresh.mjs");
+    writeFileSync(
+      script,
+      `import { createInterface } from "node:readline";
+import { createLogic } from ${JSON.stringify(pathToFileURL(helper).href)};
+const handle = createLogic({ era: "legacy", tools: 1, listChanged: true });
+const send = message => process.stdout.write(JSON.stringify(message) + "\\n");
+let pagination;
+createInterface({ input: process.stdin }).on("line", line => {
+  const message = JSON.parse(line);
+  if (message.method === "tools/list" && pagination) {
+    send({ jsonrpc: "2.0", id: message.id, result: {
+      tools: message.params?.cursor ? [] : [{ name: "partial", inputSchema: { type: "object" } }],
+      nextCursor: pagination === "repeat" ? "again" : String(Number(message.params?.cursor ?? 0) + 1),
+    } });
+    return;
+  }
+  for (const reply of handle(message, send)) send(reply);
+  const mode = message.params?.arguments?.text;
+  if (message.method === "tools/call" && ["repeat", "endless"].includes(mode)) {
+    pagination = mode;
+    send({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+  }
+}).on("close", () => process.exit(0));
+`,
+    );
     const log = new EventLog();
     const tools: Tool[] = [];
-    const bridge = await connectMcpServers(
-      [stdioServer("old", ["--era", "legacy", "--tools", "1", "--list-changed"])],
-      { log, tools },
-    );
+    const bridge = await connectMcpServers([stdioServer("old", [], { args: [script] })], {
+      log,
+      tools,
+    });
     let sent: string[] = [];
     const agent = new Agent({
       log,
@@ -338,7 +437,31 @@ setInterval(() => {}, 1000);
     expect(change).toMatchObject({ removed: [], total: 6 });
     await agent.prompt("Use the refreshed tool catalog.");
     expect(sent).toContain("mcp__old__t_new");
-    await bridge.close();
+    try {
+      const names = tools.map((tool) => tool.name);
+      for (const mode of ["repeat", "endless"] as const) {
+        const before = log.events.length;
+        await find(tools, "mcp__old__echo").execute({ text: mode }, ctx);
+        await expect
+          .poll(() =>
+            mcpEvents(log.events.slice(before)).find(
+              (event) =>
+                event.kind === "log" && event.line.includes("tools/list after list_changed failed"),
+            ),
+          )
+          .toMatchObject({
+            kind: "log",
+            line: expect.stringMatching(
+              mode === "repeat" ? /repeated cursor/ : /exceeded 100 pages/,
+            ),
+          });
+        expect(tools.map((tool) => tool.name)).toEqual(names);
+        await agent.prompt("Use the existing complete catalog.");
+        expect(sent).toContain("mcp__old__t_new");
+      }
+    } finally {
+      await bridge.close();
+    }
   });
 
   it("enabledTools / disabledTools;启动失败只记事件,required 才抛;进程崩溃 → closed", async () => {
@@ -690,7 +813,7 @@ describe("命名、白黑名单、内容转换、审批规则、配置", () => {
     expect(() => trustProjectMcp(first)).toThrow(/changed during review/);
   });
 
-  it("bridgedName 稳定消歧,注册及刷新不混淆工具;toolAllowed;contentToText 各类型", async () => {
+  it("bridgedName 稳定消歧;刷新保留请求顺序,真实增删与定义更新生效;toolAllowed;contentToText 各类型", async () => {
     const long = bridgedName("s", "x".repeat(200));
     expect(long).toHaveLength(128);
     expect(long).toMatch(/_[0-9a-f]{12}$/);
@@ -715,6 +838,7 @@ describe("命名、白黑名单、内容转换、审批规则、配置", () => {
       ["a", ["b__c", "_b"]],
     ]);
     const callbacks = new Map<string, McpClientOptions>();
+    let updated = false;
     const tools: Tool[] = [];
     const log = new EventLog();
     const bridge = await connectMcpServers(
@@ -732,13 +856,27 @@ describe("命名、白黑名单、内容转换、审批规则、配置", () => {
               return (
                 definitions.get(server.name)?.map((name) => ({
                   name,
-                  description: `${server.name}/${name}`,
-                  inputSchema: { type: "object" },
+                  description: `${server.name}/${name}${updated && server.name === "a.b" ? " updated" : ""}`,
+                  inputSchema:
+                    updated && server.name === "a.b"
+                      ? {
+                          type: "object",
+                          properties: { value: { type: "number" } },
+                          required: ["value"],
+                        }
+                      : { type: "object" },
                 })) ?? []
               );
             },
-            async callTool(name: string) {
-              return { content: [{ type: "text", text: `${server.name}/${name}` }] };
+            async callTool(name: string, args: unknown) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `${server.name}/${name}${updated && server.name === "a.b" ? ` updated ${JSON.stringify(args)}` : ""}`,
+                  },
+                ],
+              };
             },
             async close() {},
           } as unknown as McpClient;
@@ -747,39 +885,76 @@ describe("命名、白黑名单、内容转换、审批规则、配置", () => {
     );
     try {
       expect(new Set(tools.map((tool) => tool.name)).size).toBe(8);
-      const expectedNames = tools.map((tool) => tool.name).sort();
+      const expectedNames = tools.map((tool) => tool.name);
       let step = 0;
+      let sent: ToolDef[] = [];
       const agent = new Agent({
         log: new EventLog(),
         tools,
         provider: {
           model: "fake",
-          async complete(messages) {
+          async complete(messages, toolDefinitions) {
+            sent = toolDefinitions;
             if (step++ === 0)
               return {
                 text: "",
                 toolCalls: tools.map((tool, i) => ({ id: `call-${i}`, name: tool.name, args: {} })),
                 stopReason: "tool",
               };
-            expect(
-              messages
-                .filter((message) => message.role === "tool")
-                .map((message) => message.content),
-            ).toEqual(tools.map((tool) => tool.description));
+            if (step === 2)
+              expect(
+                messages
+                  .filter((message) => message.role === "tool")
+                  .map((message) => message.content),
+              ).toEqual(tools.map((tool) => tool.description));
             return { text: "done", toolCalls: [], stopReason: "end" };
           },
         },
       });
       await agent.prompt("Use each registered tool.");
+      const initialDefinitions = sent;
+      callbacks.get("a.b")?.onNotification?.("notifications/tools/list_changed", {});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await agent.prompt("Use the unchanged catalog.");
+      expect(sent).toEqual(initialDefinitions);
+      expect(bridge.toolNames()).toEqual(expectedNames);
       definitions.set("a.b", ["a_b", "a.b"]);
       callbacks.get("a.b")?.onNotification?.("notifications/tools/list_changed", {});
       await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(tools.map((tool) => tool.name).sort()).toEqual(expectedNames);
+      await agent.prompt("Use the catalog after the server reordered its response.");
+      expect(sent).toEqual(initialDefinitions);
+      expect(bridge.toolNames()).toEqual(expectedNames);
       expect(await find(tools, bridgedName("a_b", "a_b")).execute({}, ctx)).toBe("a_b/a_b");
+      updated = true;
+      definitions.set("a.b", ["new", "a_b"]);
+      callbacks.get("a.b")?.onNotification?.("notifications/tools/list_changed", {});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await agent.prompt("Use the updated catalog.");
+      const changedNames = [
+        bridgedName("a.b", "a_b"),
+        ...expectedNames.slice(2),
+        bridgedName("a.b", "new"),
+      ];
+      expect(sent.map((definition) => definition.name)).toEqual(changedNames);
+      expect(bridge.toolNames()).toEqual(changedNames);
+      expect(sent[0]).toEqual({
+        name: bridgedName("a.b", "a_b"),
+        description: "a.b/a_b updated",
+        parameters: {
+          type: "object",
+          properties: { value: { type: "number" } },
+          required: ["value"],
+        },
+      });
+      expect(await find(tools, bridgedName("a.b", "a_b")).execute({ value: 7 }, ctx)).toBe(
+        'a.b/a_b updated {"value":7}',
+      );
+      const changedDefinitions = sent;
       definitions.set("a.b", ["a_b", "a_b"]);
       callbacks.get("a.b")?.onNotification?.("notifications/tools/list_changed", {});
       await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(tools.map((tool) => tool.name).sort()).toEqual(expectedNames);
+      await agent.prompt("Use the last valid catalog after a duplicate response.");
+      expect(sent).toEqual(changedDefinitions);
       expect(
         mcpEvents(log.events).some(
           (event) => event.kind === "log" && event.line.includes("duplicate tool name"),

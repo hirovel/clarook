@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import { EventLog } from "../src/log.js";
 import { maxSteps, queueToTurnEnd, runTurn, steer } from "../src/loop.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
-import { defineTool } from "../src/tools.js";
+import { toolDefinitionsForRequest } from "../src/tool-definitions.js";
+import { defineTool, type Tool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
 
 // 脚本化 provider:按序吐出预设的 turn,离线验证循环语义。
@@ -145,7 +146,8 @@ describe("runTurn", () => {
 
   it("工具调用→执行→回喂→模型收尾:事件序列完整", async () => {
     const log = newLog();
-    const tools = [echoTool];
+    const parameters = Type.Object({ text: Type.String({ description: "first" }) });
+    const tools: Tool[] = [{ ...echoTool, parameters }];
     let requests = 0;
     const outcome = await runTurn({
       log,
@@ -153,9 +155,33 @@ describe("runTurn", () => {
         model: "fake",
         async complete(_messages, definitions) {
           if (requests++ === 0) {
-            expect(definitions[0]?.description).toBe(echoTool.description);
+            expect(definitions).toEqual([
+              {
+                name: "echo",
+                description: "回显",
+                parameters: {
+                  type: "object",
+                  properties: { text: { type: "string", description: "first" } },
+                  required: ["text"],
+                },
+              },
+            ]);
+            expect(
+              Reflect.ownKeys(definitions[0]?.parameters ?? {}).every(
+                (key) => typeof key === "string",
+              ),
+            ).toBe(true);
+            // adapter 与原始 schema 都能变化,本步执行器和历史事实仍使用已捕获内容。
+            const sent = definitions[0];
+            if (sent) {
+              sent.description = "adapter edit";
+              sent.parameters.properties = {};
+            }
+            (parameters.properties.text as Record<string, unknown>).type = "integer";
+            parameters.properties.text.description = "updated schema";
             tools[0] = {
               ...echoTool,
+              parameters,
               description: "updated",
               async execute() {
                 return "wrong version";
@@ -174,13 +200,83 @@ describe("runTurn", () => {
     expect(log.events.map((e) => e.type)).toEqual([
       "session/start",
       "user/message",
+      "tools/snapshot",
       "request",
       "assistant/message",
       "tool/result",
+      "tools/snapshot",
       "request",
       "assistant/message",
     ]);
     expect(firstResult(log)).toMatchObject({ callId: "c1", content: "echo:hi", isError: false });
+    const requestsAt = log.events.flatMap((event, index) =>
+      event.type === "request" ? [index] : [],
+    );
+    const first = toolDefinitionsForRequest(log.events, requestsAt[0] as number);
+    expect(first?.[0]).toMatchObject({
+      description: "回显",
+      parameters: { properties: { text: { type: "string", description: "first" } } },
+    });
+    expect(toolDefinitionsForRequest(log.events, requestsAt[1] as number)?.[0]).toMatchObject({
+      description: "updated",
+      parameters: { properties: { text: { type: "integer", description: "updated schema" } } },
+    });
+
+    const snapshots = () => log.events.filter((event) => event.type === "tools/snapshot");
+    const next = async () => {
+      log.append({ type: "user/message", at: "t", text: "next" });
+      await runTurn({
+        log,
+        tools: () => tools,
+        provider: scripted([{ text: "done", toolCalls: [], stopReason: "end" }]),
+      });
+      const index = log.events.reduce(
+        (last, event, at) => (event.type === "request" ? at : last),
+        -1,
+      );
+      return toolDefinitionsForRequest(log.events, index);
+    };
+    // JSON 等价的键序与本地字段变化不应制造新目录版本。
+    const updated = tools[0] as Tool;
+    tools[0] = {
+      ...updated,
+      describe: { core: "local guidance" },
+      parameters: Type.Unsafe({
+        required: ["text"],
+        properties: {
+          text: { description: "updated schema", type: "integer", omitted: undefined },
+        },
+        type: "object",
+      }),
+    };
+    await next();
+    expect(snapshots()).toHaveLength(2);
+
+    tools[0] = {
+      ...updated,
+      parameters: Type.Object({ text: Type.Union([Type.Literal("a"), Type.Literal("b")]) }),
+    };
+    await next();
+    expect(snapshots()).toHaveLength(3);
+    tools[0] = {
+      ...updated,
+      parameters: Type.Object({ text: Type.Union([Type.Literal("b"), Type.Literal("a")]) }),
+    };
+    await next();
+    expect(snapshots()).toHaveLength(4);
+    tools.push(failTool);
+    await next();
+    expect(snapshots()).toHaveLength(5);
+    tools.reverse();
+    expect((await next())?.map((tool) => tool.name)).toEqual(["fail", "echo"]);
+    expect(snapshots()).toHaveLength(6);
+    tools.length = 0;
+    expect(await next()).toEqual([]);
+    expect(snapshots().at(-1)?.tools).toEqual([]);
+    expect(snapshots()).toHaveLength(7);
+    await next();
+    expect(snapshots()).toHaveLength(7);
+    expect(first?.[0]?.description).toBe("回显");
   });
 
   it("工具抛异常→isError 结果回喂,循环继续不炸", async () => {
@@ -288,6 +384,36 @@ describe("runTurn", () => {
     expect(results[2]).toMatchObject({ callId: "c3", content: "echo:a", isError: false });
   });
 
+  it("无工具的 length 保留回答并报告不完整,不重复请求", async () => {
+    const log = newLog();
+    let requests = 0;
+    const outcome = await runTurn({
+      log,
+      provider: {
+        model: "fake",
+        async complete() {
+          requests++;
+          return { text: "Partial answer.", toolCalls: [], stopReason: "length" };
+        },
+      },
+      tools: [],
+      slots: { termination: maxSteps(3) },
+    });
+    expect(requests).toBe(1);
+    expect(outcome).toEqual({
+      stopped: "Response incomplete: generation reached the token or context limit.",
+    });
+    expect(log.events.filter((e) => e.type === "assistant/message")).toEqual([
+      expect.objectContaining({ text: "Partial answer.", toolCalls: [], stopReason: "length" }),
+    ]);
+    expect(log.events.at(-1)).toMatchObject({
+      type: "decision",
+      slot: "termination",
+      steps: 1,
+      reason: "Response incomplete: generation reached the token or context limit.",
+    });
+  });
+
   it("steer 模式:插话在 step 边界注入,模型下一步就看到", async () => {
     const log = newLog();
     const queue = ["插话"];
@@ -306,6 +432,7 @@ describe("runTurn", () => {
     expect(types).toEqual([
       "session/start",
       "user/message",
+      "tools/snapshot",
       "request",
       "assistant/message",
       "tool/result",
@@ -335,6 +462,7 @@ describe("runTurn", () => {
     expect(types).toEqual([
       "session/start",
       "user/message",
+      "tools/snapshot",
       "request",
       "assistant/message",
       "tool/result",

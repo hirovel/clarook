@@ -7,28 +7,36 @@ import {
   type PreservationPolicy,
 } from "./compaction.js";
 import { type CompactionAcceptance, DEFAULT_COMPACTION_SETTINGS } from "./compaction-presets.js";
+import { estimateInput } from "./context.js";
 import { type AgentEvent, now, type ToolCall } from "./events.js";
 import { completeRecorded, recordEvent, toolOutput } from "./exchange.js";
 import { annotateResult, DEFAULT_FACTS, dateNote, type FactsConfig } from "./facts.js";
 import type { EventLog } from "./log.js";
 import { deriveMessages, type Message } from "./messages.js";
 import { DEFAULT_PLAN_REMINDER, planOpen, planState, planText, stepsSincePlan } from "./plan.js";
-import type { AssistantTurn, EffortLevel, Provider, ToolDef } from "./provider.js";
+import type { AssistantTurn, EffortLevel, Provider } from "./provider.js";
 import { errorMessage, isContextOverflow } from "./providers/errors.js";
 import { RECORDING_FULL } from "./recording.js";
+import { captureToolDefinitions } from "./tool-definitions.js";
 import { type Tool, ToolOutcomeUnknownError, validateArgs } from "./tools.js";
 
 // ---------- 策略槽(全部是开放接口,内置实现无特权,自定义实现从外部注入) ----------
 
 /** 终止策略:每个 step 结束后询问。返回 null 继续,返回字符串 = 停下的理由。 */
-export type TerminationPolicy = (state: { steps: number }) => string | null;
+export type TerminationPolicy = ((state: { steps: number }) => string | null) & {
+  /** 内置步数限制的实际数值,供子任务持久记录;自定义策略不序列化函数。 */
+  readonly maxSteps?: number;
+};
 
 /** 缺省不设步数上限,循环到模型不再调工具为止。 */
 export const untilIdle: TerminationPolicy = () => null;
 
 /** 显式步数上限。 */
 export function maxSteps(limit: number): TerminationPolicy {
-  return ({ steps }) => (steps >= limit ? `step limit ${limit} reached` : null);
+  return Object.assign(
+    ({ steps }: { steps: number }) => (steps >= limit ? `step limit ${limit} reached` : null),
+    { maxSteps: limit },
+  );
 }
 
 /** 插话策略:在给定边界要不要排空留言队列。 */
@@ -169,7 +177,7 @@ export function recordingProvider(
         model: provider.model,
         messages: messages.length,
         tools: tools.map((t) => t.name),
-        estimatedTokens: contextTokens(log.events),
+        estimatedTokens: estimateInput(messages, tools),
         ...(opts.threshold !== undefined && { threshold: opts.threshold }),
         reason: "compaction",
         ...(callOpts.maxTokens !== undefined && { maxTokens: callOpts.maxTokens }),
@@ -195,8 +203,11 @@ async function compactIfNeeded(
 ): Promise<CompactionOutcome> {
   const threshold = compactionThreshold(cfg.window, cfg.reserveTokens, cfg.ratio);
   // 触发用实测优先的口径;进展门两边都用估算,口径一致才可比。
-  if (!force && contextTokens(deps.log.events) <= threshold)
-    return { applied: false, reduced: false };
+  if (!force) {
+    const tools = typeof deps.tools === "function" ? deps.tools() : deps.tools;
+    if (contextTokens(deps.log.events, tools) <= threshold)
+      return { applied: false, reduced: false };
+  }
   const before = estimateAfter(deps.log.events);
   const noProgress = (reason: "no-result" | "no-gain") => {
     deps.log.append({
@@ -238,7 +249,7 @@ async function compactIfNeeded(
 }
 
 const LENGTH_NOTICE =
-  "Not executed: the response was cut off by the output token limit, so the arguments may be incomplete. Issue this tool call again.";
+  "Not executed: the response reached the token or context limit, so the arguments may be incomplete. Issue this tool call again.";
 const INTERRUPTED_NOTICE = "Interrupted by the user; not executed.";
 const STORAGE_NOTICE = "Not executed: recording buffer filled while saving was unavailable.";
 const interruptedNotice = (signal: AbortSignal) =>
@@ -298,19 +309,19 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
 
     // 请求事件:正文不落盘,它就是此刻的投影;记下规模与口径,检视器按需原样重建。
     // 组装槽换了投影时,差异部分记进 body,重建仍然逐字节。
-    // 定义与执行器取同一版快照,服务端在请求中途更新清单不会替换已发出调用的实现。
+    // 压缩期间清单可能刷新,此处再取实际可用工具;请求定义与执行器共用这份快照。
     const tools = (typeof deps.tools === "function" ? deps.tools() : deps.tools).map((tool) => ({
       ...tool,
       parameters: Value.Clone(tool.parameters),
     }));
-    const defs: ToolDef[] = tools.map(({ name, description, parameters }) => ({
-      name,
-      description,
-      parameters,
-    }));
+    const defs = captureToolDefinitions(log, tools);
     const assemble = deps.slots?.assemble;
     const messages = assemble ? assemble(log.events) : deriveMessages(log.events);
-    const body = assemble ? describeRequestBody(log.events, messages) : undefined;
+    const assembled = assemble ? describeRequestBody(log.events, messages) : undefined;
+    const body =
+      assembled && (assembled.tail.length > 0 || assembled.prefixEvents !== log.events.length)
+        ? assembled
+        : undefined;
     const cfg = deps.compaction;
     const effort = typeof deps.effort === "function" ? deps.effort() : deps.effort;
     log.append({
@@ -319,11 +330,11 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       model: provider.model,
       messages: messages.length,
       tools: defs.map((d) => d.name),
-      estimatedTokens: contextTokens(log.events),
+      estimatedTokens: body ? estimateInput(messages, defs) : contextTokens(log.events, defs),
       ...(cfg && { threshold: compactionThreshold(cfg.window, cfg.reserveTokens, cfg.ratio) }),
       reason: requestReason,
       ...(effort && { effort }),
-      ...(body && (body.tail.length > 0 || body.prefixEvents !== log.events.length) && { body }),
+      ...(body && { body }),
     });
     requestReason = "turn";
     const startedAt = Date.now();
@@ -364,8 +375,14 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       return "aborted";
 
     if (turn.stopReason === "length") {
-      //:截断响应的调用一个都不执行,逐个补错误应答(协议要求每个 call 有应答)。
+      // 截断响应的调用一个都不执行,逐个补错误应答(协议要求每个 call 有应答)。
       for (const call of turn.toolCalls) appendResult(log, call, LENGTH_NOTICE, true);
+      if (turn.toolCalls.length === 0) {
+        // 无调用时没有可回喂结果;保留不完整回答后停止,避免裸重发同一助手末消息。
+        const reason = "Response incomplete: generation reached the token or context limit.";
+        log.append({ type: "decision", at: now(), slot: "termination", steps, reason });
+        return { stopped: reason };
+      }
     } else if (turn.stopReason === "tool") {
       await executeCalls(turn.toolCalls, {
         log,

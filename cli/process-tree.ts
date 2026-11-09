@@ -37,6 +37,7 @@ export function stopProcessTree(child: ChildProcess, group = false): void {
     }
     throw new Error(
       `could not stop process tree ${pid}: ${(error as Error).message}. Child processes may still be running`,
+      { cause: error },
     );
   }
 }

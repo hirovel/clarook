@@ -133,7 +133,7 @@ export const SETTINGS: readonly SettingDef[] = [
     group: "display",
     type: "bool",
     values: onOff,
-    note: "show a token-based cost estimate, never an exact bill; incomplete usage hides the amount",
+    note: "estimate main-session cost from tokens; excludes child sessions; incomplete usage hides the amount",
     builtin: false,
     scope: "now",
   },
@@ -389,8 +389,38 @@ export const SETTINGS: readonly SettingDef[] = [
     group: "tools",
     type: "number",
     values: [{ label: "20" }, { label: "50" }, { label: "100" }],
-    note: "steps a turn may take before the loop stops · unset means no limit",
+    note: "model steps per main turn; none is unlimited; a low limit can stop unfinished work",
     builtin: undefined,
+    scope: "next start",
+  },
+  {
+    key: "subagents.maxSteps",
+    group: "tools",
+    type: "number",
+    values: [
+      {
+        label: "inherit",
+        note: "use the parent's step limit; unlimited when the parent is unlimited",
+      },
+      { label: "20" },
+      { label: "50" },
+      { label: "100" },
+    ],
+    note: "steps per child run; types may override; existing children keep their first limit",
+    builtin: null,
+    scope: "next start",
+  },
+  {
+    key: "subagents.depth",
+    group: "tools",
+    type: "number",
+    values: [
+      { label: "1", note: "main can delegate; children cannot delegate" },
+      { label: "2", note: "children can delegate; grandchildren cannot" },
+      { label: "3", note: "one more generation; potentially more model work" },
+    ],
+    note: "delegation generations from the main agent; existing children keep their original depth",
+    builtin: 1,
     scope: "next start",
   },
   // ---------- strategy (start values of the slots; /set changes this session) ----------
@@ -571,6 +601,13 @@ export function defaultPreset(): Preset {
   return out;
 }
 
+/** 步数和代数是离散计数;配置入口不接受 0、小数或非有限值。 */
+export function positiveIntegerSetting(key: string, value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1)
+    throw new Error(`${key} takes a positive whole number`);
+  return value;
+}
+
 /** 打字形态 → 值。抛错的话信息就是给人看的那一句。 */
 export function parseSetting(def: SettingDef, text: string): unknown {
   const t = text.trim();
@@ -581,6 +618,10 @@ export function parseSetting(def: SettingDef, text: string): unknown {
       throw new Error(`${def.key} takes on or off`);
     case "number": {
       const n = Number(t);
+      if (def.key === "subagents.maxSteps" && t === "inherit") return null;
+      if (def.key === "maxSteps" && /^(none|unset|-)$/i.test(t)) return undefined;
+      if (["maxSteps", "subagents.maxSteps", "subagents.depth"].includes(def.key))
+        return positiveIntegerSetting(def.key, n);
       if (def.key === "compactionRatio") {
         if (!t || !Number.isFinite(n) || n < 0 || n >= 1)
           throw new Error("compactionRatio takes 0 (off) or a fraction between 0 and 1");
@@ -636,6 +677,7 @@ export function parseSetting(def: SettingDef, text: string): unknown {
 
 /** 值 → 屏上的一小段。 */
 export function formatSetting(def: SettingDef, value: unknown): string {
+  if (def.key === "subagents.maxSteps" && (value === undefined || value === null)) return "inherit";
   if (value === undefined || value === null) return def.type === "bool" ? "off" : "none";
   switch (def.type) {
     case "bool":

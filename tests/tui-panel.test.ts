@@ -221,7 +221,11 @@ describe("上下文面板的动作与后果", () => {
     expect((restore as { value: string }).value).toBe("first");
     await app.command("/edit rewind 1");
     const drops = log.events.filter((e) => e.type === "context/drop");
-    expect(drops.map((e) => (e as { target: number }).target)).toEqual([3, 4, 6]);
+    expect(drops.map((e) => (e as { target: number }).target)).toEqual([4, 5, 7]);
+    expect(deriveMessages(log.events).map((message) => [message.role, message.content])).toEqual([
+      ["system", "s"],
+      ["user", "first"],
+    ]);
     doc = plain(app.lines(120).join("\n"));
     expect(doc).toContain("rewound to event #1: dropped 3 messages");
     app.stop();

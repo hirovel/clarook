@@ -6,6 +6,7 @@
 //   会话切换  通过可见操作切换主会话与子 agent 会话,以上视图作用在选中的数组上
 // 行数爆炸由视口与按键控制,不靠删内容:任何一字节都能翻到。
 // 本文件只剩覆盖层组件 RequestInspector:模式、选中、滚动、按键、行缓存;各视图的行由上面的模块算。
+import { isDeepStrictEqual } from "node:util";
 import {
   type Component,
   Key,
@@ -14,9 +15,11 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { toolDefinitionTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
 import { editState, type Message } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
+import { toolDefinitionsForRequest } from "../src/tool-definitions.js";
 import { BodyBrowser } from "./body-browser.js";
 import { inputBlocks, receivedBlocks, recordingErrorBlock } from "./inspector-bodies.js";
 import {
@@ -253,7 +256,8 @@ export class RequestInspector implements Component {
     const main = events === this.deps.events();
     const tools = main ? this.deps.tools() : [];
     const lastSent = main ? this.deps.lastSent?.() : undefined;
-    const key = `${this.sessionIndex}:${tools.map((t) => t.name).join(",")}:${lastSent?.length ?? -1}`;
+    // 工具行只依赖名称、数量和估算量;同名声明刷新也必须更新屏上的数字。
+    const key = `${this.sessionIndex}:${tools.map((t) => t.name).join(",")}:${toolDefinitionTokens(tools)}:${lastSent?.length ?? -1}`;
     if (
       this.wbCache?.events !== events ||
       this.wbCache.len !== events.length ||
@@ -401,10 +405,14 @@ export class RequestInspector implements Component {
         ? (priorInput?.messages ?? messagesFor(events, prior))
         : undefined;
     if (this.section === 3) {
+      const definitions = saved?.input?.tools ?? toolDefinitionsForRequest(events, rec.index);
+      const priorDefinitions = prior
+        ? (priorInput?.tools ?? toolDefinitionsForRequest(events, prior.index))
+        : undefined;
       const toolChange = !prior
         ? "first request"
-        : saved?.input && priorInput
-          ? JSON.stringify(saved.input.tools) === JSON.stringify(priorInput.tools)
+        : definitions && priorDefinitions
+          ? isDeepStrictEqual(definitions, priorDefinitions)
             ? "unchanged"
             : "changed"
           : "comparison unavailable (definitions not recorded)";
@@ -819,13 +827,11 @@ export class RequestInspector implements Component {
     const events = this.events();
     const recording = this.sessions()[this.sessionIndex]?.recordingFor?.(
       rec.index,
-      section === 5 ? "wire" : section === 1 ? "summary" : "input",
+      section === 4 || section === 5 ? "wire" : section === 1 ? "summary" : "input",
     );
     const messages = recording?.input?.messages ?? messagesFor(events, rec);
-    const available = new Map(this.deps.tools().map((d) => [d.name, d]));
-    const defs =
-      recording?.input?.tools ?? rec.request.tools.flatMap((name) => available.get(name) ?? []);
-    const missing = rec.request.tools.filter((name) => !defs.some((d) => d.name === name));
+    const defs = recording?.input?.tools ?? toolDefinitionsForRequest(events, rec.index);
+    const missing = rec.request.tools.filter((name) => !defs?.some((d) => d.name === name));
     const previous = this.records()[rec.n - 2];
     const prior = previous
       ? (this.sessions()[this.sessionIndex]?.recordingFor?.(previous.index, "input")?.input
@@ -1165,7 +1171,7 @@ export class RequestInspector implements Component {
       // 至少保留一个列表行、一个预览行和分隔线;短窗口先省略可在请求详情阅读的统计。
       const headLimit = Math.max(1, rows - hints.length - 3);
       const head = [
-        pad(c.bold(c.ink(main ? "Context · Next request" : "Context · Sub-session"))),
+        pad(c.bold(c.ink(main ? "Context · Current projection" : "Context · Sub-session"))),
         ...(reason
           ? [
               pad(
@@ -1178,7 +1184,16 @@ export class RequestInspector implements Component {
             ]
           : []),
         ...(hasImages ? [pad(c.jin("Image tokens unknown before next request · text only"))] : []),
-        pad(c.soft(`Next input estimate: ${size}`)),
+        pad(c.soft(`Projected input estimate: ${size}`)),
+        pad(
+          c.faint(
+            main
+              ? "Known text + current tools; total unmeasured"
+              : "Message text only; current tool definitions unavailable",
+          ),
+        ),
+        pad(c.faint("Images, opaque blocks and provider framing are not estimated")),
+        pad(c.faint("Draft excluded; sending may compact or append context")),
         pad(c.faint("⋯ Log rows explain event gaps; not extra input")),
         ...(sessionLine ? [pad(sessionLine)] : []),
       ].slice(0, headLimit);

@@ -190,16 +190,49 @@ export function finishAnthropicAcc(
   model = "",
   opts: { mode?: ThinkingMode } = {},
 ): AssistantTurn {
+  let stopReason: StopReason;
+  if (aborted) stopReason = "aborted";
+  else {
+    switch (acc.stopReason) {
+      case "end_turn":
+      case "stop_sequence":
+        stopReason = "end";
+        break;
+      case "tool_use":
+        stopReason = "tool";
+        break;
+      case "max_tokens":
+      case "model_context_window_exceeded":
+        stopReason = "length";
+        break;
+      case undefined:
+        throw new ProviderError("stream ended without message_delta", {
+          retryable: !acc.text,
+        });
+      default:
+        // 服务端暂停需要独立的续接协议;拒绝与未知理由同样不能授予本地工具执行资格。
+        throw new ProviderError(`provider stream ended with stop_reason=${acc.stopReason}`, {
+          retryable: false,
+          body: acc.stopReason,
+        });
+    }
+    if (
+      (stopReason === "end" && acc.blocks.size > 0) ||
+      (stopReason === "tool" && acc.blocks.size === 0)
+    ) {
+      // 停止理由必须与本地调用相符,否则会留下无应答调用或空转请求。
+      throw new ProviderError(
+        `provider stream ended with inconsistent stop_reason=${acc.stopReason}`,
+        {
+          retryable: false,
+          body: acc.stopReason,
+        },
+      );
+    }
+  }
   const toolCalls: ToolCall[] = [...acc.blocks.entries()]
     .sort(([a], [b]) => a - b)
     .map(([, b]) => ({ id: b.id, name: b.name, args: safeParse(b.argsJson) }));
-  const stopReason: StopReason = aborted
-    ? "aborted"
-    : acc.stopReason === "max_tokens"
-      ? "length"
-      : toolCalls.length > 0
-        ? "tool"
-        : "end";
   const usage: Usage | undefined =
     acc.inputTokens !== undefined || acc.outputTokens !== undefined
       ? {
@@ -246,7 +279,7 @@ export const ANTHROPIC_FIELDS: FieldTable = {
     "message_start.message.usage:input_tokens + cache_creation_input_tokens + cache_read_input_tokens → inputTokens;后两项单列",
     "content_block_start:text / tool_use{id, name} / thinking / redacted_thinking{data}",
     "content_block_delta:text_delta → text;input_json_delta → 工具参数;thinking_delta → reasoning;signature_delta → 签名",
-    "message_delta.delta.stop_reason → stopReason(max_tokens → 截断);message_delta.usage.output_tokens → outputTokens",
+    "message_delta.delta.stop_reason → stopReason(end_turn / stop_sequence → end;tool_use → tool;max_tokens / model_context_window_exceeded → length;其余 → ProviderError);message_delta.usage.output_tokens → outputTokens",
     "error → 流内错误",
     "message.id · message.model · stop_reason 原文 · stop_sequence → extras(不解释,原样存)",
   ],
@@ -297,13 +330,15 @@ export function toAnthropicWire(
   let systemText: string | undefined;
   const out: { role: "user" | "assistant"; content: WireBlock[] }[] = [];
   const map: number[] = [];
-  // 思考块的签名绑定它之前的整个前缀:前面任何一条消息被改过,后面的思考块就都不再回传。
-  let prefixEdited = false;
-  // 第一条改过的消息之前的那条 wire 消息下标:编辑点断点挂在它上面。
+  // 前缀变化时沿用已有保守回传策略,避免在绑定前缀的模型上发送失效的历史思考块。
+  let prefixChanged = false;
+  // 前缀首次变化之前的那条 wire 消息下标:缓存断点挂在它上面。
   let editBoundary = -1;
   for (const m of messages) {
-    if (m.edited && !prefixEdited) editBoundary = out.length - 1;
-    if (m.edited) prefixEdited = true;
+    if ((m.edited || m.prefixChanged) && !prefixChanged) {
+      editBoundary = out.length - 1;
+      prefixChanged = true;
+    }
     switch (m.role) {
       case "system":
         systemText = systemText ? `${systemText}\n\n${m.content}` : m.content;
@@ -328,7 +363,7 @@ export function toAnthropicWire(
         map.push(out.length);
         const content: WireBlock[] = [];
         if (
-          !prefixEdited &&
+          !prefixChanged &&
           isAnthropicOpaque(m.opaque) &&
           (!opts.model || m.opaque.model === opts.model)
         ) {
@@ -528,11 +563,6 @@ export function anthropic(opts: AnthropicOptions): Provider {
               throw new ProviderError(`provider stream error: ${acc.error}`, {
                 retryable: !acc.text && /overloaded|api_error|rate_limit/i.test(acc.error),
                 body: acc.error,
-              });
-            }
-            if (!acc.stopReason) {
-              throw new ProviderError("stream ended without message_delta", {
-                retryable: !acc.text,
               });
             }
             return finishAnthropicAcc(acc, false, opts.model, { mode });

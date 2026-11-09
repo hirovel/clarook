@@ -404,7 +404,13 @@ function renderAssistant(
   }
   if (e.stopReason === "aborted") ctx.note(c.faint("— interrupted —"));
   if (e.stopReason === "length")
-    ctx.note(c.zhu("· output truncated; the model was asked to resend"));
+    ctx.note(
+      c.zhu(
+        e.toolCalls.length > 0
+          ? "· output truncated; tool calls were not executed; the model receives an error for each call"
+          : "· response incomplete; output or context limit reached; stopped without automatic continuation",
+      ),
+    );
 }
 
 function renderToolResult(ctx: TuiContext, e: Extract<AgentEvent, { type: "tool/result" }>): void {

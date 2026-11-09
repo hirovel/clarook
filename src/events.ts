@@ -3,6 +3,7 @@
 
 import type { ImageInput } from "./images.js";
 import type { Message } from "./messages.js";
+import type { ToolDef } from "./provider.js";
 
 export type ToolCall = {
   id: string;
@@ -135,6 +136,8 @@ export type AgentEvent =
    * 压缩与保留策略保存原始配置值,显示说明不参与恢复。
    */
   | { type: "session/slot"; at: string; slot: string; value: string }
+  /** 普通请求首次观察或完整声明变化时的有序目录;不投影成消息。空列表表示已知无工具。 */
+  | { type: "tools/snapshot"; at: string; tools: ToolDef[] }
   /**
    * 一次模型请求即将发出。只给人看。紧随其后的 assistant/message 就是它的响应
    * (中间可能夹 retry 事件;失败则以 request/error 收尾)。

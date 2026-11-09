@@ -18,9 +18,9 @@ export type CheckupRow = {
   reason: string;
   model: string;
   msgs: number;
-  /** 发送前的估算:首次只估消息,后续通常以供应商用量为基准。 */
+  /** 发送前保存的已知输入估算,可含工具声明或以供应商用量为基准;旧记录范围可能不同。 */
   est: number;
-  /** 上一请求有用量,且模型、工具名和上下文没有切换;仅用于漂移启发式。 */
+  /** 上一请求有可靠正输入回报,且模型、工具名和上下文范围未切换;仅用于漂移启发式。 */
   comparable: boolean;
   /** 供应商实测。 */
   inTok: number | undefined;
@@ -54,6 +54,14 @@ export type Check = {
 export type Checkup = {
   rows: CheckupRow[];
   checks: Check[];
+  /** 同请求估算与可靠正输入回报的差额;无样本保留未知,不充当准确度判据。 */
+  estimationGaps: {
+    samples: number;
+    meanAbsoluteTokens: number | null;
+    /** 各请求绝对差额除以各自报告输入的百分比,再取平均。 */
+    meanAbsolutePercent: number | null;
+    largestUnderestimateTokens: number | null;
+  };
   models: string[];
   requests: number;
   compactions: number;
@@ -63,6 +71,13 @@ export type Checkup = {
 };
 
 export type ResponseCoverage = { lines: number; requests: number[] };
+
+const hasMeasuredInput = (r: CheckupRow): r is CheckupRow & { inTok: number } =>
+  r.inTok !== undefined &&
+  Number.isFinite(r.inTok) &&
+  r.inTok > 0 &&
+  r.stop !== "aborted" &&
+  r.error === undefined;
 
 const median = (xs: number[]): number => {
   if (xs.length === 0) return 0;
@@ -78,6 +93,7 @@ export function analyze(events: readonly AgentEvent[], recording?: ResponseCover
   let lastSent: Message[] | undefined;
   for (const rec of records) {
     const previous = records[rec.n - 2];
+    const previousRow = rows.at(-1);
     const messages = messagesFor(events, rec);
     const keep = unchangedPrefix(lastSent, messages);
     // 新图片的供应商视觉用量无法由本地文字估算推得;下一轮已有实测基准,仍可比较。
@@ -92,7 +108,9 @@ export function analyze(events: readonly AgentEvent[], recording?: ResponseCover
       msgs: rec.request.messages,
       est: rec.request.estimatedTokens,
       comparable: Boolean(
-        previous?.response?.usage &&
+        previous &&
+          previousRow &&
+          hasMeasuredInput(previousRow) &&
           previous.request.reason === "turn" &&
           rec.request.reason === "turn" &&
           !previous.request.body &&
@@ -106,7 +124,8 @@ export function analyze(events: readonly AgentEvent[], recording?: ResponseCover
               e.type === "context/edit" ||
               e.type === "context/drop" ||
               e.type === "session/model" ||
-              e.type === "session/slot",
+              e.type === "session/slot" ||
+              (e.type === "ext/event" && e.source === "subagent" && e.kind === "identity"),
           ),
       ),
       inTok: usage?.inputTokens,
@@ -169,7 +188,7 @@ export function analyze(events: readonly AgentEvent[], recording?: ResponseCover
   {
     const groups = new Map<string, CheckupRow[]>();
     for (const r of rows) {
-      if (r.inTok === undefined || !r.comparable) continue;
+      if (!hasMeasuredInput(r) || !r.comparable) continue;
       const key = JSON.stringify([r.model, r.tools]);
       const g = groups.get(key) ?? [];
       g.push(r);
@@ -203,7 +222,7 @@ export function analyze(events: readonly AgentEvent[], recording?: ResponseCover
       "C",
       "token estimate drift: heuristic for comparable requests",
       judged === 0 ? "skip" : outliers.length === 0 ? "pass" : "fail",
-      `${notes.join(" · ") || "no comparable usage"} · ${rows.filter((r) => !r.comparable || r.inTok === undefined).length} excluded (initial, changed, custom, new image or missing usage)${outliers.length > 0 ? ` · off: ${outliers.join(", ")}` : ""}`,
+      `${notes.join(" · ") || "no comparable usage"} · ${rows.filter((r) => !r.comparable || !hasMeasuredInput(r)).length} excluded (initial, changed, custom, new image, aborted/error or missing positive input)${outliers.length > 0 ? ` · off: ${outliers.join(", ")}` : ""}`,
     );
   }
 
@@ -336,9 +355,27 @@ export function analyze(events: readonly AgentEvent[], recording?: ResponseCover
 
   const firstAt = events[0]?.at;
   const lastAt = events.at(-1)?.at;
+  let samples = 0;
+  let absoluteTokens = 0;
+  let absolutePercent = 0;
+  let largestUnderestimate = 0;
+  for (const r of rows) {
+    if (!hasMeasuredInput(r) || !Number.isFinite(r.est)) continue;
+    samples += 1;
+    const gap = r.inTok - r.est;
+    absoluteTokens += Math.abs(gap);
+    absolutePercent += (Math.abs(gap) / r.inTok) * 100;
+    largestUnderestimate = Math.max(largestUnderestimate, gap);
+  }
   return {
     rows,
     checks,
+    estimationGaps: {
+      samples,
+      meanAbsoluteTokens: samples ? absoluteTokens / samples : null,
+      meanAbsolutePercent: samples ? absolutePercent / samples : null,
+      largestUnderestimateTokens: samples ? largestUnderestimate : null,
+    },
     models: [...new Set(rows.map((r) => r.model))],
     requests: records.length,
     compactions: compactions.length,
@@ -380,7 +417,18 @@ export function reportLines(
   }
   out.push(
     "",
-    "  est: initial message estimate or usage-based estimate; prefix ≈ excludes tools and provider formatting.",
+    "  est: stored known-input estimate, including known tools, or usage-based estimate; older records may differ.",
+    "  prefix ≈ excludes tools and provider formatting.",
+    "",
+  );
+  const gaps = c.estimationGaps;
+  out.push(
+    gaps.samples === 0
+      ? "  Observed estimate gaps: no eligible samples."
+      : `  Observed estimate gaps: ${gaps.samples} samples · mean absolute ${fmtTok(Math.round(gaps.meanAbsoluteTokens as number))} tokens · mean absolute relative ${(gaps.meanAbsolutePercent as number).toFixed(1)}% · largest underestimate ${fmtTok(gaps.largestUnderestimateTokens as number)} tokens`,
+    `  Same-request stored est vs reported input; ${c.requests - gaps.samples} excluded (missing/nonpositive input, aborted/error response or invalid estimate).`,
+    "  Relative gaps use each reported input as denominator. Initial, custom, image or older estimates may omit input; these gaps do not certify accuracy.",
+    "  C checks drift among comparable requests; a PASS does not establish accuracy.",
     "",
   );
   for (const k of c.checks) {

@@ -6,7 +6,7 @@ import {
   type SummaryTemplateId,
   summaryPrompt,
 } from "./compaction-presets.js";
-import { estimateTokens, messageTokens } from "./context.js";
+import { estimateInput, estimateTokens, messageTokens } from "./context.js";
 import type { AgentEvent, Usage } from "./events.js";
 import {
   type Composition,
@@ -16,7 +16,7 @@ import {
   isProjected,
   type Message,
 } from "./messages.js";
-import type { Provider } from "./provider.js";
+import type { Provider, ToolDef } from "./provider.js";
 
 // ---------- 保留策略槽:决定压缩时尾部保留多少原文 ----------
 
@@ -130,32 +130,69 @@ export type CompactionInput = {
 /** 返回 null = 本策略认为无事可做或未取得足够进展。 */
 export type CompactionStrategy = (input: CompactionInput) => Promise<CompactionPayload | null>;
 
-/** 实测基准失效时只估算消息;工具定义与协议封装要等供应商回报。 */
-export function contextSize(events: readonly AgentEvent[]): {
+/** 有效实测已包含工具;失效时回退到当前已知文本与工具声明的粗估。 */
+export function contextSize(
+  events: readonly AgentEvent[],
+  tools: readonly ToolDef[] = [],
+): {
   tokens: number;
-  basis: "usage" | "messages";
+  basis: "usage" | "estimate";
 } {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
     if (!e) continue;
-    if (e.type === "compaction" || e.type === "context/edit" || e.type === "context/drop") break;
+    if (
+      e.type === "compaction" ||
+      e.type === "context/edit" ||
+      e.type === "context/drop" ||
+      e.type === "session/model" ||
+      (e.type === "session/slot" && (e.slot === "tools" || e.slot === "toolPrompts")) ||
+      (e.type === "user/message" && e.images?.length) ||
+      (e.type === "ext/event" && e.source === "subagent" && e.kind === "identity") ||
+      (e.type === "ext/event" &&
+        e.source === "mcp" &&
+        e.kind === "tools" &&
+        ((Array.isArray(e.payload.added) && e.payload.added.length > 0) ||
+          (Array.isArray(e.payload.removed) && e.payload.removed.length > 0)))
+    )
+      break;
     if (
       e.type === "assistant/message" &&
+      e.stopReason !== "aborted" &&
       e.usage &&
-      e.usage.inputTokens + e.usage.outputTokens > 0
+      e.usage.inputTokens > 0
     ) {
+      // 回复先于 request 被逆序命中;先核对所属请求,非标准正文的测量不能校准标准投影。
+      // 没有 request 的事件历史仍可使用原有测量,但不能越过上一条回复误认请求。
+      let requestIndex = i - 1;
+      while (
+        requestIndex >= 0 &&
+        events[requestIndex]?.type !== "request" &&
+        events[requestIndex]?.type !== "assistant/message"
+      )
+        requestIndex--;
+      const request = events[requestIndex];
+      if (
+        request?.type === "request" &&
+        request.body &&
+        (request.body.tail.length > 0 || request.body.prefixEvents !== requestIndex)
+      )
+        break;
       return {
         tokens: e.usage.inputTokens + e.usage.outputTokens + estimateAfter(events.slice(i + 1)),
         basis: "usage",
       };
     }
   }
-  return { tokens: estimateAfter(events), basis: "messages" };
+  return { tokens: estimateInput(deriveMessages(events), tools), basis: "estimate" };
 }
 
 /** 当前上下文占用;自动压缩与 request 事件共用这个数值口径。 */
-export function contextTokens(events: readonly AgentEvent[]): number {
-  return contextSize(events).tokens;
+export function contextTokens(
+  events: readonly AgentEvent[],
+  tools: readonly ToolDef[] = [],
+): number {
+  return contextSize(events, tools).tokens;
 }
 
 /** 估算一份日志(可叠加未落盘的压缩载荷)投影后的 token 量。 */
@@ -166,7 +203,7 @@ export function estimateAfter(
   const view = payload
     ? [...events, { type: "compaction", at: "", ...payload } as AgentEvent]
     : events;
-  return deriveMessages(view).reduce((n, m) => n + messageTokens(m), 0);
+  return estimateInput(deriveMessages(view));
 }
 
 // ---------- 策略一:清除旧工具结果(请求内容有损,本地原文保留,零 LLM 调用) ----------

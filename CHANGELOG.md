@@ -5,6 +5,31 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ## [Unreleased]
 
+### Added
+
+- Save complete tool declaration snapshots on the first ordinary request and actual definition changes. Inspect historical definitions without optional recordings; distinguish unavailable legacy evidence from an empty tool set.
+
+### Changed
+
+- Explain stable tool definitions in the existing tool prompt controls. Keep task-specific preferences in messages and make the possible prompt cache impact of definition edits visible.
+- Report observed token prediction gaps separately from drift stability in `checkup`, including absolute and relative gap summaries. Exclude missing or interrupted input measurements without treating them as zero error.
+- Expose child step limits and delegation depth in `/settings`, Ctrl+K, presets and CLI flags through the shared settings registry. Move the two values from top-level `subagents` into `defaults.subagents`; reject the old locations. Explain step units, parent inheritance, type precedence and next-start scope. Existing child identities keep their original limits.
+- Require positive integers for the three step/depth settings. Make explicit `--max-steps none` override saved finite limits; child `inherit` keeps parent-limit semantics.
+
+### Fixed
+
+- Preserve the relative order of existing MCP tools during refreshes, including unchanged catalogs and reordered server responses. Apply fresh definitions and executors while only appending or removing actual catalog changes.
+- Exclude interrupted or unmeasured input usage from context baselines while retaining the original usage records. Isolate forked children from parent measurements. Estimate custom assembly requests from their actual messages and stop reusing those measurements for the standard projection.
+- Propagate history exclusions to Anthropic thinking replay without marking retained text as edited. Preserve earlier blocks, original records and Chat reasoning behavior.
+- Reject incomplete MCP tool pagination and keep the previous catalog after failed refreshes. Clean up owned stdio pipes and POSIX process groups even after the direct server exits.
+- End local command waiting after cancellation or timeout on POSIX as well as Windows. Preserve captured output, report unknown outcomes and stop collecting late output; normally completed commands still drain their streams.
+- Preserve a child's original type, provider/model, actual tools, per-run step limit and remaining delegation depth for both in-process and restarted follow-ups. Reject unavailable original resources or depth and legacy logs without an execution identity before model execution. Keep preparation reserved until resource cleanup finishes.
+- Restore `@` file completion using the bundled search executable, including consecutive files and quoted paths. Completion reads names without attaching contents or sending a request.
+- Classify Anthropic completion reasons before granting tool execution. Reject unsupported or inconsistent completions; keep token and context truncation distinct from normal completion. Stop text-only truncation without automatic continuation.
+- Refuse ineffective context edits and rewinds across compacted history. Retry only active assistant replies. Label the context view as the current projection and cost estimates as main-session only.
+- Keep explicit file attachments from the original input independently of template substitution. Treat template and skill output as message text, preserve quoted attachment paths, and retain draft images, input identity and Alt+Enter delivery for custom commands.
+- Require the offline compaction rehearsal and preview to produce a summary. Fit preservation budgets to their small test windows, recognize the current summary instruction in fake models, and verify that the following HTTP request contains the summary.
+
 ## [0.1.4] - 2026-10-26
 
 ### Added
@@ -151,7 +176,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 - Hide monetary estimates by default, including static rates in model pickers. `showCostEstimate` opts in to a labeled token-based estimate in the TUI; one-shot JSON uses `--show-cost-estimate`. If usage or pricing is incomplete, show the reason instead of a partial total. The optional Classic status style keeps the capacity meter on wide terminals.
 
-- Before valid provider usage is available, label context size as a message estimate plus the active tool count, with the total pending measurement. Explain the estimate's scope in request details and `/context`; treat all-zero usage as missing and keep the existing compaction threshold and event format.
+- Include current tool definitions in fallback context estimates, request records and automatic compaction decisions. Reuse valid provider usage without adding tools twice; invalidate it after model changes, recorded tool changes or new images. Share tool estimates across the status, workbench and `/inspect usage`, and label images, private replay data and provider framing as unmeasured. Keep historical usage for comparison and the event format unchanged.
 
 - Report an interrupted turn as interrupted even when an adapter returns a late completed reply. Keep the received reply in the event log. Pending input cannot be resumed while the turn is stopping, and an input is not unpaused before its first delivery is recorded.
 
