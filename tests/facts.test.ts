@@ -1,11 +1,10 @@
 // 事实附注与计划复述:代码算的事实贴在产生它的事件上,模型写的计划只在压缩后或久未更新时复述到末尾;
 // 两者都只追加,前缀不动。还量了三种注入方式的重算代价,证明"贴在事件上"是缓存代价最低的一种。
-import { readFileSync, rmSync } from "node:fs";
-import { dirname } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { buildTools } from "../cli/bootstrap.js";
 import { unchangedPrefix } from "../cli/cards.js";
+import { createBashTool } from "../cli/tools/bash.js";
 import { messageTokens } from "../src/context.js";
 import type { AgentEvent, ToolCall } from "../src/events.js";
 import { annotateResult, dateNote, priorFailures, slowNote } from "../src/facts.js";
@@ -14,7 +13,7 @@ import { runTurn } from "../src/loop.js";
 import { deriveMessages, type Message } from "../src/messages.js";
 import { planState, planText, planTool, stepsSincePlan } from "../src/plan.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
-import { defineTool, ToolOutcomeUnknownError } from "../src/tools.js";
+import { defineTool } from "../src/tools.js";
 import { testDirectory } from "./helpers/setup.js";
 
 function scripted(turns: AssistantTurn[]): Provider {
@@ -183,55 +182,24 @@ describe("事实附注", () => {
     expect(request?.type).toBe("request");
   });
 
-  it("bash 的工作目录跨调用保持:cd 之后下一次从那里起,结果末尾说目录变了", async () => {
-    const make = () => {
-      const tool = buildTools().find((t) => t.name === "bash");
-      if (!tool) throw new Error("missing bash tool");
-      return tool;
-    };
-    const tool = make();
-    const sibling = make();
+  it("bash 每条命令从构造目录开始,cd 只影响本条,显式目录不依赖进程目录", async () => {
+    const root = testDirectory("kernel-bash-root-");
+    const target = testDirectory("kernel-bash-target-");
+    const tool = createBashTool({ cwd: root });
     const signal = new AbortController().signal;
-    const first = await tool.execute({ command: "cd .. && echo moved" }, { signal });
-    expect(first).toMatch(/^moved\n\[cwd is now .+\]$/);
-    const second = await tool.execute({ command: "pwd -W 2>/dev/null || pwd" }, { signal });
-    expect(second).not.toContain("[cwd");
-    expect(second.replace(/\\/g, "/").toLowerCase()).toBe(
-      (first.match(/\[cwd is now (.+)\]/)?.[1] ?? "").replace(/\\/g, "/").toLowerCase(),
+    const pwd = "pwd -W 2>/dev/null || pwd";
+    const normalize = (path: string) => path.replace(/\\/g, "/").toLowerCase();
+    const moved = await tool.execute(
+      { command: `cd "${target.replace(/\\/g, "/")}" && (${pwd})` },
+      { signal },
     );
-    const same = await tool.execute({ command: "echo still" }, { signal });
-    expect(same).toBe("still");
-    for (const independent of [sibling, make()]) {
-      const pwd = await independent.execute({ command: "pwd -W 2>/dev/null || pwd" }, { signal });
-      expect(pwd.replace(/\\/g, "/").toLowerCase()).toBe(
-        process.cwd().replace(/\\/g, "/").toLowerCase(),
-      );
-    }
-    const target = testDirectory("kernel-bash-cwd-").replace(/\\/g, "/");
-    const failure = await tool
-      .execute(
-        {
-          command: `cd "${target}"; sleep 2 & printf 'CWD_CAPTURE_PREFIX'; printf '%060000d\\n' 0; echo DONE`,
-          timeout: 0.2,
-        },
-        { signal },
-      )
-      .then(
-        () => undefined,
-        (error: Error) => error,
-      );
-    const captured = failure?.message.match(/Full output: (.+)\]/)?.[1];
-    try {
-      expect(failure).toBeInstanceOf(ToolOutcomeUnknownError);
-      expect.soft(failure?.message).toContain(`[cwd is now ${target}]`);
-      expect.soft(failure?.message).not.toContain("\u001f");
-      expect(failure?.message).toContain("DONE");
-      expect(captured && readFileSync(captured, "utf8")).toContain("CWD_CAPTURE_PREFIX");
-      const after = await tool.execute({ command: "pwd -W 2>/dev/null || pwd" }, { signal });
-      expect.soft(after.replace(/\\/g, "/").toLowerCase()).toBe(target.toLowerCase());
-    } finally {
-      if (captured) rmSync(dirname(captured), { recursive: true, force: true });
-    }
+    expect(normalize(moved)).toBe(normalize(target));
+    expect(normalize(await tool.execute({ command: pwd }, { signal }))).toBe(normalize(root));
+    const defaultTool = buildTools().find((t) => t.name === "bash");
+    if (!defaultTool) throw new Error("missing bash tool");
+    expect(normalize(await defaultTool.execute({ command: pwd }, { signal }))).toBe(
+      normalize(process.cwd()),
+    );
   });
 });
 

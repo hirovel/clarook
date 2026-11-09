@@ -11,6 +11,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Changed
 
+- Start each built-in Bash call from its configured directory. Keep `cd` local to that invocation; remove cross-call directory tracking and the hidden output marker protocol.
 - Explain stable tool definitions in the existing tool prompt controls. Keep task-specific preferences in messages and make the possible prompt cache impact of definition edits visible.
 - Report observed token prediction gaps separately from drift stability in `checkup`, including absolute and relative gap summaries. Exclude missing or interrupted input measurements without treating them as zero error.
 - Expose child step limits and delegation depth in `/settings`, Ctrl+K, presets and CLI flags through the shared settings registry. Move the two values from top-level `subagents` into `defaults.subagents`; reject the old locations. Explain step units, parent inheritance, type precedence and next-start scope. Existing child identities keep their original limits.

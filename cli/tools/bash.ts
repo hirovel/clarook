@@ -1,7 +1,6 @@
 // bash 工具:Windows 找 Git Bash,打断杀进程树。
 // 截断策略可换:默认保尾,自定义策略经 createBashTool 注入。
-// 工作目录跨调用保持:每次命令末尾打印 $PWD,下一次从那里起;目录变了就在结果末尾说一句,
-// 模型不必自己记 cd 过哪里。每个工具实例各有自己的目录(子 agent 用自己的实例)。
+// 每条命令从构造目录开始;cd 只影响本条命令,不从输出恢复运行状态。
 import { spawn, spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdtempSync, openSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -47,19 +46,19 @@ export function createBashTool(
   opts: {
     truncate?: TruncationPolicy;
     defaultTimeoutS?: number;
-    /** 起始工作目录;缺省进程目录。 */
+    /** 每次调用的工作目录;缺省构造时的进程目录。 */
     cwd?: string;
   } = {},
 ) {
   const truncate = opts.truncate ?? keepTail();
   const defaultTimeout = opts.defaultTimeoutS ?? DEFAULT_TIMEOUT_S;
-  let cwd = opts.cwd ?? process.cwd();
+  const cwd = opts.cwd ?? process.cwd();
   return defineTool({
     name: "bash",
     ...described({
       core:
-        "Run a bash command; returns stdout and stderr combined. The working directory persists across calls " +
-        "(cd changes it for later calls) and the result says so whenever it changed. " +
+        "Run a bash command; returns stdout and stderr combined. Each call starts in the configured working directory; " +
+        "cd applies only to that call. Use cd and the command together to work in another directory. " +
         `Default timeout ${defaultTimeout} s; raise the timeout parameter for long tasks. ` +
         "Long results show the last 50 KiB and a path to the complete captured output; output size does not stop the command.",
       guidance:
@@ -85,43 +84,16 @@ export function createBashTool(
       }
       const timeoutS = args.timeout ?? defaultTimeout;
       const recording = ctx.output;
-      const r = await run(shell, withCwdMarker(args.command), ctx.signal, {
+      const r = await run(shell, args.command, ctx.signal, {
         timeoutMs: timeoutS > 0 ? timeoutS * 1000 : 0,
         cwd,
         truncate,
-        acceptCwd(pwd) {
-          if (samePath(pwd, cwd)) return;
-          cwd = pwd;
-          return `[cwd is now ${cwd}]`;
-        },
         ...(recording && { output: recording }),
       });
       if (r.exitCode !== 0) throw new Error(`${r.output}\ncommand exited with code ${r.exitCode}`);
       return r.output || "(no output)";
     },
   });
-}
-
-/** 目录标记:命令跑完后打印 $PWD(Git Bash 下取 Windows 形态的路径),退出码照旧。命令自己 exit 就没有标记,目录视为没变。 */
-const CWD_MARK = "";
-function withCwdMarker(command: string): string {
-  return `${command}\n__clarook_rc=$?\nprintf '\\n${CWD_MARK}%s' "$(pwd -W 2>/dev/null || pwd)"\nexit $__clarook_rc`;
-}
-
-/** 同一个目录的两种写法算同一个:进程目录是反斜杠的 Windows 形态,pwd -W 给的是正斜杠;Windows 上不分大小写。 */
-function samePath(a: string, b: string): boolean {
-  const norm = (x: string) => x.replace(/\\/g, "/").replace(/\/+$/, "");
-  return process.platform === "win32"
-    ? norm(a).toLowerCase() === norm(b).toLowerCase()
-    : norm(a) === norm(b);
-}
-
-function splitCwdMarker(output: string): { output: string; pwd?: string } {
-  const i = output.lastIndexOf(CWD_MARK);
-  if (i < 0) return { output };
-  const pwd = output.slice(i + 1).trim();
-  const body = output.slice(0, i).replace(/\n$/, "");
-  return pwd ? { output: body, pwd } : { output: body };
 }
 
 function applyTruncation(
@@ -177,7 +149,6 @@ function run(
     cwd: string;
     truncate: TruncationPolicy;
     output?: ToolOutput;
-    acceptCwd?: (pwd: string) => string | undefined;
     onPreview?: (text: string) => void;
     closeInput?: boolean;
   },
@@ -206,12 +177,9 @@ function run(
       let start = 0;
       while (start < tail.length && ((tail[start] as number) & 0xc0) === 0x80) start++;
       const raw = tail.subarray(start).toString("utf8");
-      const { output, pwd } = limits.acceptCwd ? splitCwdMarker(raw) : { output: raw };
-      // 已收到的目录事实先接受,展示截断或失败不能丢掉它。
-      const cwdNote = pwd ? limits.acceptCwd?.(pwd) : undefined;
-      let shown = output;
+      let shown = raw;
       try {
-        shown = applyTruncation(output, limits.truncate, {
+        shown = applyTruncation(raw, limits.truncate, {
           path: limits.output?.path ?? outputPath,
           omitted,
           bytes,
@@ -223,7 +191,7 @@ function run(
         // 展示策略或临时落盘失败也不能阻止取消完成。
         shown += `\n[Output preview failed: ${(error as Error).message}]`;
       }
-      return cwdNote ? (shown ? `${shown}\n${cwdNote}` : cwdNote) : shown;
+      return shown;
     };
 
     const killTree = () => {
