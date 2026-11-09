@@ -8,10 +8,12 @@
 //   tui-edit      编辑上下文的命令与面板动作
 //   tui-slots     策略槽切换与审批提示
 // 本文件只做:建组件树、建 Agent、建 ctx、接检视器与按键、回放历史、返回 TuiApp 接口。
+import { resolve } from "node:path";
 import {
   type Component,
   Container,
   Editor,
+  Input,
   isViewportTUI,
   Key,
   matchesKey,
@@ -93,6 +95,8 @@ export { toolCallDetail } from "./tui-format.js";
 export { childEventLines } from "./tui-render.js";
 
 export type TuiAppDeps = {
+  /** 会话准备阶段固定的执行目录;独立界面调用缺省使用构造时目录。 */
+  cwd?: string;
   terminal: Terminal;
   log: EventLog;
   provider: Provider;
@@ -176,7 +180,7 @@ export type TuiAppDeps = {
   readOnlyReason?: string;
   inputs?: SessionInputs;
   saveInputs?: boolean;
-  /** 换会话(/session new · fork · resume):由入口实现,停掉这个界面、换日志再起一个。 */
+  /** 会话操作由入口准备并激活目标运行环境。 */
   switchSession?: (target: SessionTarget) => void;
 };
 
@@ -188,6 +192,7 @@ export type TuiApp = {
   setup(): SessionSetup;
   modelLocator(): string;
   choose(title: string, rows: { label: string; note?: string }[]): Promise<string | undefined>;
+  input(title: string, note: string, value: string): Promise<string | undefined>;
   reviewSetup(setup: SessionSetup, missing: string[]): Promise<SessionSetup | undefined>;
   showText(title: string, text: string): Promise<void>;
   tui: TUI;
@@ -243,6 +248,7 @@ export function createTuiApp(
   savedInputs = deps.inputs?.read(deps.log.events),
 ): TuiApp {
   const { log, tools, compaction } = deps;
+  const cwd = resolve(deps.cwd ?? process.cwd());
   let stopped = false;
   let unsubscribeLog: (() => void) | undefined;
   let cancelDialog: (() => void) | undefined;
@@ -282,7 +288,7 @@ export function createTuiApp(
           .filter((t) => !COMMANDS.some((command) => command.name === t.name))
           .map((t) => ({ name: t.name, description: `template: ${t.description}` })),
       ],
-      process.cwd(),
+      cwd,
     ),
   );
   // 底部组件只组装一次;两种屏幕模式与离线导出复用同一顺序。
@@ -398,6 +404,7 @@ export function createTuiApp(
   // ---------- ctx:模块共享的全部状态与少数动作 ----------
   const ctx: TuiContext = {
     deps,
+    cwd,
     setupBase: structuredClone(
       deps.startupSettings ??
         mergeSetup(
@@ -666,9 +673,11 @@ export function createTuiApp(
     watchRecording(log);
 
     // ---------- 历史回放与订阅:屏幕即历史,历史与新事件长得一样 ----------
+    let directory: string | undefined;
     const draw = (e: AgentEvent, index = log.events.length - 1) => {
+      if (e.type === "session/directory") directory = e.cwd;
       status.observe(e);
-      render(ctx, e, index);
+      render(ctx, e, index, directory);
     };
     if (log.events.length > 0) {
       for (const [index, e] of log.events.entries()) draw(e, index);
@@ -766,7 +775,8 @@ export function createTuiApp(
       tui.requestRender();
       try {
         const value = await get();
-        const image = value.image ?? (value.text ? await imageFromPath(value.text) : undefined);
+        const image =
+          value.image ?? (value.text ? await imageFromPath(value.text, ctx.cwd) : undefined);
         if (stopped) return;
         if (image) {
           ctx.draftImages = [...ctx.draftImages, image];
@@ -869,6 +879,7 @@ export function createTuiApp(
       // 编辑面板先于应用快捷键接收输入;退出和记录保存仍由上方统一处理。
       if (
         ctx.dialog.component instanceof TextEditor ||
+        ctx.dialog.component instanceof Input ||
         (ctx.dialog.component instanceof PendingInputsView && ctx.dialog.component.editingText)
       ) {
         ctx.dialog.component.handleInput(data);
@@ -1038,6 +1049,33 @@ export function createTuiApp(
               () => deps.terminal.rows,
             ),
         ),
+      input: (heading, note, value) =>
+        sessionDialog<string>((done) => {
+          const intro = new Text(`${c.bold(c.ink(heading))}\n${c.faint(note)}`, 0, 0);
+          const input = new (class extends Input {
+            override render(width: number): string[] {
+              const height = Math.max(1, deps.terminal.rows);
+              const controls = [
+                ...super.render(width),
+                truncateToWidth(c.faint("Enter confirm · Esc cancel"), width),
+              ].slice(0, height);
+              return [
+                ...intro.render(width).slice(0, Math.max(0, height - controls.length)),
+                ...controls,
+              ];
+            }
+
+            override handleInput(data: string): void {
+              super.handleInput(data);
+              tui.requestRender();
+            }
+          })();
+          input.setValue(value);
+          input.handleInput("\x05");
+          input.onSubmit = done;
+          input.onEscape = () => done();
+          return input;
+        }),
       reviewSetup: (setup, missing) =>
         sessionDialog<SessionSetup>(
           (done) =>

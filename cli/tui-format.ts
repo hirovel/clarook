@@ -1,4 +1,5 @@
 // 屏幕文本的小工具:工具参数的人读形态、edit/write 的改动详情、任务简报、百分比。渲染、审批提示、编辑命令共用。
+import { isAbsolute } from "node:path";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { fileUrl, osc8 } from "./terminal-extras.js";
 import { c } from "./theme.js";
@@ -38,8 +39,8 @@ export function brief(task: string): string {
   return first.length > 24 ? `${first.slice(0, 24)}…` : first;
 }
 
-/** 工具参数的人读形态:命令与路径直接展示,其余压成紧凑 JSON。路径是 OSC 8 链接,支持的终端里可点击打开。 */
-export function formatArgs(args: unknown): string {
+/** 缺省只给摘要文字;路径显示传入当时目录,未知根仅为绝对路径生成链接。 */
+export function formatArgs(args: unknown, location?: { cwd: string | undefined }): string {
   const a = (args ?? {}) as Record<string, unknown>;
   let s: string;
   if (typeof a.command === "string") s = a.command;
@@ -50,7 +51,8 @@ export function formatArgs(args: unknown): string {
         : "";
     const path = plainDisplayText(a.path);
     const shown = path.length > 120 ? `${path.slice(0, 120)}…` : path;
-    return `${osc8(shown, fileUrl(a.path))}${range}`;
+    const linked = location && (location.cwd !== undefined || isAbsolute(a.path));
+    return `${linked ? osc8(shown, fileUrl(a.path, location.cwd ?? "")) : shown}${range}`;
   } else if (typeof a.task === "string") {
     s = `${a.scope ? `scope=${a.scope}  ` : ""}${brief(a.task)}`;
   } else if (Array.isArray(a.items)) {

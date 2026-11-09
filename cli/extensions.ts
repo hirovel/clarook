@@ -40,7 +40,7 @@ export async function loadExtensions(
     })());
   try {
     for (const p of paths) {
-      const mod = (await import(pathToFileURL(resolve(p)).href)) as { default?: unknown };
+      const mod = (await import(pathToFileURL(resolve(ctx.cwd, p)).href)) as { default?: unknown };
       if (typeof mod.default !== "function") {
         throw new Error(
           `extension module ${p} must default-export a function (ctx) => ({ tools?, slots?, onEvent? })`,

@@ -1,8 +1,8 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
-import { editTool } from "../cli/tools/fs.js";
+import { createEditTool, createReadTool, createWriteTool, editTool } from "../cli/tools/fs.js";
 import { validateArgs } from "../src/tools.js";
 import { testDirectory } from "./helpers/setup.js";
 
@@ -41,17 +41,34 @@ describe("validateArgs", () => {
   });
 });
 
-describe("editTool", () => {
+describe("文件工具", () => {
   function tempFile(content: string): string {
     const path = join(testDirectory("kernel-edit-"), "f.txt");
     writeFileSync(path, content, "utf8");
     return path;
   }
 
-  it("唯一匹配→替换成功", async () => {
-    const path = tempFile("aaa bbb ccc");
-    await editTool.execute({ path, oldText: "bbb", newText: "xxx" }, ctx);
-    expect(readFileSync(path, "utf8")).toBe("aaa xxx ccc");
+  it("读写和唯一替换使用显式根,绝对路径仍可访问根外文件", async () => {
+    const root = testDirectory("kernel-files-");
+    const relative = `${basename(root)}.txt`;
+    const absolute = join(testDirectory("kernel-files-absolute-"), "f.txt");
+    const read = createReadTool({ cwd: root });
+    const write = createWriteTool(root);
+    const edit = createEditTool(root);
+    try {
+      for (const [path, actual] of [
+        [relative, join(root, relative)],
+        [absolute, absolute],
+      ] as const) {
+        await write.execute({ path, content: "aaa bbb ccc" }, ctx);
+        expect(await read.execute({ path }, ctx)).toBe("1\taaa bbb ccc");
+        await edit.execute({ path, oldText: "bbb", newText: "xxx" }, ctx);
+        expect(readFileSync(actual, "utf8")).toBe("aaa xxx ccc");
+      }
+    } finally {
+      // 根绑定回归时,也清理测试可能误写到启动目录的唯一临时文件。
+      rmSync(resolve(relative), { force: true });
+    }
   });
 
   it("不存在→报错提示先 read", async () => {

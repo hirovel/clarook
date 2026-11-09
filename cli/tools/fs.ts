@@ -89,7 +89,10 @@ async function readLargeRange(
   return { lines, more: false, total: line - 1, clipped: anyClipped };
 }
 
-export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars?: number } = {}) {
+export function createReadTool(
+  opts: { truncate?: TruncationPolicy; maxLineChars?: number; cwd?: string } = {},
+) {
+  const directory = resolve(opts.cwd ?? process.cwd());
   const truncate = opts.truncate ?? keepHead();
   return defineTool({
     name: "read",
@@ -123,7 +126,7 @@ export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars
     }),
     concurrency: "parallel",
     async execute(args, ctx) {
-      const path = resolve(args.path);
+      const path = resolve(directory, args.path);
       const st = statSync(path);
       if (st.isDirectory()) {
         const listing = listDirectory(path);
@@ -226,84 +229,94 @@ export function listDirectory(dir: string): string {
 /** 默认实例:保头截断 —— 文件开头是结构所在。 */
 export const readTool = createReadTool();
 
-export const writeTool = defineTool({
-  name: "write",
-  ...described({
-    core: "Write a text file, replacing its contents; creates missing directories.",
-    guidance:
-      "For a change inside an existing file use edit; write is for new files and full rewrites. Read an existing file before overwriting it.",
-    rules:
-      "ALWAYS read an existing file before overwriting it. NEVER use write for a partial change to an existing file; use edit. NEVER create documentation files unless asked.",
-  }),
-  parameters: Type.Object({
-    path: Type.String({ description: "file path" }),
-    content: Type.String({ description: "complete file content" }),
-  }),
-  async execute(args) {
-    const path = resolve(args.path);
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, args.content, "utf8");
-    return `wrote ${Buffer.byteLength(args.content, "utf8")} bytes to ${args.path}`;
-  },
-});
+export function createWriteTool(cwd = process.cwd()) {
+  const directory = resolve(cwd);
+  return defineTool({
+    name: "write",
+    ...described({
+      core: "Write a text file, replacing its contents; creates missing directories.",
+      guidance:
+        "For a change inside an existing file use edit; write is for new files and full rewrites. Read an existing file before overwriting it.",
+      rules:
+        "ALWAYS read an existing file before overwriting it. NEVER use write for a partial change to an existing file; use edit. NEVER create documentation files unless asked.",
+    }),
+    parameters: Type.Object({
+      path: Type.String({ description: "file path" }),
+      content: Type.String({ description: "complete file content" }),
+    }),
+    async execute(args) {
+      const path = resolve(directory, args.path);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, args.content, "utf8");
+      return `wrote ${Buffer.byteLength(args.content, "utf8")} bytes to ${args.path}`;
+    },
+  });
+}
 
-export const editTool = defineTool({
-  name: "edit",
-  ...described({
-    core:
-      "Replace text in a file. oldText must match the file exactly, indentation included, and occur exactly once unless replaceAll is set. " +
-      "Uniform CRLF files also accept LF in oldText. No match or several matches fail with the reason.",
-    guidance:
-      "Keep oldText as short as it can be while still unique. Set replaceAll to change every occurrence, e.g. for a rename. " +
-      "Read the file in this session before editing it.",
-    rules:
-      "You MUST read the file in this session before editing it. oldText MUST match exactly and MUST occur exactly once unless replaceAll is set.",
-  }),
-  parameters: Type.Object({
-    path: Type.String({ description: "file path" }),
-    oldText: Type.String({ description: "text to replace; must be unique unless replaceAll" }),
-    newText: Type.String({ description: "replacement text" }),
-    replaceAll: Type.Optional(Type.Boolean({ description: "replace every occurrence" })),
-  }),
-  async execute(args) {
-    const path = resolve(args.path);
-    // 编辑会重写文件;解码失败时拒绝修改,避免把未知字节变成替换字符。
-    const bytes = readFileSync(path);
-    if (bytes.includes(0)) {
-      throw new Error(`${args.path} contains NUL bytes; edit only handles UTF-8 text.`);
-    }
-    let raw: string;
-    try {
-      raw = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-    } catch {
-      throw new Error(`${args.path} is not valid UTF-8 text; edit refused without writing.`);
-    }
-    // 仅对统一 CRLF 文件归一化。混合换行按原文匹配,保留未触及的行。
-    const crlf = raw.includes("\r\n") && !raw.replaceAll("\r\n", "").includes("\n");
-    const content = crlf ? raw.replaceAll("\r\n", "\n") : raw;
-    const oldText = crlf ? args.oldText.replaceAll("\r\n", "\n") : args.oldText;
-    const newText = crlf ? args.newText.replaceAll("\r\n", "\n") : args.newText;
-    if (!oldText) throw new Error("oldText must not be empty.");
-    const count = content.split(oldText).length - 1;
-    if (args.replaceAll && count > 0) {
-      const all = content.replaceAll(oldText, () => newText);
-      if (all === content)
+export const writeTool = createWriteTool();
+
+export function createEditTool(cwd = process.cwd()) {
+  const directory = resolve(cwd);
+  return defineTool({
+    name: "edit",
+    ...described({
+      core:
+        "Replace text in a file. oldText must match the file exactly, indentation included, and occur exactly once unless replaceAll is set. " +
+        "Uniform CRLF files also accept LF in oldText. No match or several matches fail with the reason.",
+      guidance:
+        "Keep oldText as short as it can be while still unique. Set replaceAll to change every occurrence, e.g. for a rename. " +
+        "Read the file in this session before editing it.",
+      rules:
+        "You MUST read the file in this session before editing it. oldText MUST match exactly and MUST occur exactly once unless replaceAll is set.",
+    }),
+    parameters: Type.Object({
+      path: Type.String({ description: "file path" }),
+      oldText: Type.String({ description: "text to replace; must be unique unless replaceAll" }),
+      newText: Type.String({ description: "replacement text" }),
+      replaceAll: Type.Optional(Type.Boolean({ description: "replace every occurrence" })),
+    }),
+    async execute(args) {
+      const path = resolve(directory, args.path);
+      // 编辑会重写文件;解码失败时拒绝修改,避免把未知字节变成替换字符。
+      const bytes = readFileSync(path);
+      if (bytes.includes(0)) {
+        throw new Error(`${args.path} contains NUL bytes; edit only handles UTF-8 text.`);
+      }
+      let raw: string;
+      try {
+        raw = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+      } catch {
+        throw new Error(`${args.path} is not valid UTF-8 text; edit refused without writing.`);
+      }
+      // 仅对统一 CRLF 文件归一化。混合换行按原文匹配,保留未触及的行。
+      const crlf = raw.includes("\r\n") && !raw.replaceAll("\r\n", "").includes("\n");
+      const content = crlf ? raw.replaceAll("\r\n", "\n") : raw;
+      const oldText = crlf ? args.oldText.replaceAll("\r\n", "\n") : args.oldText;
+      const newText = crlf ? args.newText.replaceAll("\r\n", "\n") : args.newText;
+      if (!oldText) throw new Error("oldText must not be empty.");
+      const count = content.split(oldText).length - 1;
+      if (args.replaceAll && count > 0) {
+        const all = content.replaceAll(oldText, () => newText);
+        if (all === content)
+          throw new Error("replacement is identical to the original; nothing written.");
+        writeFileSync(path, crlf ? all.replaceAll("\n", "\r\n") : all, "utf8");
+        return `replaced ${count} occurrences in ${args.path}.`;
+      }
+      if (count > 1) {
+        throw new Error(
+          `oldText occurs ${count} times in ${args.path}, not unique. Provide more context, or set replaceAll to change every occurrence.`,
+        );
+      }
+      if (count === 0) {
+        throw new Error(`oldText not found in ${args.path}; read the file first to confirm it.`);
+      }
+      const next = content.replace(oldText, () => newText);
+      if (next === content)
         throw new Error("replacement is identical to the original; nothing written.");
-      writeFileSync(path, crlf ? all.replaceAll("\n", "\r\n") : all, "utf8");
-      return `replaced ${count} occurrences in ${args.path}.`;
-    }
-    if (count > 1) {
-      throw new Error(
-        `oldText occurs ${count} times in ${args.path}, not unique. Provide more context, or set replaceAll to change every occurrence.`,
-      );
-    }
-    if (count === 0) {
-      throw new Error(`oldText not found in ${args.path}; read the file first to confirm it.`);
-    }
-    const next = content.replace(oldText, () => newText);
-    if (next === content)
-      throw new Error("replacement is identical to the original; nothing written.");
-    writeFileSync(path, crlf ? next.replaceAll("\n", "\r\n") : next, "utf8");
-    return `replaced one occurrence in ${args.path}.`;
-  },
-});
+      writeFileSync(path, crlf ? next.replaceAll("\n", "\r\n") : next, "utf8");
+      return `replaced one occurrence in ${args.path}.`;
+    },
+  });
+}
+
+export const editTool = createEditTool();

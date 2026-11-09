@@ -1,6 +1,7 @@
 import type { AgentEvent, ToolCall } from "./events.js";
 import type { ImageInput } from "./images.js";
 import { unresolvedCalls } from "./recovery.js";
+import { directoryAt } from "./session-directory.js";
 import { applyToolOmissions, prepareReplay, toolReplay } from "./tool-replay.js";
 
 /**
@@ -53,6 +54,16 @@ export function contextFields(
     ...(readOnlyReason && { readOnlyReason }),
   });
   switch (event?.type) {
+    case "session/directory":
+      return [
+        {
+          field: "content",
+          original: event.environment,
+          current: event.environment,
+          readOnlyReason:
+            "Session directory is an execution fact; use /session directory to change it.",
+        },
+      ];
     case "assistant/message":
       return [
         field("text", event.text),
@@ -92,10 +103,12 @@ export function editState(
     const e = events[k];
     if (!e) continue;
     if (e.type === "context/edit") {
+      if (events[e.target]?.type === "session/directory") continue;
       const cur = edits.get(e.target) ?? {};
       cur[e.field] = e.value;
       edits.set(e.target, cur);
     } else if (e.type === "context/drop") {
+      if (events[e.target]?.type === "session/directory") continue;
       dropped.add(e.target);
     }
   }
@@ -261,6 +274,8 @@ function baseComposition(events: readonly AgentEvent[], upTo: number): Compositi
       break;
     }
   }
+  // 豁免固定在摘要发生时的目录;后续绑定只能追加,不能撤走已保留前缀。
+  const summaryDirectory = c.summary ? directoryAt(events, summaryEvent) : undefined;
   let prefixChanged = false;
   const push = (m: Message, event: number, stages: string[]) => {
     if (m.role !== "tool") flushUnknown();
@@ -285,7 +300,7 @@ function baseComposition(events: readonly AgentEvent[], upTo: number): Compositi
     }
     const e = events[i];
     if (!e) continue;
-    if (c.summary && i >= c.coversFrom && i < c.coversUpTo) {
+    if (c.summary && i >= c.coversFrom && i < c.coversUpTo && e !== summaryDirectory) {
       if (isProjected(e)) omitted.push({ event: i, reason: "covered" });
       continue;
     }
@@ -299,6 +314,11 @@ function baseComposition(events: readonly AgentEvent[], upTo: number): Compositi
     const edit = ed.edits.get(i);
     const editedStages = Object.keys(edit ?? {}).map((f) => `edited:${f}`);
     switch (e.type) {
+      case "session/directory":
+        push(verbatim.get(e) ?? remember(e, { role: "user", content: e.environment }), i, [
+          "session-directory",
+        ]);
+        break;
       case "session/start":
         push(
           edit?.system !== undefined
@@ -402,10 +422,11 @@ function baseComposition(events: readonly AgentEvent[], upTo: number): Compositi
   return { messages, provenance, omitted };
 }
 
-/** 模型可见的事件类型:这四种投影成消息,其余只给人看。 */
+/** 模型可见的事件类型;其他事件只给人看或间接改变投影。 */
 export function isProjected(e: AgentEvent): boolean {
   return (
     e.type === "session/start" ||
+    e.type === "session/directory" ||
     e.type === "user/message" ||
     (e.type === "user/shell" && !e.excludeFromContext) ||
     e.type === "assistant/message" ||

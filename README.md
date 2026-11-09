@@ -108,6 +108,10 @@ Built-in tools read, write and edit files, run commands, search file contents an
 
 Each built-in `bash` call starts in its configured working directory. `cd` affects only that call; use `cd path && command` to run elsewhere. Shell directory changes do not carry over to later calls.
 
+Sessions remember their directory. Resuming from another directory keeps the saved root for tools, attachments, completion and project resources. Use `/session directory` to choose a new root, or `/session directory /path` to provide it directly. Older sessions without a recorded root and sessions whose directory has moved use the same chooser; the confirmed directory is saved in the original history. For noninteractive use, run `clarook sessions directory SESSION_FILE DIRECTORY` before resuming.
+
+Directory changes preserve saved instructions and manual system-prompt edits. They do not reload the new directory's `AGENTS.md` or rewrite old paths. Choosing the existing current/defaults setup source rebuilds its prompt and work configuration. The current execution directory is recorded separately, remains visible after compaction, and can be changed through the session operation rather than a context edit. Historical requests keep their original directory facts.
+
 Use `@path` to attach a UTF-8 text file, or `@"path with spaces.txt"` for a path containing spaces. Type `@` to choose a file path; completion reads names only, and contents are attached when you submit. Multiple references, such as `Compare @a.txt @b.txt`, attach both files. Files over 50 KiB, binary files and invalid UTF-8 are skipped with a notice. Ctrl+V pastes an image; Alt+I lists attached images and lets you remove one.
 
 Attachments come from your original input, independently of prompt-template substitution. For an installed `/review` template, `/review @a.txt @b.txt` attaches both files even if the template only uses `$1`. Templates and skills generate message text: their own `@path`, a constructed `@$1`, or a leading `!` stays text and does not automatically attach files or run a user shell command. Later model tool calls follow the session's approval rules.

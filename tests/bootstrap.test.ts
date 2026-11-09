@@ -1,6 +1,6 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   applyPreset,
@@ -63,7 +63,7 @@ describe("入口参数与会话文件", () => {
     });
     expect(parseCommonArgs(["-p", "hi", "--continue"]).rest).toEqual(["hi"]);
     expect(() => parseCommonArgs(["--effort", "ultra"])).toThrow("unknown effort level");
-    expect(parseCommonArgs(["--compaction", "./x.mjs"]).compaction).toBe("./x.mjs");
+    expect(parseCommonArgs(["--compaction", "./x.mjs"]).compaction).toBe(resolve("./x.mjs"));
     expect(() => parseCommonArgs(["--bogus"])).toThrow("unknown option");
     expect(() => parseCommonArgs(["--model"])).toThrow("requires a value");
   });
@@ -180,7 +180,7 @@ describe("会话恢复", () => {
       file,
       "export default async (input) => ({ cleared: [], strategy: `mine(${input.events.length})` });\n",
     );
-    const custom = await loadCompactionStrategy(file);
+    const custom = await loadCompactionStrategy("my-strategy.mjs", undefined, tmp);
     const out = await custom({ events: [], window: 1, targetTokens: 1 });
     expect(out?.strategy).toBe("mine(0)");
     const cfg = await buildCompaction(
@@ -203,8 +203,9 @@ describe("会话恢复", () => {
     const instructions = "Keep exact paths.\n\n## Next action\nWrite the next step.";
     writeFileSync(template, instructions);
     const configured = await buildCompaction(
-      { compactionPrompt: template, compactionMaxTokens: 73, preservation: "tokens 1" },
+      { compactionPrompt: "summary.md", compactionMaxTokens: 73, preservation: "tokens 1" },
       100000,
+      tmp,
     );
     const log = new EventLog();
     log.append({ type: "session/start", at: "t", model: "m", system: "Work on code." });

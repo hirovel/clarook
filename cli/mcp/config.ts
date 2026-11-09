@@ -1,7 +1,7 @@
 // MCP 配置:config.json 的 mcp.servers,加上项目根 .mcp.json 的 mcpServers(与 Claude Code 同形,便于复用现成文件)。
 // 同名以 config.json 为准且整条覆盖。${VAR} 与 ${VAR:-default} 展开;缺失的变量原样保留并报出来。
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 /** 一台 MCP 服务器。command 走 stdio,url 走 Streamable HTTP。 */
 export type McpServerConfig = {
   command?: string;
@@ -136,7 +136,7 @@ export function loadMcpServers(
       resolved.url = e.value;
       missing.push(...e.missing);
     }
-    if (config.cwd) resolved.cwd = join(cwd, config.cwd);
+    if (config.command || config.cwd) resolved.cwd = resolve(cwd, config.cwd ?? ".");
     out.push({ name, config: resolved, missing: [...new Set(missing)], source });
   }
   return out;

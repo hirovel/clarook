@@ -76,7 +76,7 @@ export async function runUserShell(
     ctx.note(c.soft("Work is running. Wait or press Esc first; this command is kept, not queued."));
     return;
   }
-  const cwd = process.cwd();
+  const cwd = ctx.cwd;
   const id = randomUUID();
   const draft = shellInput(ctx.editor.getExpandedText());
   const fromEditor =

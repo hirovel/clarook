@@ -7,6 +7,7 @@ import type { EventLog } from "../src/log.js";
 import { deriveMessages } from "../src/messages.js";
 import { errorMessage } from "../src/providers/errors.js";
 import { recordUnresolvedCalls } from "../src/recovery.js";
+import { directoryAt } from "../src/session-directory.js";
 import { applyPreset, type CommonArgs, parseCommonArgs, settingsFromArgs } from "./args.js";
 import {
   type Bootstrap,
@@ -19,6 +20,7 @@ import {
 } from "./bootstrap.js";
 import { McpConnections } from "./mcp/connections.js";
 import type { ProjectMcpReview } from "./mcp/trust.js";
+import type { DirectoryIssue } from "./session-directory.js";
 import { SessionInputs } from "./session-inputs.js";
 import { prepareSessionRuntime } from "./session-runtime.js";
 import {
@@ -33,7 +35,7 @@ import { createTuiApp, type TuiApp } from "./tui-app.js";
 import type { SessionTarget } from "./tui-context.js";
 
 type Session = ReturnType<typeof openSession>;
-type Runtime = Awaited<ReturnType<typeof prepareSessionRuntime>>;
+type Runtime = NonNullable<Awaited<ReturnType<typeof prepareSessionRuntime>>>;
 
 export async function startTuiSession(options: {
   boot: Bootstrap;
@@ -42,7 +44,8 @@ export async function startTuiSession(options: {
   onExit: () => void;
 }) {
   const { boot } = options;
-  const dir = sessionsDir(boot.config);
+  const entryCwd = process.cwd();
+  const dir = resolve(entryCwd, sessionsDir(boot.config));
   const connections = new McpConnections();
   const inputs = new Map<string, SessionInputs>();
   // 离开的会话只有尚未保存时留在这里;恢复写盘即释放,重开时复用同一个写入者。
@@ -109,9 +112,9 @@ export async function startTuiSession(options: {
   const prepareView = (session: Session, args: CommonArgs, runtime?: Runtime): (() => TuiApp) => {
     const choice = runtime?.choice ?? first;
     const templateErrors: string[] = [];
-    const templates = discoverTemplates(process.cwd(), undefined, (error) =>
-      templateErrors.push(error.message),
-    );
+    const templates = runtime
+      ? discoverTemplates(runtime.cwd, undefined, (error) => templateErrors.push(error.message))
+      : [];
     let savedInputs: SessionInputs | undefined;
     if (runtime) {
       savedInputs = inputs.get(session.sessionFile);
@@ -129,6 +132,7 @@ export async function startTuiSession(options: {
           ...(savedInputs && { inputs: savedInputs }),
           saveInputs: args.saveInputs ?? true,
           terminal,
+          cwd: runtime?.cwd ?? directoryAt(session.log.events)?.cwd ?? entryCwd,
           log: session.log,
           provider: choice.provider,
           tools: runtime?.tools ?? [],
@@ -217,14 +221,36 @@ export async function startTuiSession(options: {
     args: CommonArgs,
     setup?: SessionSetup,
     allowUnavailable = false,
+    directory?: string,
   ) {
     const binding: { view?: TuiApp } = {};
+    const reviewView = () => {
+      if (current?.view) return current.view;
+      trustView = prepareView(session, args)();
+      current = { session, args, view: trustView };
+      return trustView;
+    };
     const runtime = await prepareSessionRuntime({
       boot,
       args,
       ...session,
       connections,
       allowUnavailable,
+      entryCwd: current?.runtime?.cwd ?? entryCwd,
+      ...(directory !== undefined && { directory }),
+      chooseDirectory: (issue: DirectoryIssue) =>
+        reviewView().input(
+          "Choose session directory",
+          [
+            issue.kind === "unrecorded"
+              ? "No directory is recorded for this session."
+              : "The selected session directory is unavailable.",
+            ...(issue.detail ? [issue.detail] : []),
+            "This choice is saved after preparation. Saved instructions stay unchanged.",
+            "Enter a directory or press Esc to keep the current session.",
+          ].join("\n"),
+          issue.suggested,
+        ),
       onChild: (child) => binding.view?.attachChild(child),
       slots: () => binding.view?.slots(),
       current: () =>
@@ -235,12 +261,7 @@ export async function startTuiSession(options: {
         },
       ...(setup?.descriptions && { descriptions: setup.descriptions }),
       confirmProjectMcp: async (review: ProjectMcpReview) => {
-        let view = current?.view;
-        if (!view) {
-          trustView = prepareView(session, args)();
-          view = trustView;
-          current = { session, args, view };
-        }
+        const view = reviewView();
         await view.showText(
           "Project MCP configuration",
           [
@@ -270,6 +291,7 @@ export async function startTuiSession(options: {
         return chosen === "Trust this version and connect";
       },
     });
+    if (!runtime) return;
     return { runtime, binding };
   }
   async function switchSession(target: SessionTarget): Promise<void> {
@@ -286,11 +308,24 @@ export async function startTuiSession(options: {
     let prepared: Awaited<ReturnType<typeof prepare>> | undefined;
     let candidate: Session | undefined;
     try {
+      const origin = old.runtime?.cwd ?? entryCwd;
+      let directory = target.kind === "new" ? undefined : target.directory;
+      if (target.kind === "directory" && directory === undefined) {
+        directory = await old.view.input(
+          "Change session directory",
+          "Save a new directory for this session. History and saved instructions stay unchanged.",
+          origin,
+        );
+        if (directory === undefined) return;
+      }
       const saved = defaults();
       let session =
-        target.kind === "resume"
+        target.kind !== "new"
           ? (() => {
-              const file = resolve(target.file);
+              const file =
+                target.kind === "directory"
+                  ? old.session.sessionFile
+                  : resolve(origin, target.file);
               const live =
                 file === resolve(old.session.sessionFile) ? old.session.log : unsaved.get(file);
               return live
@@ -314,13 +349,16 @@ export async function startTuiSession(options: {
         const values = withCurrentDisplay(setup.values, originalSetup.values);
         try {
           const args = argsFor(values);
-          if (!session) session = beginSession(args, boot.choose(args.model), process.cwd(), dir);
+          if (!session) session = beginSession(args, boot.choose(args.model), origin, dir);
           candidate = session;
           old.view.note("Preparing session… Your current session remains available.");
-          prepared = await prepare(session, args, setup);
+          prepared = await prepare(session, args, setup, false, directory);
+          if (!prepared) return;
           // 所有可能失败的文件读取都发生在切换之前,不改目标的模型上下文。
           const prompt =
-            session.resumed && source !== "history" ? systemPromptFor(args) : undefined;
+            session.resumed && source !== "history"
+              ? systemPromptFor(args, prepared.runtime.cwd)
+              : undefined;
           const missingTools = setup.tools.filter(
             (name) =>
               !args.disabledTools?.includes(name) &&
@@ -386,9 +424,22 @@ export async function startTuiSession(options: {
             retainUnsaved(log);
           }
           old.view.stop();
-          prepared.runtime.activate();
+          let view: TuiApp | undefined;
           try {
-            const view = showView();
+            view = showView();
+            prepared.runtime.activate();
+            prepared.binding.view = view;
+            current = { session, args, view, runtime: prepared.runtime, binding: prepared.binding };
+          } catch (error) {
+            view?.stop();
+            old.runtime?.activate();
+            old.view = prepareView(old.session, old.args, old.runtime)();
+            if (old.binding) old.binding.view = old.view;
+            old.view.setDraft(draft);
+            throw error;
+          }
+          prepared = undefined;
+          try {
             if (prompt) {
               const target = session.log.events.findIndex((e) => e.type === "session/start");
               if (target >= 0)
@@ -408,16 +459,11 @@ export async function startTuiSession(options: {
                   text: prompt.preamble.map((p) => p.text).join("\n\n"),
                 });
             }
-            prepared.binding.view = view;
-            current = { session, args, view, runtime: prepared.runtime, binding: prepared.binding };
           } catch (error) {
-            old.runtime?.activate();
-            old.view = prepareView(old.session, old.args, old.runtime)();
-            if (old.binding) old.binding.view = old.view;
-            old.view.setDraft(draft);
-            throw error;
+            current.view.note(
+              `Session is active, but prompt regeneration failed: ${errorMessage(error)}`,
+            );
           }
-          prepared = undefined;
           await old.runtime
             ?.dispose()
             .catch((error) =>
@@ -605,7 +651,7 @@ export async function startTuiSession(options: {
   const session =
     options.args.resume || options.args.continue
       ? openSession(options.args, dir)
-      : beginSession(options.args, first, process.cwd(), dir);
+      : beginSession(options.args, first, entryCwd, dir);
   if (session.resumed) {
     current = { session, args: options.args, view: prepareView(session, options.args)() };
     void switchSession({ kind: "resume", file: session.sessionFile }).catch((error) =>
@@ -639,14 +685,15 @@ export async function startTuiSession(options: {
     let ready: Awaited<ReturnType<typeof prepare>>;
     try {
       ready = await prepare(session, options.args, undefined, true);
+      if (!ready) throw new Error("Session preparation cancelled.");
     } catch (error) {
       return failStartup(error);
     }
     try {
       trustView?.stop();
       if (closed) throw new Error("Session closed during MCP review");
-      ready.runtime.activate();
       const view = prepareView(session, options.args, ready.runtime)();
+      ready.runtime.activate();
       ready.binding.view = view;
       current = {
         session,

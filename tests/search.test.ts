@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { diffLines, hunks } from "../cli/tools/diff.js";
-import { createGrepTool, globTool } from "../cli/tools/search.js";
+import { createGlobTool, createGrepTool, globTool } from "../cli/tools/search.js";
 
 let tmp: string | undefined;
 afterEach(() => {
@@ -25,49 +25,41 @@ function project(): string {
 describe("只读工具", () => {
   it("glob 按整个路径匹配,包含隐藏文件并跳过构建目录", async () => {
     const root = project();
+    const glob = createGlobTool(root);
     writeFileSync(join(root, ".hidden.ts"), "export {};");
     writeFileSync(join(root, ".gitignore"), "src/a.ts\n");
     expect(
-      await globTool.execute(
-        { pattern: "src/**/*.ts", path: root },
-        { signal: new AbortController().signal },
-      ),
+      await glob.execute({ pattern: "src/**/*.ts" }, { signal: new AbortController().signal }),
     ).toBe("src/a.ts\nsrc/deep/b.ts");
     expect(
-      await globTool.execute(
-        { pattern: "*.ts", path: root },
-        { signal: new AbortController().signal },
-      ),
+      await glob.execute({ pattern: "*.ts", path: "." }, { signal: new AbortController().signal }),
     ).toBe(".hidden.ts");
     expect(
-      await globTool.execute(
+      await glob.execute(
         { pattern: "**/*.js", path: root },
         { signal: new AbortController().signal },
       ),
     ).toBe("(no matches)");
     expect(
-      await globTool.execute(
-        { pattern: "**", path: root },
-        { signal: new AbortController().signal },
-      ),
+      await glob.execute({ pattern: "**", path: root }, { signal: new AbortController().signal }),
     ).toBe(".gitignore\n.hidden.ts\nREADME.md\nsrc/a.ts\nsrc/deep/b.ts");
     expect(
-      await globTool.execute(
-        { pattern: "src/**", path: root },
+      await glob.execute(
+        { pattern: "**/*.ts", path: "src" },
         { signal: new AbortController().signal },
       ),
-    ).toBe("src/a.ts\nsrc/deep/b.ts");
+    ).toBe("a.ts\ndeep/b.ts");
   });
 
   it("grep 返回可交给 read 的路径,支持文件过滤和大小写选项", async () => {
     const root = project();
-    const grep = createGrepTool();
+    const grep = createGrepTool({ cwd: root });
     const out = await grep.execute(
-      { pattern: "alpha", path: root, glob: "*.ts", ignoreCase: true },
+      { pattern: "alpha", glob: "*.ts", ignoreCase: true },
       { signal: new AbortController().signal },
     );
-    expect(out).toContain(`${root.split("\\").join("/")}/src/a.ts:1:export const alpha`);
-    expect(out).toContain(`${root.split("\\").join("/")}/src/deep/b.ts:1:const Alpha`);
+    expect(out).toContain("src/a.ts:1:export const alpha");
+    expect(out).toContain("src/deep/b.ts:1:const Alpha");
     expect(out).not.toContain("README.md");
     expect(out).not.toContain("node_modules");
     expect(
@@ -76,11 +68,17 @@ describe("只读工具", () => {
         { signal: new AbortController().signal },
       ),
     ).toBe("(no matches)");
-    const none = await grep.execute(
-      { pattern: "zzz", path: root },
+    expect(
+      await grep.execute(
+        { pattern: "beta", path: "src/a.ts" },
+        { signal: new AbortController().signal },
+      ),
+    ).toBe("src/a.ts:2:function beta() {}");
+    const absolute = await grep.execute(
+      { pattern: "alpha", path: join(root, "README.md") },
       { signal: new AbortController().signal },
     );
-    expect(none).toBe("(no matches)");
+    expect(absolute).toBe(`${root.split("\\").join("/")}/README.md:1:alpha in docs`);
     await expect(
       grep.execute({ pattern: "(", path: root }, { signal: new AbortController().signal }),
     ).rejects.toThrow(/search failed/);

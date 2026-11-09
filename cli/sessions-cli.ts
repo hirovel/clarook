@@ -1,8 +1,12 @@
 // `clarook sessions`:列出会话目录,或按时间 / 条数清理。不加 --yes 只打印将要删什么。
 // 用法:clarook sessions [--dir D]
 //       clarook sessions prune (--older-than 30d | --keep 20) [--dir D] [--yes]
+
+import { resolve } from "node:path";
 import { loadConfig } from "../src/config.js";
+import { EventLog } from "../src/log.js";
 import { SESSIONS_DIR, sessionsDir } from "./bootstrap.js";
+import { prepareSessionDirectory } from "./session-directory.js";
 import { listSessions, parseAge, pruneSessions, sessionRows } from "./sessions.js";
 
 const argv = process.argv.slice(2);
@@ -10,6 +14,7 @@ const USAGE_SESSIONS = `Usage
   clarook sessions [--dir D]                                 list session files, newest first
   clarook sessions prune --older-than 30d [--dir D] [--yes]  delete sessions started more than 30 days ago (12h = hours)
   clarook sessions prune --keep 20 [--dir D] [--yes]         keep only the 20 most recent
+  clarook sessions directory FILE DIRECTORY                bind a session to this directory
   Without --yes, prune only prints what it would delete. Trace files and .mcp folders go with their session.`;
 
 function flag(name: string): string | undefined {
@@ -23,6 +28,25 @@ function flag(name: string): string | undefined {
 try {
   if (argv.includes("--help") || argv.includes("-h")) {
     console.log(USAGE_SESSIONS);
+    process.exit(0);
+  }
+  if (argv[0] === "directory") {
+    if (argv.length !== 3 || !argv[1] || !argv[2])
+      throw new Error("Usage: clarook sessions directory FILE DIRECTORY");
+    const log = EventLog.load(resolve(argv[1]), { attach: true });
+    try {
+      const directory = await prepareSessionDirectory(log, {
+        entryCwd: process.cwd(),
+        directory: argv[2],
+      });
+      if (!directory) throw new Error("Directory selection cancelled.");
+      directory.commit();
+      await log.checkpoint();
+      if (log.recording?.error) throw new Error(`Saving failed: ${log.recording.error}`);
+      console.log(`Session directory: ${directory.cwd}\nSession file: ${log.path}`);
+    } finally {
+      log.recording?.dispose();
+    }
     process.exit(0);
   }
   const configuredDir = (): string => {

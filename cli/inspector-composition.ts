@@ -73,6 +73,9 @@ export function compositionLines(events: readonly AgentEvent[], r: CompositionRo
     `${c.soft("tokens".padEnd(12))} ${c.ink(`≈${messageTokens(m)}`)}`,
     "",
   ];
+  if (src?.type === "session/directory") {
+    lines.push(c.soft(contextFields(src)[0]?.readOnlyReason ?? ""), "");
+  }
   if (m.role === "assistant" && m.reasoning) {
     lines.push(c.bold(c.soft(`reasoning (${m.reasoningKind ?? "?"})`)));
     lines.push(...indent(visibleSourceText(m.reasoning)).map((l) => c.faint(c.italic(l))));
@@ -288,12 +291,16 @@ export function consequenceOf(
         ...fromHere,
       ].join("\n");
     }
-    case "rewind":
+    case "rewind": {
+      const excluded = after.filter((row) => events[row.event]?.type !== "session/directory");
+      const excludedTok = excluded.reduce((sum, row) => sum + messageTokens(row.message), 0);
       return [
         "Applies: next message you send",
-        `Input: keep through #${r.event}; exclude ${plural(after.length, "message")} after it (${fmtTok(afterTok)} tok)`,
+        `Input: keep through #${r.event}; exclude ${plural(excluded.length, "message")} after it (${fmtTok(excludedTok)} tok)`,
+        ...(excluded.length < after.length ? ["Session directory remains in input"] : []),
         "History: original records kept; files unchanged",
       ].join("\n");
+    }
     case "retry":
       return [
         "Applies: sends an API request immediately; no new prompt",

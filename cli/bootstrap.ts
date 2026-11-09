@@ -22,6 +22,7 @@ import {
 import { now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { planTool } from "../src/plan.js";
+import { recordSessionDirectory } from "../src/session-directory.js";
 import { defaultPreset, setSetting } from "../src/settings.js";
 import { replaceSetup } from "../src/setup.js";
 import type { Tool } from "../src/tools.js";
@@ -46,9 +47,9 @@ import { openSession, SESSIONS_DIR } from "./sessions.js";
 import { applyToolPrompts } from "./tool-prompts.js";
 import { createBashTool } from "./tools/bash.js";
 import { createFetchTool, type FetchConfig } from "./tools/fetch.js";
-import { editTool, readTool, writeTool } from "./tools/fs.js";
+import { createEditTool, createReadTool, createWriteTool } from "./tools/fs.js";
 import { createRememberTool, type MemoryFiles } from "./tools/memory.js";
-import { globTool, grepTool } from "./tools/search.js";
+import { createGlobTool, createGrepTool } from "./tools/search.js";
 import { createSkillTool } from "./tools/skill.js";
 
 export * from "./args.js";
@@ -268,6 +269,7 @@ export function memoryFiles(cwd = process.cwd(), home = clarookHome()): MemoryFi
 /** 创建内置工具。会话和子任务的资源装配由 session-runtime 负责。 */
 export function buildTools(
   opts: {
+    cwd?: string;
     memory?: MemoryFiles;
     skills?: Skill[];
     fetchConfig?: FetchConfig;
@@ -275,17 +277,18 @@ export function buildTools(
     plan?: boolean;
   } = {},
 ): Tool[] {
-  // 每次组装复制一份工具对象:描述风格槽原地改描述,不能碰模块级单例。
+  const cwd = opts.cwd ?? process.cwd();
+  // 工厂创建独立执行闭包;只有共享的 plan 描述需要复制。
   const base: Tool[] = [
-    readTool,
-    writeTool,
-    editTool,
-    createBashTool(),
-    grepTool,
-    globTool,
+    createReadTool({ cwd }),
+    createWriteTool(cwd),
+    createEditTool(cwd),
+    createBashTool({ cwd }),
+    createGrepTool({ cwd }),
+    createGlobTool(cwd),
     createFetchTool({ ...(opts.fetchConfig && { config: opts.fetchConfig }) }),
-    ...((opts.plan ?? true) ? [planTool] : []),
-  ].map((t) => ({ ...t }));
+    ...((opts.plan ?? true) ? [{ ...planTool }] : []),
+  ];
   if (opts.memory) base.push(createRememberTool(opts.memory));
   if (opts.skills?.some((s) => !s.disableModelInvocation)) base.push(createSkillTool(opts.skills));
   applyToolPrompts(base, opts.toolPrompts);
@@ -325,7 +328,7 @@ export function systemPromptFor(
   /** 改放首条 user 消息的段(--instructions-as user)。 */
   preamble: { name: string; text: string }[];
 } {
-  const read = (p: string | undefined) => (p ? readFileSync(p, "utf8") : undefined);
+  const read = (p: string | undefined) => (p ? readFileSync(resolve(cwd, p), "utf8") : undefined);
   const replace = read(args.systemPromptFile);
   const append = read(args.appendSystemPromptFile);
   const built = buildSystemPrompt({
@@ -373,6 +376,7 @@ export function beginSession(
       system: p.text,
       sections: p.sections,
     });
+    recordSessionDirectory(s.log, resolve(cwd));
     // instructionsAs = user:项目指令与记忆作为首条 user 消息进日志。
     // 它是一条用户没打过的用户消息,所以必须像其它用户消息一样落盘、上屏,不做任何隐藏。
     if (p.preamble.length > 0) {

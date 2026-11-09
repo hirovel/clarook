@@ -4,8 +4,10 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { type DirectoryIssue, prepareSessionDirectory } from "../cli/session-directory.js";
 import { listSessions, parseAge, pruneSessions, sessionRows } from "../cli/sessions.js";
 import { EventLog } from "../src/log.js";
+import { directoryAt, recordSessionDirectory } from "../src/session-directory.js";
 
 let tmp: string | undefined;
 afterEach(() => {
@@ -38,6 +40,97 @@ function session(
 }
 
 describe("listSessions / pruneSessions", () => {
+  it("旧日志与搬迁共用目录选择,取消不写,提交后恢复记住新根且保留历史", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "clarook-sessions-"));
+    const entryCwd = tmp;
+    const first = join(tmp, "first");
+    const moved = join(tmp, "moved");
+    const blocked = join(tmp, "file");
+    mkdirSync(first);
+    mkdirSync(moved);
+    writeFileSync(blocked, "not a directory");
+    const file = join(tmp, "legacy.jsonl");
+    let log = new EventLog(file);
+    try {
+      log.append({ type: "session/start", at: "2026-09-01", model: "p/m", system: "old root" });
+      log.append({ type: "user/message", at: "2026-09-01", text: "keep this history" });
+      log.append({
+        type: "request",
+        at: "2026-09-01",
+        model: "p/m",
+        messages: 2,
+        tools: [],
+        estimatedTokens: 10,
+        reason: "turn",
+      });
+      const history = [...log.events];
+      expect(
+        await prepareSessionDirectory(log, { entryCwd, chooseDirectory: async () => undefined }),
+      ).toBeUndefined();
+      expect(log.events).toEqual(history);
+      await expect(prepareSessionDirectory(log, { entryCwd })).rejects.toThrow(
+        "clarook sessions directory <file> <directory>",
+      );
+
+      const issues: DirectoryIssue[] = [];
+      const answers = ["   ", "file", "first"];
+      const chooseDirectory = async (issue: DirectoryIssue) => {
+        issues.push(issue);
+        return answers.shift();
+      };
+      const prepared = await prepareSessionDirectory(log, { entryCwd, chooseDirectory });
+      expect(issues.map((issue) => issue.kind)).toEqual([
+        "unrecorded",
+        "unavailable",
+        "unavailable",
+      ]);
+      expect(issues[1]?.detail).toContain("Enter a directory path");
+      expect(issues[2]?.detail).toContain("Not a directory");
+      expect(prepared?.cwd).toBe(first);
+      expect(log.events).toEqual(history);
+      prepared?.commit();
+      prepared?.commit();
+      const same = await prepareSessionDirectory(log, { entryCwd, directory: "first" });
+      same?.commit();
+      expect(log.events.filter((event) => event.type === "session/directory")).toHaveLength(1);
+      expect(log.events.slice(0, history.length)).toEqual(history);
+      await log.checkpoint();
+      log.recording?.dispose();
+      log = EventLog.load(file, { attach: true });
+      expect((await prepareSessionDirectory(log, { entryCwd }))?.cwd).toBe(first);
+
+      rmSync(first, { recursive: true });
+      const beforeMove = [...log.events];
+      expect(await prepareSessionDirectory(log, { entryCwd, chooseDirectory })).toBeUndefined();
+      expect(issues.at(-1)).toMatchObject({ kind: "unavailable", recorded: first });
+      expect(log.events).toEqual(beforeMove);
+      await expect(prepareSessionDirectory(log, { entryCwd })).rejects.toThrow(
+        "clarook sessions directory <file> <directory>",
+      );
+      answers.push("moved");
+      const migration = await prepareSessionDirectory(log, { entryCwd, chooseDirectory });
+      expect(migration?.cwd).toBe(moved);
+      expect(log.events).toEqual(beforeMove);
+      migration?.commit();
+      expect(log.events.slice(0, beforeMove.length)).toEqual(beforeMove);
+      await log.checkpoint();
+      log.recording?.dispose();
+      log = EventLog.load(file, { attach: true });
+      const restored = await prepareSessionDirectory(log, { entryCwd });
+      expect(restored?.cwd).toBe(moved);
+      restored?.commit();
+      expect(log.events.filter((event) => event.type === "session/directory")).toHaveLength(2);
+
+      const stale = await prepareSessionDirectory(log, { entryCwd, directory: "moved" });
+      recordSessionDirectory(log, entryCwd);
+      expect(() => stale?.commit()).toThrow("Session directory changed during preparation");
+      expect(directoryAt(log.events)?.cwd).toBe(entryCwd);
+    } finally {
+      log.recording?.flush();
+      log.recording?.dispose();
+    }
+  });
+
   it("列表新的在前,概要含模型、请求数、最后一条用户消息、旁车;坏行跳过", () => {
     tmp = mkdtempSync(join(tmpdir(), "clarook-sessions-"));
     session(tmp, "2026-09-01T10-00-00-000Z", "2026-09-01T10:00:00.000Z", { trace: true });

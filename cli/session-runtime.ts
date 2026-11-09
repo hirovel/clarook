@@ -5,6 +5,7 @@ import type { EventLog } from "../src/log.js";
 import { maxSteps, queueToTurnEnd, type TurnDeps } from "../src/loop.js";
 import type { Provider } from "../src/provider.js";
 import { errorMessage } from "../src/providers/errors.js";
+import { recordSessionDirectory } from "../src/session-directory.js";
 import { type ChildInfo, type ChildTools, createTaskTool } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
 import type { CommonArgs } from "./args.js";
@@ -26,6 +27,7 @@ import {
   trustProjectMcp,
 } from "./mcp/trust.js";
 import { automaticSkills, discoverSkills } from "./prompt.js";
+import { type DirectoryIssue, prepareSessionDirectory } from "./session-directory.js";
 import { applyToolPrompts } from "./tool-prompts.js";
 import { createSkillTool, skillCatalog } from "./tools/skill.js";
 
@@ -34,6 +36,9 @@ export async function prepareSessionRuntime(options: {
   args: CommonArgs;
   log: EventLog;
   sessionFile: string;
+  entryCwd?: string;
+  directory?: string;
+  chooseDirectory?: (issue: DirectoryIssue) => Promise<string | undefined>;
   connections?: McpConnections;
   onChild?: (child: ChildInfo) => void;
   slots?: () => TurnDeps["slots"];
@@ -43,10 +48,17 @@ export async function prepareSessionRuntime(options: {
   confirmProjectMcp?: (review: ProjectMcpReview) => Promise<boolean>;
 }) {
   const { boot, args, log } = options;
+  const directory = await prepareSessionDirectory(log, {
+    entryCwd: options.entryCwd ?? process.cwd(),
+    ...(options.directory !== undefined && { directory: options.directory }),
+    ...(options.chooseDirectory && { chooseDirectory: options.chooseDirectory }),
+  });
+  if (!directory) return undefined;
+  const { cwd } = directory;
   const choice = options.allowUnavailable ? boot.chooseOrNone(args.model) : boot.choose(args.model);
-  const compaction = await buildCompaction(args, choice.contextWindow);
-  const memory = args.memory ? memoryFiles() : undefined;
-  const skills = discoverSkills(process.cwd(), {
+  const compaction = await buildCompaction(args, choice.contextWindow, cwd);
+  const memory = args.memory ? memoryFiles(cwd) : undefined;
+  const skills = discoverSkills(cwd, {
     ...(args.skillsSources && { sources: args.skillsSources }),
     onError: (error) =>
       log.append({
@@ -61,13 +73,8 @@ export async function prepareSessionRuntime(options: {
   if (options.descriptions) toolPrompts.descriptions = options.descriptions;
   const connections = options.connections ?? new McpConnections();
   const config = mcpConfigOf(boot.config.mcp);
-  const projectReview = projectMcpReview(process.cwd());
-  const allServers = loadMcpServers(
-    config,
-    process.cwd(),
-    process.env,
-    projectReview?.snapshot ?? null,
-  );
+  const projectReview = projectMcpReview(cwd);
+  const allServers = loadMcpServers(config, cwd, process.env, projectReview?.snapshot ?? null);
   const projectNames = new Set(
     allServers
       .filter((server) => server.source === projectReview?.file)
@@ -96,7 +103,7 @@ export async function prepareSessionRuntime(options: {
     }
   }
   const servers = allServers.filter((server) => useProjectMcp || server.source !== review?.file);
-  if (review && projectMcpReview(process.cwd())?.digest !== review.digest)
+  if (review && projectMcpReview(cwd)?.digest !== review.digest)
     throw new Error(
       `${review.file} changed during preparation; inspect it again before connecting`,
     );
@@ -110,7 +117,7 @@ export async function prepareSessionRuntime(options: {
     });
 
   async function assemble(target: EventLog, reconnect = false) {
-    const ext = await loadExtensions(args.extensions, { cwd: process.cwd(), log: target });
+    const ext = await loadExtensions(args.extensions, { cwd, log: target });
     let mcp: McpBridge | undefined;
     let disposing: Promise<void> | undefined;
     const dispose = (): Promise<void> =>
@@ -124,6 +131,7 @@ export async function prepareSessionRuntime(options: {
       })());
     try {
       const base = buildTools({
+        cwd,
         ...(memory && { memory }),
         ...(args.skillsLoad === "tool" && {
           skills: automaticSkills(skills, {
@@ -148,6 +156,8 @@ export async function prepareSessionRuntime(options: {
         ...(config && { mcp: config }),
         ...(reconnect && args.mcpReconnect && { reconnect: args.mcpReconnect }),
       });
+      // 子任务可独立恢复;只在其资源准备成功后记录实际使用的同一根。
+      if (target !== log) recordSessionDirectory(target, cwd);
       return { tools, mcp, slots: ext.slots, dispose };
     } catch (error) {
       try {
@@ -212,6 +222,7 @@ export async function prepareSessionRuntime(options: {
         ...(args.subagentMaxSteps != null && { maxSteps: args.subagentMaxSteps }),
         ...(args.subagentDepth !== undefined && { depth: args.subagentDepth }),
         parent: log,
+        cwd,
         provider: () => current().provider,
         modelLocator: () => current().modelLocator,
         tools: (childLog) => {
@@ -253,6 +264,7 @@ export async function prepareSessionRuntime(options: {
       root.tools.push(task);
     }
     return {
+      cwd,
       choice,
       compaction,
       tools: root.tools,
@@ -261,7 +273,10 @@ export async function prepareSessionRuntime(options: {
       memory,
       skills,
       toolPrompts,
-      activate: () => root.mcp.activate(),
+      activate: () => {
+        root.mcp.activate();
+        directory.commit();
+      },
       dispose: () => disposeOwned(root.dispose),
     };
   } catch (error) {

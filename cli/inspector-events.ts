@@ -13,6 +13,7 @@ import {
   isProjected,
 } from "../src/messages.js";
 import type { Provider } from "../src/provider.js";
+import { directoryAt } from "../src/session-directory.js";
 import { compactionDecisionText } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
 import { clock, firstLine, fmtMs, fmtTok, indent, pctOf } from "./inspector-format.js";
@@ -27,6 +28,7 @@ const CONVERSATION = new Set([
   "tool/result",
   "tool/unresolved",
   "session/start",
+  "session/directory",
 ]);
 const KERNEL = new Set([
   "request",
@@ -35,11 +37,18 @@ const KERNEL = new Set([
   "decision",
   "session/slot",
   "session/model",
+  "session/directory",
   "session/interrupt",
   "session/recovered",
   "tools/snapshot",
 ]);
-const CHANGES = new Set(["context/edit", "context/drop", "compaction", "tools/snapshot"]);
+const CHANGES = new Set([
+  "context/edit",
+  "context/drop",
+  "compaction",
+  "tools/snapshot",
+  "session/directory",
+]);
 
 export function eventPasses(e: AgentEvent, filter: EventFilter): boolean {
   switch (filter) {
@@ -82,8 +91,11 @@ export function modelSees(
   if (e.type === "tool/unresolved" && !composeContext(events).provenance.some((p) => p.event === i))
     return { text: "not in context", changed: true };
   if (e.type === "tool/result" && state.cleared.has(i)) return { text: "cleared", changed: true };
-  if (state.summary && i >= state.coversFrom && i < state.coversUpTo)
-    return { text: "covered", changed: true };
+  const covered =
+    e.type === "session/directory"
+      ? composeContext(events).omitted.some((item) => item.event === i && item.reason === "covered")
+      : state.summary && i >= state.coversFrom && i < state.coversUpTo;
+  if (covered) return { text: "covered", changed: true };
   if (ed.edits.has(i))
     return { text: `edited ${Object.keys(ed.edits.get(i) ?? {}).join(" ")}`, changed: true };
   const lastRequest = events.reduce((last, x, k) => (x.type === "request" ? k : last), -1);
@@ -100,6 +112,12 @@ export function eventSummary(
   const e = events[i] as AgentEvent;
   const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
   switch (e.type) {
+    case "session/directory":
+      return {
+        sign: G.note,
+        text: `session directory · ${e.cwd}${e === directoryAt(events) ? " · current" : " · historical"}`,
+        tok: eventTokens(e),
+      };
     case "session/start":
       return {
         sign: G.note,
@@ -343,6 +361,12 @@ export function eventViewLines(
   ];
   const out: string[] = [];
   switch (e.type) {
+    case "session/directory":
+      out.push(row("directory", e.cwd));
+      out.push(row("binding", e === directoryAt(events) ? "current" : "historical"));
+      out.push(row("source", "session/directory · read-only · /session directory to change"));
+      out.push(...block("environment", e.environment));
+      break;
     case "session/start":
       out.push(row("model", e.model));
       for (const s of e.sections ?? [])

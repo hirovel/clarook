@@ -4,7 +4,7 @@
 import * as childProcess from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { applyPreset, parseCommonArgs, resolveApproval } from "../cli/args.js";
@@ -427,8 +427,8 @@ describe("参数解析的每个开关", () => {
     ]);
     expect(a).toMatchObject({
       resume: "s.jsonl",
-      systemPromptFile: "sys.md",
-      appendSystemPromptFile: "more.md",
+      systemPromptFile: resolve("sys.md"),
+      appendSystemPromptFile: resolve("more.md"),
       subagent: true,
       subagentExplicit: true,
 
@@ -444,7 +444,7 @@ describe("参数解析的每个开关", () => {
       promptSections: ["role", "env"],
       instructionsAs: "user",
       execution: "parallel",
-      extensions: ["a.mjs", "b.mjs"],
+      extensions: [resolve("a.mjs"), resolve("b.mjs")],
       events: true,
       help: true,
     });

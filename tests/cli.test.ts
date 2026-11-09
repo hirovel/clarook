@@ -1,13 +1,23 @@
 // 真实入口:用子进程跑 cli/run.ts,配置从临时文件读(CLAROOK_CONFIG),模型是本机假服务器。
 // 覆盖 bootstrap → 配置 → 供应商 → 会话文件 → 输出的整条链路;没有 key、要帮助、正常一跑三种情形。
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import * as http from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { restoreSessionSetup, withCurrentDisplay } from "../cli/session-setup.js";
 import type { AgentEvent } from "../src/events.js";
+import { directoryAt } from "../src/session-directory.js";
 
 const TSX = resolve("node_modules/tsx/dist/cli.mjs");
 const RUN = resolve("cli/run.ts");
@@ -199,6 +209,8 @@ describe("真实入口(子进程)", () => {
 
   it("一次性模式对着假模型跑通:JSON 输出、会话文件落在 cwd/sessions、参数错误有提示", async () => {
     tmp = mkdtempSync(join(tmpdir(), "ak-cli-"));
+    const project = join(tmp, "A");
+    mkdirSync(project);
     const model = await fakeModel();
     const cfg = join(tmp, "config.json");
     writeFileSync(
@@ -209,18 +221,17 @@ describe("真实入口(子进程)", () => {
       }),
     );
     const ok = await run(RUN, ["你好", "--json", "--effort", "low"], {
-      cwd: tmp,
+      cwd: project,
       env: { CLAROOK_CONFIG: cfg },
     });
     expect(ok.code, ok.stderr).toBe(0);
     const out = JSON.parse(ok.stdout) as Record<string, unknown>;
     expect(out).toMatchObject({ ok: true, model: "m", text: "收到:你好", steps: 1, requests: 1 });
     expect(model.calls).toBe(1);
-    const sessions = readdirSync(join(tmp, "sessions")).filter((f) => f.endsWith(".jsonl"));
+    const sessions = readdirSync(join(project, "sessions")).filter((f) => f.endsWith(".jsonl"));
     expect(sessions).toHaveLength(1);
-    const lines = readFileSync(join(tmp, "sessions", sessions[0] as string), "utf8")
-      .trim()
-      .split("\n");
+    const sessionFile = join(project, "sessions", sessions[0] as string);
+    const lines = readFileSync(sessionFile, "utf8").trim().split("\n");
     const first = JSON.parse(lines[0] as string) as { type: string; sections?: unknown[] };
     expect(first.type).toBe("session/start");
     expect(Array.isArray(first.sections)).toBe(true);
@@ -242,17 +253,63 @@ describe("真实入口(子进程)", () => {
     expect(restored.setup.tools).toContain("read");
 
     const bad = await run(RUN, ["你好", "--effort", "ultra"], {
-      cwd: tmp,
+      cwd: project,
       env: { CLAROOK_CONFIG: cfg },
     });
     expect(bad.code).toBe(2);
     expect(bad.stderr).toContain("unknown effort level");
 
     // 纯文本模式:回复到 stdout,会话路径到 stderr
-    const plain = await run(RUN, ["再来"], { cwd: tmp, env: { CLAROOK_CONFIG: cfg } });
+    const plain = await run(RUN, ["再来"], { cwd: project, env: { CLAROOK_CONFIG: cfg } });
     expect(plain.code, plain.stderr).toBe(0);
     expect(plain.stdout.trim()).toBe("收到:再来");
     expect(plain.stderr).toContain("[session:");
+    const launch = join(tmp, "C");
+    const moved = join(tmp, "D");
+    mkdirSync(launch);
+    for (const name of ["a.txt", "b.txt"]) {
+      writeFileSync(join(project, name), `original-${name}`);
+      writeFileSync(join(launch, name), `wrong-${name}`);
+    }
+    const resumed = await run(RUN, ["--resume", sessionFile, "Compare @a.txt @b.txt", "--json"], {
+      cwd: launch,
+      env: { CLAROOK_CONFIG: cfg },
+    });
+    expect(resumed.code, resumed.stderr).toBe(0);
+    expect(JSON.parse(resumed.stdout).text).toContain("original-a.txt");
+    expect(JSON.parse(resumed.stdout).text).toContain("original-b.txt");
+    expect(JSON.parse(resumed.stdout).text).not.toContain("wrong-");
+    renameSync(project, moved);
+    const movedFile = join(moved, "sessions", sessions[0] as string);
+    const beforeBinding = readFileSync(movedFile, "utf8");
+    const beforeCalls = model.calls;
+    const unavailable = await run(RUN, ["--resume", movedFile, "Continue"], {
+      cwd: launch,
+      env: { CLAROOK_CONFIG: cfg },
+    });
+    expect(unavailable.code).toBe(2);
+    expect(unavailable.stderr).toContain("clarook sessions directory");
+    expect(model.calls).toBe(beforeCalls);
+    const rebound = await run(resolve("cli/sessions-cli.ts"), ["directory", movedFile, moved], {
+      cwd: launch,
+      env: { CLAROOK_CONFIG: cfg },
+    });
+    expect(rebound.code, rebound.stderr).toBe(0);
+    expect(readFileSync(movedFile, "utf8").startsWith(beforeBinding)).toBe(true);
+    for (const name of ["a.txt", "b.txt"]) writeFileSync(join(moved, name), `moved-${name}`);
+    const continued = await run(RUN, ["--resume", movedFile, "Compare @a.txt @b.txt", "--json"], {
+      cwd: launch,
+      env: { CLAROOK_CONFIG: cfg },
+    });
+    expect(continued.code, continued.stderr).toBe(0);
+    expect(JSON.parse(continued.stdout).text).toContain("moved-a.txt");
+    expect(JSON.parse(continued.stdout).text).toContain("moved-b.txt");
+    const reboundEvents = readFileSync(movedFile, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as AgentEvent);
+    expect(directoryAt(reboundEvents)?.cwd).toBe(moved);
+    expect(reboundEvents[0]).toEqual(events[0]);
     await model.close();
   }, 90000);
 });

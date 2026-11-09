@@ -64,7 +64,7 @@ export function stepSummary(ctx: TuiContext, step: StepView): string {
       calls += e.toolCalls.length;
       const tc = e.toolCalls[0];
       if (tc && !firstCall)
-        firstCall = `${G.call} ${tc.name} ${firstLine(stripTerminalSequences(formatArgs(tc.args)), 40)}`;
+        firstCall = `${G.call} ${tc.name} ${firstLine(formatArgs(tc.args), 40)}`;
       if (e.usage) {
         input += e.usage.inputTokens;
         output += e.usage.outputTokens;

@@ -26,6 +26,7 @@ import { DEFAULT_CONFIG_PATH, type KernelConfig } from "../src/config.js";
 import { EventLog } from "../src/log.js";
 import type { CompleteOptions, Provider } from "../src/provider.js";
 import { Recording } from "../src/recording.js";
+import { directoryAt } from "../src/session-directory.js";
 import { defaultPreset, getSetting, SETTINGS, setSetting } from "../src/settings.js";
 import { mergeSetup, SETUP_GUIDE, SETUP_SECTIONS, setupSnapshot } from "../src/setup.js";
 import { testImage } from "./helpers/image.js";
@@ -897,6 +898,7 @@ describe("setup data and persistence", () => {
         kind: "resume",
         file: legacyFile,
         source: "current",
+        directory: dir,
       });
       await vi.waitFor(() =>
         expect(host.app().dialogLines().join("\n")).toContain("preparation failed"),
@@ -912,6 +914,7 @@ describe("setup data and persistence", () => {
         kind: "resume",
         file: legacyFile,
         source: "current",
+        directory: dir,
       });
       await vi.waitFor(() =>
         expect(host.app().dialogLines().join("\n")).toContain("Terminal start failed"),
@@ -938,11 +941,18 @@ describe("setup data and persistence", () => {
       view.dialogInput("\x1b");
       view.dialogInput("\x1b[F");
       view.dialogInput("\r");
+      await vi.waitFor(() =>
+        expect(view.dialogLines().join("\n")).toContain("Choose session directory"),
+      );
+      view.dialogInput("\x15");
+      view.dialogInput(dir);
+      view.dialogInput("\r");
       await restoring;
       expect(host.file()).toBe(legacyFile);
       expect(host.app().setup().values.planReminder).toBe(5);
       expect(host.app().setup().values.model).toBe("p/m");
       expect(currentSystem(EventLog.load(legacyFile).events)).toBe("old instructions");
+      expect(directoryAt(EventLog.load(legacyFile).events)?.cwd).toBe(dir);
       config.defaults = { ...config.defaults, prompt: { sections: ["env"] } };
       await host.switchSession({ kind: "resume", file: legacyFile, source: "defaults" });
       const changed = EventLog.load(legacyFile).events;

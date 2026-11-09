@@ -187,7 +187,7 @@ describe("系统提示词段控制", () => {
         root,
       );
       expect(s.log.events[0]?.type).toBe("session/start");
-      const first = s.log.events[1];
+      const first = s.log.events.find((event) => event.type === "user/message");
       expect(first?.type).toBe("user/message");
       expect(first?.type === "user/message" && first.text).toContain("用 pnpm");
       expect(first?.type === "user/message" && first.text).toContain("别用 any");

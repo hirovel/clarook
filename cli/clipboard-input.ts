@@ -1,24 +1,28 @@
 // 只在用户请求粘贴时访问系统剪贴板,没有后台轮询或自动发送。
 import { execFile } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
-import { basename } from "node:path";
+import { basename, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { ImageInput } from "../src/images.js";
 
 export type ClipboardInput = { text?: string; image?: ImageInput };
 const run = promisify(execFile);
 
-export async function imageFromPath(text: string): Promise<ImageInput | undefined> {
+export async function imageFromPath(
+  text: string,
+  cwd = process.cwd(),
+): Promise<ImageInput | undefined> {
   const file = text
     .trim()
     .replace(/^"(.*)"$/, "$1")
     .replace(/^'(.*)'$/, "$1");
   if (!/\.(png|jpe?g|gif|webp)$/i.test(file) || /[\r\n]/.test(file)) return;
-  const info = await stat(file).catch(() => undefined);
+  const path = resolve(cwd, file);
+  const info = await stat(path).catch(() => undefined);
   if (!info?.isFile()) return;
   if (info.size > 48 * 1024 * 1024)
     throw new Error("Image exceeds the 48 MiB attachment read limit");
-  const bytes = await readFile(file);
+  const bytes = await readFile(path);
   const mimeType = bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
     ? "image/png"
     : bytes[0] === 255 && bytes[1] === 216

@@ -1,17 +1,20 @@
 // 上下文组装:composeContext 的来历与省略、三家 wireMap、组装槽记 body、检视器组装视图。
 import { describe, expect, it } from "vitest";
 import { RequestInspector } from "../cli/inspector.js";
-import { compositionLines, compositionRows } from "../cli/inspector-composition.js";
+import { actionsFor, compositionLines, compositionRows } from "../cli/inspector-composition.js";
+import { eventSummary, eventViewLines, modelSees } from "../cli/inspector-events.js";
 import { legalizeCut } from "../src/compaction.js";
+import { estimateTokens, eventTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { describeRequestBody, runTurn } from "../src/loop.js";
-import { composeContext, deriveMessages, requestMessages } from "../src/messages.js";
+import { composeContext, contextFields, deriveMessages, requestMessages } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { anthropic } from "../src/providers/anthropic.js";
 import { openaiCompat } from "../src/providers/openai-chat.js";
 import { openaiResponses } from "../src/providers/openai-responses.js";
 import { recordUnresolvedCalls } from "../src/recovery.js";
+import { directoryAt, recordSessionDirectory } from "../src/session-directory.js";
 
 const ansi = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
 const plain = (s: string) => s.replace(ansi, "");
@@ -41,6 +44,127 @@ function sample(): AgentEvent[] {
 }
 
 describe("composeContext", () => {
+  it("目录追加保留历史前缀与请求边界,当前执行根不被摘要、编辑或排除隐藏", () => {
+    const log = new EventLog();
+    for (const event of sample().slice(0, 6)) log.append(event);
+    const original = deriveMessages(log.events);
+    const oldRequest = log.events.length;
+    log.append({
+      type: "request",
+      at: "",
+      model: "m",
+      messages: original.length,
+      tools: [],
+      estimatedTokens: 1,
+      reason: "turn",
+    });
+    expect(directoryAt(log.events)).toBeUndefined();
+    recordSessionDirectory(log, "/project/A");
+    const firstIndex = log.events.length - 1;
+    const first = directoryAt(log.events);
+    recordSessionDirectory(log, "/project/A");
+    expect(log.events).toHaveLength(firstIndex + 1);
+    expect(directoryAt(log.events, oldRequest)).toBeUndefined();
+    log.append({ type: "user/message", at: "", text: "Continue after moving the project." });
+    recordSessionDirectory(log, "/project/D");
+    const currentIndex = log.events.length - 1;
+    const current = directoryAt(log.events);
+    if (!first || !current) throw new Error("Expected recorded directories");
+    expect(directoryAt(log.events, firstIndex + 1)).toBe(first);
+    const moved = composeContext(log.events);
+    expect(moved.messages.slice(0, original.length)).toEqual(original);
+    expect(moved.messages[2]).toBe(original[2]);
+    expect(moved.messages[2]).toHaveProperty("opaque");
+    expect(moved.messages.slice(original.length).map((message) => message.content)).toEqual([
+      first.environment,
+      "Continue after moving the project.",
+      current.environment,
+    ]);
+    expect(moved.messages.every((message) => !message.edited && !message.prefixChanged)).toBe(true);
+    expect(requestMessages(log.events, oldRequest)).toEqual(original);
+
+    for (const target of [firstIndex, currentIndex]) {
+      log.append({ type: "context/drop", at: "", target });
+      log.append({ type: "context/edit", at: "", target, field: "content", value: "wrong root" });
+    }
+    expect(composeContext(log.events)).toEqual(moved);
+    expect(contextFields(current, { content: "wrong root" })[0]).toMatchObject({
+      current: current.environment,
+      readOnlyReason: expect.stringContaining("/session directory"),
+    });
+    log.append({
+      type: "compaction",
+      at: "",
+      summary: "Earlier work in the previous project location.",
+      coversFrom: 1,
+      coversUpTo: log.events.length,
+    });
+    const compacted = composeContext(log.events);
+    expect(compacted.messages.map((message) => message.content)).toEqual([
+      "S",
+      expect.stringContaining("Earlier work in the previous project location."),
+      current.environment,
+    ]);
+    expect(compacted.omitted).toContainEqual({ event: firstIndex, reason: "covered" });
+    expect(compacted.omitted).not.toContainEqual({ event: currentIndex, reason: "covered" });
+    expect(requestMessages(log.events, oldRequest)).toEqual(original);
+    expect(modelSees(log.events, firstIndex).text).toBe("covered");
+    expect(modelSees(log.events, currentIndex).text).toBe("not sent yet");
+    expect(eventTokens(current)).toBe(estimateTokens(current.environment));
+    expect(eventSummary(log.events, currentIndex).text).toContain("/project/D");
+    expect(eventViewLines(log.events, currentIndex).map(plain).join("\n")).toContain("/project/D");
+    const { rows } = compositionRows(log.events);
+    const directoryRow = rows.find((row) => row.event === currentIndex);
+    if (!directoryRow) throw new Error("Expected current directory in composition");
+    expect(compositionLines(log.events, directoryRow).map(plain).join("\n")).toContain(
+      "session/directory",
+    );
+    expect(
+      actionsFor(log.events, directoryRow, rows.length)
+        .map((action) => action.action)
+        .filter((action) => ["edit", "drop", "restore"].includes(action)),
+    ).toEqual([]);
+    const compactedRequest = log.events.length;
+    log.append({
+      type: "request",
+      at: "",
+      model: "m",
+      messages: compacted.messages.length,
+      tools: [],
+      estimatedTokens: 1,
+      reason: "turn",
+    });
+    log.append({
+      type: "assistant/message",
+      at: "",
+      text: "Continued in the current project directory.",
+      toolCalls: [],
+      stopReason: "end",
+      opaque: { kind: "anthropic-thinking", model: "m", blocks: [] },
+    });
+    const beforeRebind = deriveMessages(log.events);
+    const retainedAssistant = beforeRebind.at(-1);
+    recordSessionDirectory(log, "/project/E");
+    const rebound = deriveMessages(log.events);
+    expect(rebound.slice(0, beforeRebind.length)).toEqual(beforeRebind);
+    expect(rebound[beforeRebind.length - 1]).toBe(retainedAssistant);
+    expect(rebound[beforeRebind.length - 1]).toHaveProperty("opaque");
+    expect(rebound.at(-1)?.content).toBe(directoryAt(log.events)?.environment);
+    expect(modelSees(log.events, currentIndex).text).toBe("sent");
+    expect(requestMessages(log.events, compactedRequest)).toEqual(compacted.messages);
+    log.append({
+      type: "compaction",
+      at: "",
+      summary: "Continued work after another directory change.",
+      coversFrom: 1,
+      coversUpTo: log.events.length,
+    });
+    expect(
+      deriveMessages(log.events).some((message) => message.content === current.environment),
+    ).toBe(false);
+    expect(modelSees(log.events, currentIndex).text).toBe("covered");
+    expect(requestMessages(log.events, compactedRequest)).toEqual(compacted.messages);
+  });
   it("恢复缺失工具结果:记录未知且不重跑,投影保留合法调用配对与来源,旧请求不被改写", () => {
     const log = new EventLog();
     for (const e of sample().slice(0, 4)) log.append(e); // a 有结果,b 没有。

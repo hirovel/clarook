@@ -70,6 +70,8 @@ export function eventTokens(e: AgentEvent): number {
   switch (e.type) {
     case "session/start":
       return estimateTokens(e.system);
+    case "session/directory":
+      return estimateTokens(e.environment);
     case "user/message":
       return estimateTokens(e.text);
     case "user/shell":

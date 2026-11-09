@@ -138,7 +138,7 @@ export class SetupView implements Component {
   private sourceNote(def: SettingDef, name: string): string {
     const sources = { ...((this.read(def) ?? {}) as Record<string, "on" | "off">) };
     sources[name] ??= "off";
-    const source = skillSources(process.cwd(), { sources }).find((s) => s.name === name);
+    const source = skillSources(this.deps.ctx.cwd, { sources }).find((s) => s.name === name);
     return `${source?.path ?? name}\n${Object.hasOwn(DEFAULT_SKILL_SOURCES, name) ? "Built-in directory; follows the user or project location. Disable to exclude it." : "Custom directory. Delete removes this source from configuration only."}\nDirect <name>/SKILL.md; first discovered name wins.`;
   }
 
@@ -455,7 +455,7 @@ export class SetupView implements Component {
           const value = String(m.kind === "choices" ? m.items[this.index]?.value : this.read(def));
           if (def.key === "compactionPrompt" && !Object.hasOwn(SUMMARY_TEMPLATES, value)) {
             void this.run(async () => {
-              info.promptText = await loadSummaryPrompt(value);
+              info.promptText = await loadSummaryPrompt(value, this.deps.ctx.cwd);
               this.mode = info;
               return {
                 ok: true,

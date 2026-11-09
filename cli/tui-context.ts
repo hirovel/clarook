@@ -138,13 +138,19 @@ export type SlotState = {
   disabledTools: Set<string>;
 };
 
-/** 换会话的目标:新建、从这里分叉、恢复另一个文件。由入口实现(停掉当前界面,换日志再起)。 */
-export type SessionTarget = ({ kind: "new" } | { kind: "resume"; file: string }) & {
+/** 会话准备的目标;目录变更复用入口的准备与激活,不在当前视图改根。 */
+export type SessionTarget = (
+  | { kind: "new" }
+  | { kind: "resume"; file: string; directory?: string }
+  | { kind: "directory"; directory?: string }
+) & {
   source?: "current" | "defaults" | "history";
 };
 
 export type TuiContext = {
   deps: TuiAppDeps;
+  /** 当前视图及其执行资源共同使用的固定目录。 */
+  readonly cwd: string;
   /** 当前实例的配置基底;技能即时修改在此提交,待重启项仍保留启动值。 */
   setupBase: Preset;
   log: EventLog;

@@ -10,7 +10,7 @@ import {
 import { DEFAULT_COMPACTION_SETTINGS, summaryPrompt } from "../src/compaction-presets.js";
 import type { Preset } from "../src/config.js";
 import type { CompactionConfig } from "../src/loop.js";
-import { parsePreservation } from "./args.js";
+import { isCompactionModulePath, parsePreservation } from "./args.js";
 
 /** 自动压缩阈值之下预留给回复与工具结果的 token 数。 */
 export const RESERVE = DEFAULT_COMPACTION_SETTINGS.compactionReserve;
@@ -25,7 +25,7 @@ export const BUILTIN_STRATEGIES: Record<string, (options?: SummaryOptions) => Co
 
 /** 保存配置只验证名称语法,不能为检查模块路径提前执行用户脚本。 */
 export function validateCompactionName(name: string): void {
-  if (Object.hasOwn(BUILTIN_STRATEGIES, name) || /[\\/]|\.(m?js|ts)$/.test(name)) return;
+  if (Object.hasOwn(BUILTIN_STRATEGIES, name) || isCompactionModulePath(name)) return;
   throw new Error(
     `unknown compaction strategy "${name}"; choices: ${Object.keys(BUILTIN_STRATEGIES).join(" ")}, or a module path`,
   );
@@ -44,14 +44,14 @@ export type CompactionSettings = Pick<
 >;
 
 /** 模板正文只有一个加载入口；设置预览与运行策略用同一份文本。 */
-export async function loadSummaryPrompt(value: string): Promise<string> {
+export async function loadSummaryPrompt(value: string, cwd = process.cwd()): Promise<string> {
   const builtin = summaryPrompt(value);
   if (builtin !== undefined) return builtin;
   if (!/\.md$/i.test(value))
     throw new Error(
       `Unknown summary template "${value}"; choose a built-in template or a .md file.`,
     );
-  const prompt = await readFile(resolve(value), "utf8");
+  const prompt = await readFile(resolve(cwd, value), "utf8");
   if (!prompt.trim()) throw new Error(`Summary template ${value} is empty.`);
   return prompt;
 }
@@ -64,11 +64,12 @@ export async function loadSummaryPrompt(value: string): Promise<string> {
 export async function loadCompactionStrategy(
   name: string,
   options?: SummaryOptions,
+  cwd = process.cwd(),
 ): Promise<CompactionStrategy> {
   validateCompactionName(name);
   const builtin = Object.hasOwn(BUILTIN_STRATEGIES, name) && BUILTIN_STRATEGIES[name];
   if (builtin) return builtin(options);
-  const mod = (await import(pathToFileURL(resolve(name)).href)) as {
+  const mod = (await import(pathToFileURL(resolve(cwd, name)).href)) as {
     default?: unknown;
     strategy?: unknown;
   };
@@ -82,18 +83,19 @@ export async function loadCompactionStrategy(
 export async function buildCompaction(
   values: CompactionSettings,
   window: number,
+  cwd = process.cwd(),
 ): Promise<CompactionConfig> {
   const settings = { ...DEFAULT_COMPACTION_SETTINGS, ...values };
   const summaryOptions =
     settings.compaction === "llm" || settings.compaction === "pipeline"
       ? {
-          prompt: await loadSummaryPrompt(settings.compactionPrompt),
+          prompt: await loadSummaryPrompt(settings.compactionPrompt, cwd),
           maxTokens: settings.compactionMaxTokens,
           acceptance: settings.compactionAcceptance,
         }
       : undefined;
   return {
-    strategy: await loadCompactionStrategy(settings.compaction, summaryOptions),
+    strategy: await loadCompactionStrategy(settings.compaction, summaryOptions, cwd),
     window,
     reserveTokens: settings.compactionReserve,
     ratio: settings.compactionRatio,

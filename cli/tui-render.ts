@@ -165,8 +165,11 @@ export class ChildView {
     this.block.addChild(this.body);
     // 起始事件(继承的父上下文、任务简报)不重画:父屏幕上已经有它们;只画子自己产生的。
     // 结束即退订:续聊在同一日志上再跑,新事件归新的视图,旧视图定格。
+    let directory: string | undefined;
+    for (const e of info.log.events) if (e.type === "session/directory") directory = e.cwd;
     this.unsubscribe = info.log.subscribe((e) => {
-      this.absorb(e);
+      if (e.type === "session/directory") directory = e.cwd;
+      this.absorb(e, directory);
       this.refresh();
     });
     this.timer = setInterval(() => this.refresh(), 1000);
@@ -177,13 +180,13 @@ export class ChildView {
     return this.finishedAt === undefined;
   }
 
-  private absorb(e: AgentEvent): void {
+  private absorb(e: AgentEvent, cwd: string | undefined): void {
     if (e.type === "assistant/message") {
       this.steps += 1;
       if (e.usage) this.tokens = e.usage.inputTokens;
     }
     if (e.type === "tool/result") this.toolsUsed += 1;
-    this.lines.push(...childEventLines(e).map((l) => GUIDE + l));
+    this.lines.push(...childEventLines(e, cwd).map((l) => GUIDE + l));
   }
 
   finish(): void {
@@ -249,8 +252,10 @@ export function attachChild(ctx: TuiContext, child: ChildInfo): void {
 }
 
 /** 子 agent 事件的屏幕行(不含引导线),与主屏同一套记号:› » ✓ ✗ ·。 */
-export function childEventLines(e: AgentEvent): string[] {
+export function childEventLines(e: AgentEvent, cwd?: string): string[] {
   switch (e.type) {
+    case "session/directory":
+      return [c.soft(`· Session directory: ${plainDisplayText(e.cwd)}`)];
     case "user/message":
       return [
         `${c.zhu(G.you)} ${c.ink(plainDisplayText([e.text, imageSummary(e.images)].filter(Boolean).join("\n")))}`,
@@ -272,7 +277,7 @@ export function childEventLines(e: AgentEvent): string[] {
             .map((l) => c.ink(l)),
         );
       for (const tc of e.toolCalls) {
-        lines.push(callLine(tc.name, formatArgs(tc.args)));
+        lines.push(callLine(tc.name, formatArgs(tc.args, { cwd })));
       }
       if (e.stopReason === "aborted") lines.push(c.faint("— interrupted —"));
       return lines;
@@ -372,6 +377,7 @@ function finishStream(
 function renderAssistant(
   ctx: TuiContext,
   e: Extract<AgentEvent, { type: "assistant/message" }>,
+  cwd: string | undefined,
 ): void {
   finishStream(ctx, e);
   const { view: v, transcript, req } = ctx;
@@ -382,7 +388,7 @@ function renderAssistant(
     if (note) transcript.addChild(new Block(note));
   }
   for (const tc of e.toolCalls) {
-    transcript.addChild(new Block(callLine(tc.name, formatArgs(tc.args))));
+    transcript.addChild(new Block(callLine(tc.name, formatArgs(tc.args, { cwd }))));
     // edit/write 的改动内容直接可见:diff 从参数算出,不进日志。代码不折行,超宽截断。
     const detail = toolCallDetail(tc.name, tc.args);
     if (detail) {
@@ -529,9 +535,12 @@ function renderCompaction(ctx: TuiContext, e: Extract<AgentEvent, { type: "compa
 }
 
 /** 一条事件 → 屏幕。历史回放与实时订阅都走这里。 */
-export function render(ctx: TuiContext, e: AgentEvent, index: number): void {
+export function render(ctx: TuiContext, e: AgentEvent, index: number, cwd?: string): void {
   ctx.usage.add(e);
   switch (e.type) {
+    case "session/directory":
+      ctx.note(c.soft(`· Session directory: ${plainDisplayText(e.cwd)}`));
+      break;
     case "user/message":
       renderUser(ctx, [e.text, imageSummary(e.images)].filter(Boolean).join("\n"));
       break;
@@ -547,7 +556,7 @@ export function render(ctx: TuiContext, e: AgentEvent, index: number): void {
       });
       break;
     case "assistant/message":
-      renderAssistant(ctx, e);
+      renderAssistant(ctx, e, cwd);
       break;
     case "tool/result":
       renderToolResult(ctx, e);

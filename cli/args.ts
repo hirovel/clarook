@@ -1,5 +1,7 @@
+import { resolve } from "node:path";
 import { type ApprovalConfig, DEFAULT_APPROVAL } from "../src/approval.js";
 import { keepRatio, keepRecentTokens, type PreservationPolicy } from "../src/compaction.js";
+import { SUMMARY_TEMPLATES } from "../src/compaction-presets.js";
 import {
   DEFAULT_CONFIG_PATH,
   type KernelConfig,
@@ -192,6 +194,11 @@ export function isCompactionTrigger(v: string): v is CompactionTrigger {
   return (COMPACTION_TRIGGERS as string[]).includes(v);
 }
 
+/** 外部策略的既有路径语法由参数解析与装载校验共用,内置名称不改写。 */
+export function isCompactionModulePath(name: string): boolean {
+  return /[\\/]|\.(m?js|ts)$/.test(name);
+}
+
 export function parseCommonArgs(argv: string[]): CommonArgs {
   const out: CommonArgs = {
     compaction: "llm",
@@ -225,10 +232,12 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         out.effort = level;
         break;
       }
-      case "--compaction":
-        out.compaction = takeValue(i++, a);
+      case "--compaction": {
+        const value = takeValue(i++, a);
+        out.compaction = isCompactionModulePath(value) ? resolve(value) : value;
         out.compactionExplicit = true;
         break;
+      }
       case "--resume":
         out.resume = takeValue(i++, a);
         break;
@@ -236,10 +245,10 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         out.continue = true;
         break;
       case "--system-prompt":
-        out.systemPromptFile = takeValue(i++, a);
+        out.systemPromptFile = resolve(takeValue(i++, a));
         break;
       case "--append-system-prompt":
-        out.appendSystemPromptFile = takeValue(i++, a);
+        out.appendSystemPromptFile = resolve(takeValue(i++, a));
         break;
       case "--max-steps": {
         const limit = parseRegisteredSetting("maxSteps", takeValue(i++, a)) as number | undefined;
@@ -321,9 +330,12 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         ) as number;
         break;
       }
-      case "--compaction-prompt":
-        out.compactionPrompt = takeValue(i++, a);
+      case "--compaction-prompt": {
+        const value = takeValue(i++, a);
+        out.compactionPrompt =
+          !Object.hasOwn(SUMMARY_TEMPLATES, value) && /\.md$/i.test(value) ? resolve(value) : value;
         break;
+      }
       case "--compaction-max-tokens":
         out.compactionMaxTokens = parseRegisteredSetting(
           "compactionMaxTokens",
@@ -405,7 +417,7 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         break;
       }
       case "--extension":
-        out.extensions.push(takeValue(i++, a));
+        out.extensions.push(resolve(takeValue(i++, a)));
         break;
       case "--mcp-reconnect":
         out.mcpReconnect = takeValue(i++, a)

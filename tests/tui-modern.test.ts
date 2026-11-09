@@ -4,12 +4,13 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { fileUrl, osc8, PROMPT_MARK } from "../cli/terminal-extras.js";
+import { createReadTool } from "../cli/tools/fs.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import { Block } from "../cli/tui-block.js";
 import { codeBlocks } from "../cli/tui-commands.js";
-import { formatArgs } from "../cli/tui-format.js";
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
+import { recordSessionDirectory } from "../src/session-directory.js";
 import { testDirectory } from "./helpers/setup.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
@@ -214,11 +215,93 @@ describe("通知、标题、剪贴板、链接", () => {
     app.stop();
   });
 
-  it("路径参数是 OSC 8 file:// 链接;剥掉序列后文本照旧", () => {
-    const s = formatArgs({ path: "src/loop.ts", offset: 3, limit: 2 });
-    expect(s).toContain(`\x1b]8;;${fileUrl("src/loop.ts")}\x07src/loop.ts\x1b]8;;\x07`);
-    expect(stripAnsi(s)).toBe("src/loop.ts  from line 3, 2 lines");
-    expect(osc8("t", "file:///x")).toBe("\x1b]8;;file:///x\x07t\x1b]8;;\x07");
+  it("路径参数的 OSC 8 链接使用调用当时目录,旧日志不虚构相对链接", async () => {
+    const a = testDirectory("tui-links-a-");
+    const d = testDirectory("tui-links-d-");
+    const call = (target: EventLog, id: string, path: string) =>
+      target.append({
+        type: "assistant/message",
+        at: "",
+        text: "",
+        toolCalls: [{ id, name: "read", args: { path, offset: 3, limit: 2 } }],
+        stopReason: "tool",
+      });
+    const log = new EventLog();
+    log.append({ type: "session/start", at: "", model: "m", system: "sys" });
+    call(log, "legacy", "unknown.txt");
+    const absolute = join(a, "absolute.txt");
+    call(log, "absolute", absolute);
+    recordSessionDirectory(log, a);
+    call(log, "before", "before.txt");
+    recordSessionDirectory(log, d);
+    call(log, "after", "after.txt");
+    const { app } = boot(new VirtualTerminal(100, 24), { cwd: d, log });
+    try {
+      const child = new EventLog();
+      child.append({ type: "session/start", at: "", model: "m", system: "sys" });
+      recordSessionDirectory(child, a);
+      app.attachChild({
+        log: child,
+        id: "sub-1",
+        task: "Read selected files",
+        scope: "taskOnly",
+        type: "default",
+        resumed: true,
+        index: 1,
+        state: { status: "running" },
+      });
+      call(child, "child-before", "child-before.txt");
+      recordSessionDirectory(child, d);
+      call(child, "child-after", "child-after.txt");
+      const screen = app.lines(100).join("\n");
+      expect(screen).toContain(osc8("before.txt", fileUrl("before.txt", a)));
+      expect(screen).toContain(osc8("after.txt", fileUrl("after.txt", d)));
+      expect(screen).toContain(osc8("child-before.txt", fileUrl("child-before.txt", a)));
+      expect(screen).toContain(osc8("child-after.txt", fileUrl("child-after.txt", d)));
+      expect(screen).toContain(osc8(absolute, fileUrl(absolute)));
+      const unknown = screen.split("\n").find((line) => stripAnsi(line).includes("unknown.txt"));
+      expect(unknown).toBeDefined();
+      expect(unknown).not.toContain("\x1b]8;;");
+      expect(stripAnsi(screen)).toContain("before.txt  from line 3, 2 lines");
+    } finally {
+      app.stop();
+    }
+
+    writeFileSync(join(a, "live.txt"), "SESSION_ROOT");
+    const live = new EventLog();
+    live.append({ type: "session/start", at: "", model: "m", system: "sys" });
+    recordSessionDirectory(live, a);
+    const current = boot(new VirtualTerminal(100, 24), {
+      cwd: a,
+      log: live,
+      tools: [createReadTool({ cwd: a })],
+      approve: "ask",
+      provider: scripted([
+        {
+          text: "",
+          toolCalls: [{ id: "live", name: "read", args: { path: "live.txt" } }],
+          stopReason: "tool",
+        },
+        { text: "Read complete.", toolCalls: [], stopReason: "end" },
+      ]),
+    });
+    const running = current.app.submit("Read the file.");
+    try {
+      await vi.waitFor(() => expect(current.app.approvalLines().length).toBeGreaterThan(0));
+      const link = osc8("live.txt", fileUrl("live.txt", a));
+      expect(current.app.lines(100).join("\n")).toContain(link);
+      expect(current.app.approvalLines().join("\n")).toContain(link);
+      current.app.approvalInput("\r");
+      await running;
+      expect(live.events.find((event) => event.type === "tool/result")).toMatchObject({
+        content: "1\tSESSION_ROOT",
+        isError: false,
+      });
+    } finally {
+      current.app.agent.interrupt();
+      await running;
+      current.app.stop();
+    }
   });
 });
 

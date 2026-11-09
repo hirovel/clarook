@@ -92,7 +92,11 @@ export const COMMANDS: Command[] = [
     picks: true,
   },
   { name: "tools", description: "Turn tools on or off for this session", picks: true },
-  { name: "session", description: "New session, fork from here, resume another", picks: true },
+  {
+    name: "session",
+    description: "New session, fork from here, resume another, change directory",
+    picks: true,
+  },
   { name: "memory", description: "Cross-session memory: show, forget one, clear", picks: true },
   { name: "compact", description: "Compact the context now; words after it are instructions" },
   { name: "copy", description: "Copy the last reply or one of its code blocks", picks: true },
@@ -158,7 +162,7 @@ async function submitMessage(
     return;
   }
   // 附件来自原始调用,与模板采用哪些参数无关;正文及文件内容不再次解释。
-  const expanded = expandFileRefs(source, process.cwd(), text);
+  const expanded = expandFileRefs(source, ctx.cwd, text);
   for (const a of expanded.attachments) {
     ctx.note(
       a.skipped
@@ -280,7 +284,7 @@ function skillsList(ctx: TuiContext): string {
   const include = effectiveSetting(ctx, settingDef("prompt.skills.include") as SettingDef);
   const sources = [
     c.faint("Discovery order · first name wins · direct <name>/SKILL.md only"),
-    ...skillSources(process.cwd(), {
+    ...skillSources(ctx.cwd, {
       sources: effectiveSetting(ctx, settingDef("prompt.skills.sources") as SettingDef) as Record<
         string,
         "on" | "off"
@@ -1233,6 +1237,7 @@ async function sessionCommand(ctx: TuiContext, arg: string, selectSource = false
             note: "copy this session up to the last message into a new file and continue there",
           },
           { label: "resume", note: "search saved sessions by task, model or path" },
+          { label: "directory", note: `working directory: ${ctx.cwd}` },
           { label: "list", note: "recent session files" },
           { label: "inputs", note: `${ctx.agent.queued} pending · continue, edit or remove` },
           { label: "recovery", note: "tool calls with unknown outcomes" },
@@ -1284,6 +1289,11 @@ async function sessionCommand(ctx: TuiContext, arg: string, selectSource = false
           else void runInput(ctx, () => ctx.agent.continuePending());
         }),
       );
+      return;
+    }
+    case "directory": {
+      if (!need() || running()) return;
+      sw?.({ kind: "directory", ...(restArg && { directory: restArg }) });
       return;
     }
     case "new": {
@@ -1360,7 +1370,7 @@ async function sessionCommand(ctx: TuiContext, arg: string, selectSource = false
     default:
       ctx.note(
         c.zhu(`unknown session action ${sub}`) +
-          c.faint("  new · fork [N] · resume [file] · list · inputs"),
+          c.faint("  new · fork [N] · resume [file] · directory [path] · list · inputs"),
       );
   }
 }

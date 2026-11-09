@@ -7,6 +7,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Added
 
+- Save session directory bindings in the event history. Resume from another launch directory without changing the project root; explicitly choose and remember a directory for older sessions or moved projects through `/session directory` and `clarook sessions directory FILE DIRECTORY`. Keep current environment facts through compaction while preserving original history and saved instructions.
 - Save complete tool declaration snapshots on the first ordinary request and actual definition changes. Inspect historical definitions without optional recordings; distinguish unavailable legacy evidence from an empty tool set.
 
 ### Changed
@@ -21,6 +22,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Bind file and search tools, attachments, completion, skills, memory, approval, extensions, subagents and MCP processes to the session directory. Resolve explicit CLI resource files at launch and saved relative resources at the session root. Commit directory changes after the target view and resources are ready; cancellation or preparation failure keeps the previous binding and draft.
 - Record a fresh complete tool snapshot after incomplete request history, even when its declarations equal an older snapshot. Newly generated replies then follow the existing known-change replay rules; unknown older blocks remain unchanged. Distinguish ordinary empty catalogs from temporary summary tools.
 - Reconstruct compaction comparisons from the effective context at that historical boundary. Apply edits, exclusions, previous summaries and cleared results consistently in inspectors and replay; render source control characters as visible escapes. Replay compaction JSON now exports effective messages with their source event indices.
 - Match context usage baselines to complete active tool declarations, including same-name description and schema updates before automatic compaction. Fall back for incompatible known catalogs and let fresh valid usage take over without counting tools twice.

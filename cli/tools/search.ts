@@ -115,7 +115,8 @@ export async function listFiles(
   return { paths, limited };
 }
 
-export function createGrepTool(opts: { maxResults?: number } = {}) {
+export function createGrepTool(opts: { maxResults?: number; cwd?: string } = {}) {
+  const directory = resolve(opts.cwd ?? process.cwd());
   const maxResults = opts.maxResults ?? 200;
   return defineTool({
     name: "grep",
@@ -138,7 +139,7 @@ export function createGrepTool(opts: { maxResults?: number } = {}) {
     }),
     concurrency: "parallel",
     async execute(args, ctx) {
-      const root = resolve(args.path ?? ".");
+      const root = resolve(directory, args.path ?? ".");
       const rootIsFile = statSync(root).isFile();
       // 用户提供的路径保留在结果中,可直接交给 read。
       const given = (args.path ?? ".").split(sep).join("/").replace(/\/+$/, "");
@@ -187,43 +188,48 @@ export function createGrepTool(opts: { maxResults?: number } = {}) {
 
 export const grepTool = createGrepTool();
 
-export const globTool = defineTool({
-  name: "glob",
-  ...described({
-    core: "List files matching a glob pattern, e.g. src/**/*.ts; returns relative paths, at most 500 in the preview, with a saved scanned-match list when more match. Skips .git, node_modules and build output.",
-    guidance:
-      "Use it to find files by name; use grep for contents. For advanced file queries, use rg in bash.",
-  }),
-  parameters: Type.Object({
-    pattern: Type.String({
-      description: "glob pattern: ** any depth, * one segment, ? one character",
+export function createGlobTool(cwd = process.cwd()) {
+  const directory = resolve(cwd);
+  return defineTool({
+    name: "glob",
+    ...described({
+      core: "List files matching a glob pattern, e.g. src/**/*.ts; returns relative paths, at most 500 in the preview, with a saved scanned-match list when more match. Skips .git, node_modules and build output.",
+      guidance:
+        "Use it to find files by name; use grep for contents. For advanced file queries, use rg in bash.",
     }),
-    path: Type.Optional(
-      Type.String({ description: "starting directory, default current directory" }),
-    ),
-  }),
-  concurrency: "parallel",
-  async execute(args, ctx) {
-    const root = resolve(args.path ?? ".");
-    const re = globToRegExp(args.pattern);
-    const { paths, limited: scanLimited } = await listFiles(root, ctx.signal);
-    const files = paths.filter((path) => re.test(path));
-    files.sort();
-    if (files.length === 0)
-      return scanLimited ? "(no matches in first 20000 files; scan incomplete)" : "(no matches)";
-    const shown = files.slice(0, 500);
-    if (files.length > 500) ctx.output?.write(files.join("\n"));
-    const saved = ctx.output?.path
-      ? ctx.output.ref.missingFrom === undefined
-        ? `; recorded ${files.length} scanned matches: ${ctx.output.path}`
-        : `; recording incomplete from byte ${ctx.output.ref.missingFrom}: ${ctx.output.path}`
-      : "; narrow the pattern to see more";
-    return (
-      shown.join("\n") +
-      (files.length > 500
-        ? `\n[showing first 500 of ${files.length} scanned matches${saved}]`
-        : "") +
-      (scanLimited ? "\n[scan stopped at 20000 files; results may be incomplete]" : "")
-    );
-  },
-});
+    parameters: Type.Object({
+      pattern: Type.String({
+        description: "glob pattern: ** any depth, * one segment, ? one character",
+      }),
+      path: Type.Optional(
+        Type.String({ description: "starting directory, default current directory" }),
+      ),
+    }),
+    concurrency: "parallel",
+    async execute(args, ctx) {
+      const root = resolve(directory, args.path ?? ".");
+      const re = globToRegExp(args.pattern);
+      const { paths, limited: scanLimited } = await listFiles(root, ctx.signal);
+      const files = paths.filter((path) => re.test(path));
+      files.sort();
+      if (files.length === 0)
+        return scanLimited ? "(no matches in first 20000 files; scan incomplete)" : "(no matches)";
+      const shown = files.slice(0, 500);
+      if (files.length > 500) ctx.output?.write(files.join("\n"));
+      const saved = ctx.output?.path
+        ? ctx.output.ref.missingFrom === undefined
+          ? `; recorded ${files.length} scanned matches: ${ctx.output.path}`
+          : `; recording incomplete from byte ${ctx.output.ref.missingFrom}: ${ctx.output.path}`
+        : "; narrow the pattern to see more";
+      return (
+        shown.join("\n") +
+        (files.length > 500
+          ? `\n[showing first 500 of ${files.length} scanned matches${saved}]`
+          : "") +
+        (scanLimited ? "\n[scan stopped at 20000 files; results may be incomplete]" : "")
+      );
+    },
+  });
+}
+
+export const globTool = createGlobTool();

@@ -19,7 +19,7 @@ export class Connection {
   definitions: McpToolDef[] = [];
   readonly listeners = new Set<() => void>();
   references = 0;
-  active: EventLog | undefined;
+  private active: { log: EventLog; owner: object } | undefined;
   private readonly scope = new AsyncLocalStorage<EventLog>();
   private readonly requests = new Map<number | string, EventLog>();
   private closing: Promise<void> | undefined;
@@ -31,7 +31,7 @@ export class Connection {
     readonly server: ResolvedServer,
     opts: ConnectionOptions,
   ) {
-    this.active = opts.log;
+    this.active = { log: opts.log, owner: this };
     this.status = {
       name: server.name,
       phase: "failed",
@@ -49,10 +49,10 @@ export class Connection {
         const response = direction === "receive" && !message.method && id !== undefined;
         const log =
           direction === "send"
-            ? (this.scope.getStore() ?? this.active)
+            ? (this.scope.getStore() ?? this.active?.log)
             : response
               ? this.requests.get(id)
-              : this.active;
+              : this.active?.log;
         if (direction === "send" && message.method && id !== undefined && log)
           this.requests.set(id, log);
         if (response) this.requests.delete(id);
@@ -122,7 +122,16 @@ export class Connection {
       opts.createClient?.(server, clientOpts) ?? new McpClient(server.name, transport, clientOpts);
   }
 
-  emit(event: McpEvent, log = this.active): void {
+  /** 激活归属是 bridge 生命周期;同一日志的新旧 bridge 不能互相解除。 */
+  activate(owner: object, log: EventLog): void {
+    this.active = { owner, log };
+  }
+
+  deactivate(owner: object): void {
+    if (this.active?.owner === owner) this.active = undefined;
+  }
+
+  emit(event: McpEvent, log = this.active?.log): void {
     const { kind, ...payload } = event;
     log?.append({ type: "ext/event", at: now(), source: "mcp", kind, payload });
   }

@@ -467,6 +467,7 @@ createInterface({ input: process.stdin }).on("line", line => {
   it("enabledTools / disabledTools;启动失败只记事件,required 才抛;进程崩溃 → closed", async () => {
     const log = new EventLog();
     const tools: Tool[] = [];
+    const connections = new McpConnections();
     const bridge = await connectMcpServers(
       [
         stdioServer("f", ["--era", "modern", "--tools", "3"], {
@@ -481,7 +482,7 @@ createInterface({ input: process.stdin }).on("line", line => {
         },
         stdioServer("crash", ["--era", "modern", "--tools", "1", "--crash-after", "1"]),
       ],
-      { log, tools },
+      { log, tools, connections },
     );
     expect(tools.filter((t) => t.name.startsWith("mcp__f__")).map((t) => t.name)).toEqual([
       "mcp__f__t1",
@@ -495,18 +496,36 @@ createInterface({ input: process.stdin }).on("line", line => {
         (m) => m.kind === "server" && m.server === "gone" && m.phase === "starting",
       ),
     ).toMatchObject({ warning: "unset variables kept as-is: TOKEN" });
-    await find(tools, "mcp__crash__t1").execute({}, ctx);
-    for (
-      let i = 0;
-      i < 50 && bridge.statuses().find((s) => s.name === "crash")?.phase !== "closed";
-      i++
-    )
-      await new Promise((r) => setTimeout(r, 20));
-    expect(bridge.statuses().find((s) => s.name === "crash")).toMatchObject({ phase: "closed" });
-    await expect(find(tools, "mcp__crash__t1").execute({}, ctx)).rejects.toThrow(
-      /process|closed|not running/,
+    const nextTools: Tool[] = [];
+    const next = await connectMcpServers(
+      [stdioServer("crash", ["--era", "modern", "--tools", "1", "--crash-after", "1"])],
+      { log, tools: nextTools, connections, activate: false },
     );
-    await bridge.close();
+    try {
+      next.activate();
+      await bridge.close();
+      await find(nextTools, "mcp__crash__t1").execute({}, ctx);
+      for (
+        let i = 0;
+        i < 50 && next.statuses().find((s) => s.name === "crash")?.phase !== "closed";
+        i++
+      )
+        await new Promise((r) => setTimeout(r, 20));
+      expect(next.statuses()[0]).toMatchObject({ phase: "closed" });
+      expect(
+        mcpEvents(log.events).some(
+          (event) =>
+            event.kind === "server" && event.server === "crash" && event.phase === "closed",
+        ),
+      ).toBe(true);
+      await expect(find(nextTools, "mcp__crash__t1").execute({}, ctx)).rejects.toThrow(
+        /process|closed|not running/,
+      );
+    } finally {
+      await next.close();
+      await bridge.close();
+      await connections.close();
+    }
 
     await expect(
       connectMcpServers(
@@ -1006,6 +1025,7 @@ describe("命名、白黑名单、内容转换、审批规则、配置", () => {
     );
     expect(servers.map((s) => s.name).sort()).toEqual(["a", "b"]);
     expect(servers.find((s) => s.name === "a")?.config.args).toEqual(["tok", "dflt"]);
+    expect(servers.find((s) => s.name === "a")?.config.cwd).toBe(dir);
     expect(servers.find((s) => s.name === "b")).toMatchObject({
       config: { url: "https://b2", headers: { Authorization: "Bearer tok" } },
       source: "config.json",

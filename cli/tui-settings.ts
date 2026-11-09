@@ -222,7 +222,7 @@ export async function applySettingNow(
       const warnings: string[] = [];
       const skills =
         def.key === "prompt.skills.sources"
-          ? discoverSkills(process.cwd(), {
+          ? discoverSkills(ctx.cwd, {
               ...(config.sources && { sources: config.sources }),
               onError: (error) => warnings.push(error.message),
             })
@@ -381,7 +381,7 @@ export async function changeCompactionReference(
       validate(def, value);
       return [key, value] as const;
     });
-    const next = await buildCompaction(values, ctx.compaction.window);
+    const next = await buildCompaction(values, ctx.compaction.window, ctx.cwd);
     ensureIdle();
     if (scope === "defaults") {
       if (!ctx.deps.settings?.saveSettings)
@@ -450,7 +450,7 @@ export async function changeSetting(
 ): Promise<SettingChange> {
   try {
     validate(def, value);
-    if (def.key === "compactionPrompt") await loadSummaryPrompt(String(value));
+    if (def.key === "compactionPrompt") await loadSummaryPrompt(String(value), ctx.cwd);
     const save = ctx.deps.settings?.saveSetting;
     if (scope === "defaults") {
       if (def.key === "compaction") validateCompactionName(String(value));

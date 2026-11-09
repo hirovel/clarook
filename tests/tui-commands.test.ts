@@ -11,6 +11,7 @@ import { SessionInputs } from "../cli/session-inputs.js";
 import { forkSession } from "../cli/sessions.js";
 import { appendMemory } from "../cli/tools/memory.js";
 import { createTuiApp, type TuiApp, type TuiAppDeps } from "../cli/tui-app.js";
+import type { SessionTarget } from "../cli/tui-context.js";
 import { ApprovalPrompt } from "../cli/tui-slots.js";
 import { llmSummarize } from "../src/compaction.js";
 import { DEFAULT_CONFIG_PATH } from "../src/config.js";
@@ -123,6 +124,7 @@ function bootB(provider: Provider, over: Partial<TuiAppDeps> = {}, log = new Eve
 describe("命令:帮助、设置、检视器入口、强度、模型、审批", () => {
   it("用户终端入口:真实命令无 API,范围进入实际请求,忙时保留输入,取消与恢复不重跑", async () => {
     tmp = mkdtempSync(join(tmpdir(), "clarook-user-shell-"));
+    mkdirSync(join(tmp, "child"));
     const file = join(tmp, "shell.jsonl");
     const log = new EventLog(file);
     const sent: string[] = [];
@@ -145,7 +147,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     });
     const { app, term } = bootB(
       provider,
-      { readClipboard: async () => ({ image: testImage }) },
+      { cwd: tmp, readClipboard: async () => ({ image: testImage }) },
       log,
     );
     try {
@@ -197,10 +199,10 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
       );
       expect(deriveMessages(log.events).at(-1)?.content).toContain("SLASH_ENTRY");
       expect(sent).toHaveLength(0);
-      await app.submit(`!!cd '${tmp.replace(/\\/g, "/")}' && pwd`);
+      await app.submit("!!cd child && pwd");
       await app.submit("!!pwd -W 2>/dev/null || pwd");
       const directory = [...log.events].reverse().find((e) => e.type === "user/shell");
-      expect(directory?.content).toContain(process.cwd().replace(/\\/g, "/"));
+      expect(directory?.content).toContain(tmp.replace(/\\/g, "/"));
       // 控制协议进入原始结果,仅显示处理;@引用不能被附件展开。
       await app.submit(
         "!printf '\\033[32mINCLUDED @missing\\033[0m\\n'; printf 'ERROR' >&2; exit 3",
@@ -324,7 +326,9 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
   it("/compact 在运行状态显示进度,Esc 通过普通任务入口取消", async () => {
     const instructions = "Keep this structure:\n  first  item\n\n\tsecond item";
     let received = "";
+    const switchSession = vi.fn();
     const { app, term, log } = bootB(scriptedB([]), {
+      switchSession,
       compaction: {
         strategy: async ({ signal, instructions }) => {
           received = instructions ?? "";
@@ -342,6 +346,9 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     await tick();
     expect(received).toBe(instructions);
     expect(app.agent.running).toBe(true);
+    await app.command("/session directory ../other project");
+    expect(switchSession).not.toHaveBeenCalled();
+    expect(doc(app)).toContain("cannot switch sessions while running; press Esc first");
     expect(doc(app)).toContain("compacting");
     await app.command("/compact again");
     expect(doc(app)).toContain("cannot compact while running; press Esc first");
@@ -763,8 +770,10 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
 
 describe("按键", () => {
   it("面板列快捷键,普通字符归草稿;检视器入口;Ctrl+T 切思考;Ctrl+C 确认退出并保留草稿", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "clarook-paste-"));
     let clipboard: ClipboardInput = { image: testImage };
     const { app, term, exits, log } = bootB(scriptedB([]), {
+      cwd: tmp,
       terminal: new VirtualTerminal(60, 24),
       readClipboard: async () => clipboard,
     });
@@ -811,11 +820,12 @@ describe("按键", () => {
     expect(plain(app.dialogLines().join("\n"))).toContain("No images attached");
     term.feed("\x1b");
     expect(app.draft()).toBe("draft?");
-    const imageDir = mkdtempSync(join(tmpdir(), "clarook-paste-"));
+    const imageDir = join(tmp, "images");
+    mkdirSync(imageDir);
     try {
       const imageFile = join(imageDir, "pasted image.png");
       writeFileSync(imageFile, Buffer.from(testImage.data, "base64"));
-      term.feed(`\x1b[200~"${imageFile}"\x1b[201~`);
+      term.feed('\x1b[200~"images/pasted image.png"\x1b[201~');
       await vi.waitFor(() => expect(doc(app)).toContain("1 image(s) attached"));
       expect(app.draft()).toBe("draft?");
       expect(log.events).toHaveLength(before);
@@ -936,8 +946,6 @@ describe("提交", () => {
     writeFileSync(join(tmp, "template.txt"), "TEMPLATE_FILE");
     writeFileSync(join(tmp, "nested.txt"), "NESTED_FILE");
     writeFileSync(join(tmp, "report notes.txt"), "QUOTED_PATH_FILE");
-    const cwd = process.cwd();
-    process.chdir(tmp);
     const inputs = new SessionInputs(join(tmp, "input.jsonl"), true);
     const submitted: Message[][] = [];
     const { app, log, term } = bootB(
@@ -948,6 +956,7 @@ describe("提交", () => {
         },
       }),
       {
+        cwd: tmp,
         inputs,
         readClipboard: async () => ({ image: testImage }),
         templates: [
@@ -983,6 +992,10 @@ describe("提交", () => {
       },
     );
     try {
+      app.setDraft("@nest");
+      term.feed("\t");
+      await vi.waitFor(() => expect(app.draft()).toBe("@nested.txt "));
+      app.setDraft("");
       await app.command("/literal");
       expect(submitted).toHaveLength(1);
       expect(submitted[0]).toContainEqual(
@@ -1029,7 +1042,6 @@ describe("提交", () => {
       await vi.waitFor(() => expect(app.agent.running).toBe(false));
     } finally {
       app.stop();
-      process.chdir(cwd);
     }
   });
 
@@ -1225,6 +1237,7 @@ describe("命令的分支", () => {
   it("/prompt 段构成与 instructions-as user 的提示;/compact 失败;/fork 的三种参数;未知命令与模板", async () => {
     tmp = mkdtempSync(join(tmpdir(), "clarook-tui-"));
     const resumed: string[] = [];
+    const switches: SessionTarget[] = [];
     const log = new EventLog();
     log.append({
       type: "session/start",
@@ -1237,11 +1250,13 @@ describe("命令的分支", () => {
       ],
     });
     log.append({ type: "user/message", at: "", text: "<instructions>x</instructions>" });
-    const { app } = bootB(
+    const { app, term } = bootB(
       scriptedB([]),
       {
+        cwd: tmp,
         sessionsDir: tmp,
         switchSession: (target) => {
+          switches.push(target);
           if (target.kind === "resume") resumed.push(target.file);
         },
         compaction: {
@@ -1304,6 +1319,30 @@ describe("命令的分支", () => {
     });
     await app.command("/session resume C:/project with  spaces/session.jsonl");
     expect(resumed.at(-1)).toBe("C:/project with  spaces/session.jsonl");
+    await app.command("/session directory ../project with  spaces");
+    expect(switches.at(-1)).toEqual({
+      kind: "directory",
+      directory: "../project with  spaces",
+    });
+    await app.command("/session directory");
+    expect(switches.at(-1)).toEqual({ kind: "directory" });
+    await app.command("/session");
+    expect(app.dialogLines().map(plain).join("\n")).toContain(tmp);
+    term.feed("4");
+    term.feed("\r");
+    await tick();
+    expect(switches.at(-1)).toEqual({ kind: "directory" });
+    app.setDraft("keep this draft");
+    const confirmed = app.input("Working directory", "Choose a directory", tmp);
+    term.feed("\r");
+    await expect(confirmed).resolves.toBe(tmp);
+    const cancelled = app.input("Working directory", "Choose a directory", tmp);
+    term.feed("\x15");
+    term.feed("discarded directory");
+    term.feed("\x1b");
+    await expect(cancelled).resolves.toBeUndefined();
+    expect(app.dialogLines()).toEqual([]);
+    expect(app.draft()).toBe("keep this draft");
     await app.command("/set approve allow read:folder with  spaces/**");
     const approval = [...log.events]
       .reverse()
@@ -1311,6 +1350,24 @@ describe("命令的分支", () => {
     expect(approval).toMatchObject({
       value: expect.stringContaining("read:folder with  spaces/**"),
     });
+    const skill = join(tmp, ".agents", "skills", "directory-review");
+    mkdirSync(skill, { recursive: true });
+    writeFileSync(join(skill, "SKILL.md"), "Review from the selected directory.");
+    await app.command('/settings prompt.skills.sources {"project-agents":"on"}');
+    await app.command("/directory-review");
+    expect(log.events.filter((event) => event.type === "user/message").at(-1)).toMatchObject({
+      text: expect.stringContaining("Review from the selected directory."),
+    });
+    const prompt = "Summarize with the selected directory template.";
+    writeFileSync(join(tmp, "summary.md"), prompt);
+    await app.command("/settings compactionPrompt summary.md");
+    await app.command("/set preservation tokens 1");
+    const summary = vi.spyOn(app.agent.provider, "complete");
+    await app.command("/compact");
+    expect(summary.mock.calls.at(-1)?.[0].some((message) => message.content.includes(prompt))).toBe(
+      true,
+    );
+    summary.mockRestore();
     app.stop();
   });
 

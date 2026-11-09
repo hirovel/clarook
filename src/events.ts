@@ -40,6 +40,8 @@ export type AgentEvent =
       /** 系统提示词的分段构成(名称、来源、字符数),只给人看:检视器与 /context 据此按段拆分。 */
       sections?: { name: string; source?: string; chars: number }[];
     }
+  /** 明确绑定的会话执行根;环境说明在发生位置投影,最新目录不被摘要或上下文操作隐藏。 */
+  | { type: "session/directory"; at: string; cwd: string; environment: string }
   | { type: "user/message"; at: string; text: string; inputId?: string; images?: ImageInput[] }
   /** 用户直接执行的命令;不冒充模型工具调用。content 保留命令结果,投影时与命令一起组成用户消息。 */
   | {

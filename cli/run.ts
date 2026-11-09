@@ -90,7 +90,7 @@ const watchSaving = (source: typeof log) => {
 };
 watchSaving(log);
 try {
-  runtime = await prepareSessionRuntime({
+  const prepared = await prepareSessionRuntime({
     boot,
     args,
     log,
@@ -103,6 +103,8 @@ try {
     }),
     onChild: (child) => watchSaving(child.log),
   });
+  if (!prepared) throw new Error("Session preparation cancelled.");
+  runtime = prepared;
   runtime.activate();
 } catch (error) {
   console.error(errorMessage(error));
@@ -139,7 +141,9 @@ agent = new Agent({
         reason: "one-shot mode with --approve ask; no one to ask",
       }),
     }),
-    ...(typeof approvalCfg === "object" && { approve: policyApprove(approvalCfg, undefined) }),
+    ...(typeof approvalCfg === "object" && {
+      approve: policyApprove(approvalCfg, undefined, runtime.cwd),
+    }),
   },
   ...(args.effort && { effort: args.effort }),
   ...(!args.json && !args.events && { onDelta: (d: string) => process.stdout.write(d) }),
@@ -147,7 +151,7 @@ agent = new Agent({
 
 const startIndex = log.events.length;
 try {
-  const outcome = await agent.prompt(expandFileRefs(prompt).text);
+  const outcome = await agent.prompt(expandFileRefs(prompt, runtime.cwd).text);
   const fresh = log.events.slice(startIndex);
   const last = [...fresh].reverse().find((e) => e.type === "assistant/message");
   const text = last?.type === "assistant/message" ? last.text : "";

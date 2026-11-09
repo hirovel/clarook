@@ -763,8 +763,11 @@ describe("分叉与扩展模块", () => {
       ].join("\n"),
     );
     const log = new EventLog();
-    const ext = await loadExtensions([file], { cwd: "/w", log });
+    const ext = await loadExtensions(["ext.mjs"], { cwd: dir, log });
     expect(ext.tools?.map((t) => t.name)).toEqual(["hello"]);
+    expect(await ext.tools?.[0]?.execute({}, { signal: new AbortController().signal })).toBe(
+      `hi ${dir}`,
+    );
     expect(ext.slots?.execution).toBe("parallel");
     log.append({ type: "user/message", at: "", text: "x" });
     expect((globalThis as { __seen?: number }).__seen).toBe(1);

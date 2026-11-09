@@ -71,6 +71,7 @@ export class ApprovalPrompt implements Component {
     private readonly onDecide: (d: ApprovalChoice) => void,
     private readonly onChange: () => void = () => {},
     private readonly height: () => number = () => 30,
+    private readonly cwd?: string,
   ) {}
 
   render(width = 120): string[] {
@@ -82,7 +83,7 @@ export class ApprovalPrompt implements Component {
       this.content = [
         c.faint(this.why),
         ...(visibleWidth(this.call.name) > inner - 2 ? [c.soft(this.call.name)] : []),
-        c.soft(formatArgs(this.call.args)),
+        c.soft(formatArgs(this.call.args, { cwd: this.cwd })),
         ...(detail ? detail.split("\n") : []),
       ].flatMap((line) => wrapTextWithAnsi(line, inner));
       this.contentWidth = inner;
@@ -261,6 +262,7 @@ export function askApproval(
       finish,
       () => ctx.tui.requestRender(),
       () => ctx.deps.terminal.rows,
+      ctx.cwd,
     );
     a.prompt = prompt;
     a.overlay = ctx.tui.showOverlay(prompt, { width: "100%", anchor: "bottom-left" });
@@ -279,8 +281,10 @@ export function approveImpl(ctx: TuiContext): ApprovePolicy {
   if (a.mode === "ask")
     return (call, origin, signal) =>
       askApproval(ctx, call, label("asked for every call", origin), signal);
-  return policyApprove(a.cfg, (call, why, origin, signal) =>
-    askApproval(ctx, call, label(why, origin), signal),
+  return policyApprove(
+    a.cfg,
+    (call, why, origin, signal) => askApproval(ctx, call, label(why, origin), signal),
+    ctx.cwd,
   );
 }
 
@@ -347,6 +351,7 @@ export async function applySlotValue(ctx: TuiContext, slot: string, value: strin
           [slot]: slot === "compactionMaxTokens" ? Number(value) : value,
         },
         ctx.compaction.window,
+        ctx.cwd,
       );
       if (ctx.agent.running)
         throw new Error("Cannot switch a slot while running; press Esc first.");

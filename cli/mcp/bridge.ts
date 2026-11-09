@@ -232,6 +232,7 @@ export async function connectMcpServers(
   }[] = [];
   const failed: McpServerStatus[] = [];
   const names = new Set<string>();
+  const owner = {};
   let closed = false;
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> =>
@@ -242,7 +243,7 @@ export async function connectMcpServers(
       const results = await Promise.allSettled(
         bindings.map(async ({ connection, install, status }) => {
           connection.listeners.delete(install);
-          if (connection.active === opts.log) connection.active = undefined;
+          connection.deactivate(owner);
           try {
             await pool.release(connection);
             status.phase = "closed";
@@ -407,7 +408,7 @@ export async function connectMcpServers(
   }
   const activate = () => {
     if (closed) throw new Error("This MCP session is closed");
-    for (const { connection } of bindings) connection.active = opts.log;
+    for (const { connection } of bindings) connection.activate(owner, opts.log);
   };
   if (opts.activate !== false) activate();
   return {
