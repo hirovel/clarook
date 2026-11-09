@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   type CompactionAcceptance,
   DEFAULT_COMPACTION_SETTINGS,
@@ -17,6 +18,7 @@ import {
   type Message,
 } from "./messages.js";
 import type { Provider, ToolDef } from "./provider.js";
+import { createToolDefinitionQuery, modelToolDefinitions } from "./tool-definitions.js";
 
 // ---------- 保留策略槽:决定压缩时尾部保留多少原文 ----------
 
@@ -133,11 +135,16 @@ export type CompactionStrategy = (input: CompactionInput) => Promise<CompactionP
 /** 有效实测已包含工具;失效时回退到当前已知文本与工具声明的粗估。 */
 export function contextSize(
   events: readonly AgentEvent[],
-  tools: readonly ToolDef[] = [],
+  tools?: readonly ToolDef[],
 ): {
   tokens: number;
   basis: "usage" | "estimate";
 } {
+  // 省略目录不等于明确空目录;只在现有输入屏障内解析最近可证的事实。
+  let current: readonly ToolDef[] | undefined =
+    tools === undefined ? undefined : modelToolDefinitions(tools);
+  let currentResolved = tools !== undefined;
+  const definitionsForRequest = createToolDefinitionQuery(events);
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
     if (!e) continue;
@@ -156,6 +163,20 @@ export function contextSize(
           (Array.isArray(e.payload.removed) && e.payload.removed.length > 0)))
     )
       break;
+    if (e.type === "tools/snapshot" && !currentResolved) {
+      current = e.tools;
+      currentResolved = true;
+    }
+    if (e.type === "request" && e.reason !== "compaction") {
+      const definitions = definitionsForRequest(i);
+      if (!currentResolved) {
+        current = definitions;
+        currentResolved = true;
+      } else if (current && definitions && !isDeepStrictEqual(current, definitions)) {
+        // 实际请求可能已永久清理旧回传物;失败或中断也不能在目录回切后复活旧锚。
+        break;
+      }
+    }
     if (
       e.type === "assistant/message" &&
       e.stopReason !== "aborted" &&
@@ -172,6 +193,15 @@ export function contextSize(
       )
         requestIndex--;
       const request = events[requestIndex];
+      const definitions =
+        request?.type === "request" && request.reason !== "compaction"
+          ? definitionsForRequest(requestIndex)
+          : undefined;
+      if (!currentResolved) {
+        current = definitions;
+        currentResolved = true;
+      }
+      if (current && definitions && !isDeepStrictEqual(current, definitions)) break;
       if (
         request?.type === "request" &&
         request.body &&
@@ -184,14 +214,11 @@ export function contextSize(
       };
     }
   }
-  return { tokens: estimateInput(deriveMessages(events), tools), basis: "estimate" };
+  return { tokens: estimateInput(deriveMessages(events), current ?? []), basis: "estimate" };
 }
 
 /** 当前上下文占用;自动压缩与 request 事件共用这个数值口径。 */
-export function contextTokens(
-  events: readonly AgentEvent[],
-  tools: readonly ToolDef[] = [],
-): number {
+export function contextTokens(events: readonly AgentEvent[], tools?: readonly ToolDef[]): number {
   return contextSize(events, tools).tokens;
 }
 

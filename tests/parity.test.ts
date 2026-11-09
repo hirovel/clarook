@@ -14,9 +14,11 @@ import { contextSize, contextTokens, estimateAfter } from "../src/compaction.js"
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
-import type { AssistantTurn, Provider } from "../src/provider.js";
+import { deriveMessages } from "../src/messages.js";
+import type { AssistantTurn, Provider, ToolDef } from "../src/provider.js";
 import { anthropic } from "../src/providers/anthropic.js";
 import { openaiCompat } from "../src/providers/openai-chat.js";
+import { createToolDefinitionQuery, toolDefinitionsForRequest } from "../src/tool-definitions.js";
 import { defineTool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
 import { testDirectory } from "./helpers/setup.js";
@@ -296,6 +298,188 @@ describe("上下文口径:实测优先", () => {
       ];
       expect(contextTokens(fresh)).toBe(8005);
     }
+
+    const definitions: ToolDef[] = [{ name: "r", description: "brief", parameters: {} }];
+    const known: AgentEvent[] = [
+      ...events.slice(0, 2),
+      { type: "tools/snapshot", at: "", tools: definitions },
+      {
+        type: "request",
+        at: "",
+        model: "m",
+        messages: 2,
+        tools: ["r"],
+        estimatedTokens: 1,
+        reason: "turn",
+      },
+      ...events.slice(2),
+    ];
+    expect(contextSize(known, definitions)).toEqual({ tokens: 5120, basis: "usage" });
+    const changed = [{ name: "r", description: "x".repeat(40000), parameters: {} }];
+    // 活动目录先变化,尚未追加快照;自动 gate 也必须在这个边界放弃旧实测。
+    expect(contextSize(known, changed)).toEqual({ tokens: 10222, basis: "estimate" });
+    expect(contextSize(known)).toEqual({ tokens: 5120, basis: "usage" });
+    expect(contextSize(known, [])).toEqual({ tokens: 210, basis: "estimate" });
+    const changedHistory: AgentEvent[] = [
+      ...known,
+      { type: "tools/snapshot", at: "", tools: changed },
+    ];
+    expect(contextSize(changedHistory)).toEqual({ tokens: 10222, basis: "estimate" });
+    const request = known[3] as Extract<AgentEvent, { type: "request" }>;
+    expect(
+      contextSize([
+        ...changedHistory,
+        request,
+        {
+          type: "assistant/message",
+          at: "",
+          text: "",
+          toolCalls: [],
+          stopReason: "end",
+          usage: { inputTokens: 12000, outputTokens: 21 },
+        },
+      ]),
+    ).toEqual({ tokens: 12021, basis: "usage" });
+
+    const schema: ToolDef[] = [
+      { name: "r", description: "brief", parameters: { type: "object", description: "schema" } },
+    ];
+    const schemaKnown = known.map((event) =>
+      event.type === "tools/snapshot" ? { ...event, tools: schema } : event,
+    );
+    expect(
+      contextSize(schemaKnown, [
+        {
+          name: "r",
+          description: "brief",
+          parameters: { description: "schema", type: "object", local: undefined },
+        },
+      ]),
+    ).toEqual({ tokens: 5120, basis: "usage" });
+    expect(
+      contextSize(known, [
+        {
+          name: "r",
+          description: "brief",
+          parameters: { type: "object", description: "x".repeat(40000) },
+        },
+      ]),
+    ).toEqual({ tokens: 10231, basis: "estimate" });
+    const arrayKnown = known.map((event) =>
+      event.type === "tools/snapshot"
+        ? {
+            ...event,
+            tools: [{ name: "r", description: "brief", parameters: { enum: ["a", "b"] } }],
+          }
+        : event,
+    );
+    expect(
+      contextSize(arrayKnown, [
+        { name: "r", description: "brief", parameters: { enum: ["b", "a"] } },
+      ]).basis,
+    ).toBe("estimate");
+
+    // 纯快照往返没有实际 B 输入,不把思考回传的单调失效规则套在 usage 上。
+    expect(
+      contextSize([...changedHistory, { type: "tools/snapshot", at: "", tools: definitions }]),
+    ).toEqual({ tokens: 5120, basis: "usage" });
+    const signedKnown = known.map((event) =>
+      event.type === "assistant/message"
+        ? {
+            ...event,
+            opaque: {
+              kind: "anthropic-thinking",
+              model: "m",
+              blocks: [{ type: "thinking", thinking: "reason", signature: "A" }],
+            },
+          }
+        : event,
+    );
+    const cleanedTail = deriveMessages(signedKnown)
+      .slice(2)
+      .map((message) => {
+        const clean = { ...message };
+        if (clean.role === "assistant") delete clean.opaque;
+        return clean;
+      });
+    const failedB: AgentEvent[] = [
+      ...signedKnown,
+      { type: "tools/snapshot", at: "", tools: changed },
+      { ...request, body: { prefixEvents: 4, tail: cleanedTail } },
+      { type: "request/error", at: "", error: "offline failure" },
+      { type: "tools/snapshot", at: "", tools: definitions },
+    ];
+    expect(
+      deriveMessages(failedB).find((message) => message.role === "assistant")?.opaque,
+    ).toBeUndefined();
+    expect(contextSize(failedB)).toEqual({ tokens: 223, basis: "estimate" });
+
+    // 未知旧目录不因首次快照改变政策,明确无工具请求仍能证明空目录。
+    expect(contextSize([...events, { type: "tools/snapshot", at: "", tools: changed }])).toEqual({
+      tokens: 5120,
+      basis: "usage",
+    });
+    expect(
+      toolDefinitionsForRequest([...known, { ...request, tools: ["legacy"] }], known.length),
+    ).toBeUndefined();
+    // 跨快照逆查后再向前查,不能把更早的声明错配给较晚请求。
+    const queryHistory: AgentEvent[] = [
+      request,
+      ...known,
+      { type: "tools/snapshot", at: "", tools: changed },
+      request,
+      { ...request, tools: ["legacy"] },
+      { ...request, tools: [], reason: "compaction" },
+      { ...request, reason: "compaction" },
+    ];
+    const query = createToolDefinitionQuery(queryHistory);
+    expect(query(known.length + 2)).toEqual(changed);
+    expect(query(4)).toEqual(definitions);
+    expect(query(0)).toBeUndefined();
+    expect(query(known.length + 3)).toBeUndefined();
+    expect(query(known.length + 4)).toEqual([]);
+    expect(query(known.length + 5)).toBeUndefined();
+    expect(query(known.length + 2)).toEqual(changed);
+    expect(
+      contextSize(
+        [
+          ...known,
+          { ...request, tools: ["legacy"] },
+          {
+            type: "assistant/message",
+            at: "",
+            text: "",
+            toolCalls: [],
+            stopReason: "end",
+            usage: { inputTokens: 9000, outputTokens: 2 },
+          },
+        ],
+        changed,
+      ),
+    ).toEqual({ tokens: 9002, basis: "usage" });
+    const noTools: AgentEvent[] = [
+      ...events.slice(0, 2),
+      { ...request, tools: [] },
+      {
+        type: "assistant/message",
+        at: "",
+        text: "",
+        toolCalls: [],
+        stopReason: "end",
+        usage: { inputTokens: 1000, outputTokens: 20 },
+      },
+    ];
+    expect(contextSize(noTools, [])).toEqual({ tokens: 1020, basis: "usage" });
+    expect(contextSize([...known, { ...request, tools: [], reason: "compaction" }])).toEqual({
+      tokens: 5120,
+      basis: "usage",
+    });
+    expect(
+      contextSize([
+        ...known,
+        { type: "ext/event", at: "", source: "subagent", kind: "identity", payload: {} },
+      ]),
+    ).toEqual({ tokens: 210, basis: "estimate" });
   });
 
   it("真实 Anthropic 流取消后保留初始 usage,半截正文仍能触发下次自动压缩", async () => {

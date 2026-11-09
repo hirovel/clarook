@@ -527,6 +527,57 @@ describe("循环触发", () => {
     expect(types).toContain("compaction");
     expect(types.indexOf("compaction")).toBeLessThan(types.lastIndexOf("assistant/message"));
     expect(l.events.filter((e) => e.type === "request").at(-1)).toMatchObject({ threshold: 1500 });
+
+    const sameName = log();
+    const active: [Tool] = [
+      {
+        name: "read",
+        description: "brief",
+        parameters: Type.Object({}),
+        async execute() {
+          return "unused";
+        },
+      },
+    ];
+    const measured: Provider = {
+      model: "fake",
+      async complete() {
+        return {
+          text: "done",
+          toolCalls: [],
+          stopReason: "end",
+          usage: { inputTokens: 1000, outputTokens: 20 },
+        };
+      },
+    };
+    await runTurn({
+      log: sameName,
+      provider: measured,
+      tools: () => active,
+      facts: { date: false },
+    });
+    const unchangedEvents = sameName.events.length;
+    active[0].description = "x".repeat(40000);
+    expect(sameName.events).toHaveLength(unchangedEvents);
+    let attempted = 0;
+    await runTurn({
+      log: sameName,
+      provider: measured,
+      tools: () => active,
+      facts: { date: false },
+      compaction: {
+        window: 5000,
+        reserveTokens: 1000,
+        strategy: async () => {
+          attempted++;
+          return null;
+        },
+      },
+    });
+    expect(attempted).toBe(1);
+    const nextRequest = sameName.events.filter((event) => event.type === "request").at(-1);
+    expect(nextRequest?.threshold).toBe(4000);
+    expect(nextRequest?.estimatedTokens).toBeGreaterThan(10000);
   });
 
   it("溢出恢复:压缩取得进展才重试,后续工具续做标记普通请求", async () => {

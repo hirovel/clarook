@@ -76,6 +76,8 @@ Each action states whether it changes the next input, sends a request immediatel
 
 Context estimates include the current tool definitions when no valid API measurement is available. A valid measurement already includes tools and is extended by newly added messages. Model changes, recorded tool changes and new images invalidate that baseline. Local estimates leave image tokens, private replay data and provider framing unmeasured; historical API usage remains available for comparison.
 
+When complete declaration history is available, context estimates and automatic compaction compare the active tool names, descriptions and parameters with the measured request. Same-name MCP updates are detected before a new snapshot is saved. A valid measurement for the current declarations takes over without counting tools twice.
+
 Interrupted replies keep their reported usage for inspection, but do not provide a complete context baseline. Forked children start their own measurement scope. Custom assembly requests estimate their actual message text; their measurements do not carry over to the standard projection. Automatic compaction still checks the standard projection before custom assembly.
 
 `pnpm checkup <session.jsonl>` reports the observed gap between each stored prediction and the same request's reported input, including a summary of absolute and relative gaps. Its drift check measures stability, not accuracy; missing or interrupted input measurements are excluded from the gap summary.
