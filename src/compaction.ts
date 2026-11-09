@@ -335,22 +335,23 @@ export function llmSummarize(
   };
 }
 
-/** 读过/改过的文件清单:从工具调用参数程序化提取,不依赖模型自觉。 */
+/** 覆盖区内的调用路径:只证明参数引用,不把拒绝、未知或缺结果说成已完成操作。 */
 function fileTrailer(messages: readonly Message[]): string {
-  const read = new Set<string>();
-  const written = new Set<string>();
+  const readPaths = new Set<string>();
+  const writeOrEditPaths = new Set<string>();
   for (const message of messages) {
     if (message.role !== "assistant") continue;
     for (const tc of message.toolCalls) {
       const path = (tc.args as { path?: unknown } | null)?.path;
       if (typeof path !== "string") continue;
-      if (tc.name === "read") read.add(path);
-      if (tc.name === "write" || tc.name === "edit") written.add(path);
+      if (tc.name === "read") readPaths.add(path);
+      if (tc.name === "write" || tc.name === "edit") writeOrEditPaths.add(path);
     }
   }
   let out = "";
-  if (read.size > 0) out += `\n\nFiles read: ${[...read].join(", ")}`;
-  if (written.size > 0) out += `\nFiles written: ${[...written].join(", ")}`;
+  if (readPaths.size > 0) out += `\n\nRead call paths: ${[...readPaths].join(", ")}`;
+  if (writeOrEditPaths.size > 0)
+    out += `\nWrite/edit call paths: ${[...writeOrEditPaths].join(", ")}`;
   return out;
 }
 

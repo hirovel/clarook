@@ -68,6 +68,8 @@ Use Ctrl+R to inspect past requests and Ctrl+E to review the current projected c
 
 Excluding history also marks the changed prefix for Anthropic's existing conservative thinking-replay policy: earlier blocks stay eligible, later historical blocks are omitted from the request. Recorded content remains inspectable. Chat reasoning keeps its configured replay behavior.
 
+Summaries append paths referenced by read and write/edit calls. These lists identify calls, not confirmed file operations; inspect tool results to check their outcomes.
+
 Each action states whether it changes the next input, sends a request immediately or creates a session file. After sending, inspect the captured request in Ctrl+R to check what was actually sent. Intervening log records appear in folded rows; select one and press Enter to inspect them.
 
 Context estimates include the current tool definitions when no valid API measurement is available. A valid measurement already includes tools and is extended by newly added messages. Model changes, recorded tool changes and new images invalidate that baseline. Local estimates leave image tokens, private replay data and provider framing unmeasured; historical API usage remains available for comparison.

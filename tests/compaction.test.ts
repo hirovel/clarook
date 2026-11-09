@@ -231,17 +231,47 @@ function fakeProvider(reply: string, capture?: { messages?: Message[] }): Provid
 describe("llmSummarize", () => {
   it("replay 模式:请求 = 前缀投影 + 指令;载荷含覆盖范围与程序化文件清单", async () => {
     const capture: { messages?: Message[] } = {};
+    // 调用路径是确定事实;拒绝和恢复后缺结果都不能被清单说成写入完成。
+    const attempted = ev([
+      ...BASE.slice(0, 4),
+      {
+        type: "assistant/message",
+        text: "",
+        toolCalls: [
+          { id: "denied", name: "write", args: { path: "denied.txt" } },
+          { id: "missing", name: "edit", args: { path: "missing.txt" } },
+        ],
+        stopReason: "tool",
+      },
+      {
+        type: "tool/result",
+        callId: "denied",
+        name: "write",
+        content: "The user denied this call.",
+        isError: true,
+      },
+      {
+        type: "tool/unresolved",
+        callEvent: 4,
+        callId: "missing",
+        name: "edit",
+        content: "No result was recorded; execution outcome is unknown.",
+      },
+      ...BASE.slice(4),
+    ]);
     const p = await llmSummarize()({
-      events: BASE,
+      events: attempted,
       window: 100000,
       targetTokens: 50000,
       provider: fakeProvider("摘要内容", capture),
-      preservation: () => 7,
+      preservation: () => attempted.length - 1,
     });
     expect(p).not.toBeNull();
-    expect(p).toMatchObject({ coversFrom: 2, coversUpTo: 7 });
+    expect(p).toMatchObject({ coversFrom: 2, coversUpTo: 10 });
     expect(p?.summary).toContain("摘要内容");
-    expect(p?.summary).toContain("Files read: a.ts");
+    expect(p?.summary).not.toContain("Files written:");
+    expect(p?.summary).toContain("Write/edit call paths: denied.txt, missing.txt");
+    expect(p?.summary).toContain("Read call paths: a.ts");
     // 最后一条是摘要指令,其前是前缀投影
     const last = capture.messages?.at(-1);
     expect(last?.role).toBe("user");
