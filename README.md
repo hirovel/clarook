@@ -130,6 +130,8 @@ Attachments come from your original input, independently of prompt-template subs
 
 A text-only response that reaches its output or context limit is kept as incomplete and stops without automatic continuation. Tool calls in a truncated response are not executed.
 
+Tool approval checks the argument values that execution will use, after any local validation and supported scalar conversion. Arguments rejected by local validation return a tool error without prompting for approval; the original model arguments remain in history. OpenAI-compatible streams finish at `[DONE]` without waiting for the HTTP connection to close, preserving preceding usage information. The adapter still requires a valid completion reason before executing tool calls.
+
 The `task` tool delegates work to a child context. Follow up with `resume: "sub-N"`: the child keeps its original type, selected provider/model, actual tool names, per-run step limit and remaining delegation depth, including after restarting Clarook. Raising the current depth does not expand its delegation rights; reducing it below the original requirement rejects the follow-up. Missing original resources or an explicit type change also reject it before model execution. Older child logs without an execution identity remain readable but cannot be resumed. Approval follows the parent's current rules; model aliases and tool implementations are not version-pinned.
 
 Open these entries in `/settings`, switch to **Saved defaults**, and restart to use the new values. They also work in named presets and command-line flags:

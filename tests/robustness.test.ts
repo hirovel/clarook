@@ -41,9 +41,11 @@ describe("SSE 读流", () => {
         'data: {"a":',
         'data: "你"}',
         "",
+        'data:{"a":2}',
+        "",
         "data: [DONE]",
         "",
-        'data:{"a":2}',
+        "data: {invalid after completion}",
         "",
         'data: {"a":3}',
         "",
@@ -52,6 +54,13 @@ describe("SSE 读流", () => {
         for (const byte of enc.encode(input)) yield Uint8Array.of(byte);
       }
       expect(await collect(sseEvents(bytes()))).toEqual([{ a: "你" }, { a: 2 }]);
+      // 原始分帧仍保留结束标记后数据;只有 JSON 事件消费解释协议终止。
+      expect(await collect(sseData(chunks([input])))).toEqual([
+        '{"a":\n"你"}',
+        '{"a":2}',
+        "[DONE]",
+        "{invalid after completion}",
+      ]);
     }
   });
 

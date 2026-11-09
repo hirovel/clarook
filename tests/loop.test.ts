@@ -577,6 +577,11 @@ describe("runTurn", () => {
         { text: "", toolCalls: [], stopReason: "end" },
       ]),
       tools: [echoTool],
+      slots: {
+        approve: () => {
+          throw new Error("Invalid arguments must not prompt for approval");
+        },
+      },
     });
     const result = firstResult(log) as { content: string; isError: boolean };
     expect(result.isError).toBe(true);

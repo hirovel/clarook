@@ -71,13 +71,14 @@ export async function* sseData(
   }
 }
 
-/** 逐个产出完整事件的 JSON 载荷;空 data 与 [DONE] 跳过。 */
+/** 逐个产出完整事件的 JSON 载荷;空 data 跳过,[DONE] 结束读取并释放 reader。 */
 export async function* sseEvents(
   body: AsyncIterable<Uint8Array>,
   opts: SseOptions = {},
 ): AsyncGenerator<unknown> {
   for await (const data of sseData(body, opts)) {
-    if (!data.trim() || data.trim() === "[DONE]") continue;
+    if (data.trim() === "[DONE]") return;
+    if (!data.trim()) continue;
     yield parseData(data);
   }
 }

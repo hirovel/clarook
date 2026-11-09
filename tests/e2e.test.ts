@@ -51,11 +51,12 @@ async function fakeServer(
 }
 
 const sse =
-  (events: unknown[]): Handler =>
+  (events: unknown[], holdOpen = false): Handler =>
   (res) => {
     res.writeHead(200, { "content-type": "text/event-stream" });
     for (const e of events) res.write(`data: ${JSON.stringify(e)}\n\n`);
-    res.end("data: [DONE]\n\n");
+    if (holdOpen) res.write("data: [DONE]\n\n");
+    else res.end("data: [DONE]\n\n");
   };
 const status =
   (code: number, body: string, headers: Record<string, string> = {}): Handler =>
@@ -100,10 +101,14 @@ describe("端到端(假服务器)", () => {
   it("OpenAI 协议:429 重试 → 工具 → 溢出压缩(摘要请求也被记录)→ 重发完成;落盘、trace、检视器、回放一致", async () => {
     const server = await fakeServer([
       status(429, '{"error":{"message":"rate limited"}}', { "retry-after": "0" }),
-      sse([
-        toolCall("call_1", "big", { n: 80 }),
-        finish("tool_calls", { prompt_tokens: 300, completion_tokens: 20 }),
-      ]),
+      sse(
+        [
+          toolCall("call_1", "big", { n: 80 }),
+          { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+          { choices: [], usage: { prompt_tokens: 300, completion_tokens: 20 } },
+        ],
+        true,
+      ),
       status(
         400,
         '{"error":{"message":"This model\'s maximum context length is 131072 tokens. However, you requested 140000 tokens."}}',
@@ -112,10 +117,17 @@ describe("端到端(假服务器)", () => {
         text("摘要:用户要看大文件,工具已返回 80 行内容。"),
         finish("stop", { prompt_tokens: 2000, completion_tokens: 30 }),
       ]),
-      sse([
-        text("完成:文件已看过。"),
-        finish("stop", { prompt_tokens: 900, completion_tokens: 12, prompt_cache_hit_tokens: 600 }),
-      ]),
+      sse(
+        [
+          text("完成:文件已看过。"),
+          finish("stop", {
+            prompt_tokens: 900,
+            completion_tokens: 12,
+            prompt_cache_hit_tokens: 600,
+          }),
+        ],
+        true,
+      ),
     ]);
     tmp = mkdtempSync(join(tmpdir(), "ak-e2e-"));
     const sessionFile = join(tmp, "s.jsonl");
@@ -129,6 +141,7 @@ describe("端到端(假服务器)", () => {
           baseUrl: server.url,
           models: ["m"],
           reasoningField: "reasoning_content",
+          stallTimeoutMs: 1000,
         },
         model: "m",
         contextWindow: 100000,
@@ -238,6 +251,27 @@ describe("端到端(假服务器)", () => {
     );
     expect(saved).toHaveLength(4);
     expect(saved.every((r) => r?.bodies.length && r.attempts?.length && !r.error)).toBe(true);
+    // 协议已完成而 HTTP 未自然 EOF:保留捕获实际停止的证据,不把它变成模型错误。
+    for (const record of [saved[0]?.attempts?.[1], saved[3]?.attempts?.[0]]) {
+      expect(record).toMatchObject({ state: "interrupted" });
+      expect(record?.response).toContain("data: [DONE]");
+    }
+    expect(log.events).toContainEqual(
+      expect.objectContaining({
+        type: "ext/event",
+        kind: "http/end",
+        payload: expect.objectContaining({
+          state: "interrupted",
+          error: "Response reading stopped",
+        }),
+      }),
+    );
+    expect(
+      log.events.filter((event) => event.type === "assistant/message").map((event) => event.usage),
+    ).toEqual([
+      { inputTokens: 300, outputTokens: 20 },
+      { inputTokens: 900, outputTokens: 12, cacheReadTokens: 600 },
+    ]);
     expect(existsSync(traceFile)).toBe(false);
 
     // 回放视角:磁盘日志与内存一致,摘要已进入投影

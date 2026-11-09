@@ -156,6 +156,7 @@ describe("request/error 事件与错误卡", () => {
           return;
         }
         const unfinished = finishReason === "unfinished";
+        const noFinishReason = unfinished || finishReason === "sentinel-only";
         const choice =
           finishCalls === 1
             ? {
@@ -165,7 +166,7 @@ describe("request/error 事件与错误卡", () => {
                     { index: 0, id: "c1", function: { name: "count", arguments: "{}" } },
                   ],
                 },
-                finish_reason: unfinished ? null : finishReason,
+                finish_reason: noFinishReason ? null : finishReason,
               }
             : { delta: { content: "Done." }, finish_reason: "stop" };
         res.writeHead(200, { "content-type": "text/event-stream" });
@@ -226,6 +227,7 @@ describe("request/error 事件与错误卡", () => {
         ["chat", "network_error", true],
         ["chat", "unknown_reason", true],
         ["chat", "unfinished", true],
+        ["chat", "sentinel-only", true],
         ["chat", "tool_calls", true],
         ["chat", "length", true],
         ["anthropic", "refusal", true],
@@ -304,7 +306,7 @@ describe("request/error 事件与错误卡", () => {
             expect(finishCalls).toBe(1);
             expect(finishLog.events.find((e) => e.type === "request/error")).toMatchObject({
               kind: "stream",
-              ...(reason !== "unfinished" && { body: reason }),
+              ...(!["unfinished", "sentinel-only"].includes(reason) && { body: reason }),
             });
             expect(finishLog.events.some((e) => e.type === "assistant/message")).toBe(false);
           }
@@ -313,7 +315,11 @@ describe("request/error 事件与错误卡", () => {
           const recording = readRequestRecording(file, finishLog.events, request);
           expect(recording?.attempts?.[0]?.response).toContain("Visible partial reply.");
           expect(recording?.attempts?.[0]?.response).toContain(
-            reason === "unfinished" ? '"finish_reason":"stop"' : reason,
+            reason === "unfinished"
+              ? '"finish_reason":"stop"'
+              : reason === "sentinel-only"
+                ? '"finish_reason":null'
+                : reason,
           );
         } finally {
           finishLog.recording?.dispose();

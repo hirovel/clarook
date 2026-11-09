@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it, vi } from "vitest";
+import { createReadTool } from "../cli/tools/fs.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import { ApprovalPrompt } from "../cli/tui-slots.js";
 import { Agent } from "../src/agent.js";
@@ -12,6 +13,7 @@ import { DEFAULT_APPROVAL, decide, describeApproval, policyApprove } from "../sr
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { defineTool } from "../src/tools.js";
+import { testDirectory } from "./helpers/setup.js";
 import { VirtualTerminal } from "./helpers/virtual-terminal.js";
 
 vi.mock("node:fs", async (original) => {
@@ -101,6 +103,42 @@ describe("规则裁决", () => {
     expect((result as { content: string }).content).toContain(
       "The user denied this call: approval policy: no rule for bash",
     );
+
+    // 审批必须看到执行器实际使用的路径;标量转换不能绕过文件拒绝规则。
+    const directory = testDirectory("clarook-approval-args-");
+    writeFileSync(join(directory, "123"), "denied file marker");
+    writeFileSync(join(directory, "456"), "allowed file marker");
+    const rawCalls = [
+      call("read", { path: "123" }),
+      call("read", { path: 123 }),
+      call("read", { path: 456 }),
+    ].map((item, index) => ({ ...item, id: `read-${index}` }));
+    let reads = 0;
+    const readLog = new EventLog();
+    const reader = new Agent({
+      log: readLog,
+      tools: [createReadTool({ cwd: directory })],
+      slots: {
+        approve: policyApprove({ allow: ["read"], deny: ["read:123"] }, undefined, directory),
+      },
+      provider: {
+        model: "m",
+        async complete(messages) {
+          if (reads++ === 0) return { text: "", toolCalls: rawCalls, stopReason: "tool" };
+          const results = messages.filter((message) => message.role === "tool");
+          expect(results.map((message) => message.isError)).toEqual([true, true, false]);
+          expect(JSON.stringify(results)).not.toContain("denied file marker");
+          expect(results[2]?.content).toContain("allowed file marker");
+          return { text: "done", toolCalls: [], stopReason: "end" };
+        },
+      },
+    });
+    expect(await reader.prompt("read the files")).toBe("idle");
+    expect(readLog.events.find((event) => event.type === "assistant/message")?.toolCalls).toEqual(
+      rawCalls,
+    );
+    expect(rawCalls[1]?.args).toEqual({ path: 123 });
+    expect(reads).toBe(2);
   });
 });
 

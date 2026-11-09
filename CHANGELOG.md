@@ -29,6 +29,8 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Approve the argument values that tools actually execute, closing mismatches caused by local scalar conversion while preserving raw history. Return locally rejected arguments as tool errors without prompting for approval.
+- End OpenAI-compatible SSE consumption at `[DONE]` instead of waiting for physical response EOF. Preserve preceding usage, release the reader and keep incomplete completion reasons on the error path.
 - Preserve reported array type errors in built-in tool arguments instead of converting single objects into arrays. Keep existing scalar conversion and raw argument history.
 - Register Agent activity before publishing startup events or pending-input callbacks. Keep reentrant prompts queued and cancellation attached to the only active run across new input, pending continuation and retry.
 - Expose immutable event-array snapshots to readers. Appending creates the next snapshot; external array mutations cannot reorder in-memory history or change event indices.

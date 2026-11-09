@@ -51,7 +51,7 @@ export const queueToTurnEnd: SteeringPolicy = (boundary) => boundary === "turn";
 /** 谁在问:子 agent 的调用带上自己的名字,审批提示据此标明来源。主会话不带。 */
 export type ApproveOrigin = { agent: string };
 
-/** 审批策略:执行前询问;拒绝以错误结果回喂。异步交互使用当前轮信号取消等待。 */
+/** 审批策略:询问校验后的实际执行参数;拒绝以错误结果回喂。异步交互使用当前轮信号取消等待。 */
 export type ApprovePolicy = (
   call: ToolCall,
   origin?: ApproveOrigin,
@@ -610,11 +610,13 @@ async function executeCalls(
 ): Promise<void> {
   const signal = ctx.signal ?? new AbortController().signal;
 
-  // 准备阶段永远按顺序:找工具、审批、校验。审批是人的决定,不能并发弹出。
+  // 准备阶段永远按顺序:找工具、校验、审批。审批与执行共用有效参数,不能并发弹出。
   const prepare = async (call: ToolCall): Promise<Prepared> => {
     const tool = ctx.tools.find((t) => t.name === call.name);
     if (!tool) return { call, immediate: `Unknown tool "${call.name}".` };
-    const decision = await ctx.approve(call, ctx.origin, signal);
+    const checked = validateArgs(tool.parameters, call.args);
+    if (!checked.ok) return { call, immediate: checked.error };
+    const decision = await ctx.approve({ ...call, args: checked.value }, ctx.origin, signal);
     if (signal.aborted) return { call, immediate: interruptedNotice(signal) };
     const allowed = typeof decision === "boolean" ? decision : decision.allowed;
     if (!allowed) {
@@ -624,8 +626,6 @@ async function executeCalls(
         immediate: reason ? `The user denied this call: ${reason}` : "The user denied this call.",
       };
     }
-    const checked = validateArgs(tool.parameters, call.args);
-    if (!checked.ok) return { call, immediate: checked.error };
     return { call, tool, args: checked.value };
   };
 
