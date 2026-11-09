@@ -105,8 +105,27 @@ describe("Agent", () => {
       },
     };
     const agent = new Agent({ log, provider, tools: [echoTool] });
+    const observedRunning: boolean[] = [];
+    const reentrant: Promise<unknown>[] = [];
+    log.subscribe((event) => {
+      if (event.type === "user/message" && event.text === "第一条") {
+        observedRunning.push(agent.running);
+        reentrant.push(agent.prompt("observer queued"));
+      }
+      if (event.type === "context/drop" && event.note === "retry") {
+        observedRunning.push(agent.running);
+        reentrant.push(agent.prompt("retry observer", { deliverAs: "followUp" }));
+      }
+    });
 
-    const first = agent.prompt("第一条");
+    const initialImage = { ...testImage };
+    const initialInput = { inputId: "initial", images: [initialImage] };
+    const first = agent.prompt("第一条", initialInput);
+    expect(log.events.at(-1)).toMatchObject({ type: "user/message", inputId: "initial" });
+    const immediate = agent.prompt("before first microtask");
+    initialInput.inputId = "changed after submission";
+    initialImage.name = "changed after submission";
+    initialInput.images.push({ ...testImage });
     await tick();
     expect(agent.running).toBe(true);
     let replacementCalls = 0;
@@ -123,7 +142,7 @@ describe("Agent", () => {
     expect(JSON.stringify(log.events)).toBe(beforeSwitch);
 
     void agent.prompt("插话", { images: [testImage] }); // 运行中 → 排队
-    const viewed = agent.pending[0]?.images;
+    const viewed = agent.pending.find((item) => item.text === "插话")?.images;
     if (!viewed?.[0]) throw new Error("missing queued image");
     viewed[0].name = "changed by reader";
     viewed.push({ ...testImage });
@@ -132,8 +151,12 @@ describe("Agent", () => {
 
     expect(outcome).toBe("idle");
     const texts = log.events.filter((e) => e.type === "user/message").map((e) => e.text);
-    expect(texts).toEqual(["第一条", "插话"]);
-    expect(log.events.filter((e) => e.type === "user/message")[1]).toMatchObject({
+    expect(texts).toEqual(["第一条", "observer queued", "before first microtask", "插话"]);
+    expect(log.events.filter((e) => e.type === "user/message")[0]).toMatchObject({
+      inputId: "initial",
+      images: [testImage],
+    });
+    expect(log.events.filter((e) => e.type === "user/message")[3]).toMatchObject({
       images: [testImage],
     });
     // 插话位于工具结果之后(步边界),不在末尾游离
@@ -156,17 +179,63 @@ describe("Agent", () => {
       "replacement",
     );
     expect(log.events.at(-1)).toMatchObject({ type: "assistant/message", text: "new model reply" });
+    const beforeRejectedRetry = JSON.stringify(log.events);
+    for (const access of [{ running: true }, { readOnlyReason: "Read-only session" }]) {
+      await expect(agent.retry(access)).rejects.toThrow(
+        access.running ? "cannot edit while running" : "Read-only session",
+      );
+      expect(agent.running).toBe(false);
+      expect(JSON.stringify(log.events)).toBe(beforeRejectedRetry);
+    }
+    await agent.retry();
+    await Promise.all([immediate, ...reentrant]);
+    expect(observedRunning).toEqual([true, true]);
+    expect(replacementCalls).toBe(3);
+    expect(log.events.filter((event) => event.type === "context/drop")).toHaveLength(1);
+    expect(
+      log.events.filter(
+        (event) => event.type === "user/message" && event.text === "retry observer",
+      ),
+    ).toHaveLength(1);
     const restoredImage = { ...testImage };
+    const restoredLog = newLog();
+    const restoredRequests: string[][] = [];
     const restored = new Agent({
-      log: newLog(),
-      provider,
+      log: restoredLog,
+      provider: {
+        model: "fake",
+        async complete(messages) {
+          restoredRequests.push(
+            messages.flatMap((message) => (message.role === "user" ? [message.content] : [])),
+          );
+          return { text: "restored reply", toolCalls: [], stopReason: "end" };
+        },
+      },
       tools: [],
       pending: [
         { id: "restored", text: "", deliverAs: "steer", paused: true, images: [restoredImage] },
+        { id: "follow-up", text: "second restored", deliverAs: "followUp", paused: true },
+        { id: "steering", text: "third restored", deliverAs: "steer", paused: true },
       ],
     });
     restoredImage.name = "changed after restore";
     expect(restored.pending[0]?.images).toEqual([testImage]);
+    restoredLog.subscribe((event) => {
+      if (event.type !== "user/message" || event.inputId !== "restored") return;
+      observedRunning.push(restored.running);
+      reentrant.push(restored.prompt("new follow-up", { deliverAs: "followUp" }));
+      reentrant.push(restored.continuePending());
+    });
+    await restored.continuePending();
+    expect(observedRunning).toEqual([true, true, true]);
+    expect(restoredRequests).toEqual([
+      [""],
+      ["", "third restored"],
+      ["", "third restored", "second restored", "new follow-up"],
+    ]);
+    expect(restored.pending).toEqual([]);
+    expect(await restored.continuePending()).toBeUndefined();
+    await Promise.all(reentrant);
   });
 
   it("interrupt:记 session/interrupt 事件并让 turn 以 aborted 收场", async () => {
@@ -200,6 +269,55 @@ describe("Agent", () => {
     append.mockRestore();
     expect(await failing).toBe("aborted");
     expect(agent.running).toBe(false);
+
+    for (const boundary of ["message", "queue"] as const) {
+      const startupLog = newLog();
+      let observedRunning = false;
+      let interrupted = false;
+      let requests = 0;
+      let localCalls = 0;
+      let overlap: Promise<unknown> | undefined;
+      const cancelOnStartup = () => {
+        if (interrupted) return;
+        interrupted = true;
+        observedRunning = startup.running;
+        void startup.prompt("startup observer input");
+        overlap = startup.runLocal(async () => {
+          localCalls++;
+        });
+        void overlap.catch(() => {});
+        startup.interrupt();
+      };
+      const startup = new Agent({
+        log: startupLog,
+        tools: [],
+        provider: {
+          model: "fake",
+          async complete() {
+            requests++;
+            return { text: "unexpected", toolCalls: [], stopReason: "end" };
+          },
+        },
+        ...(boundary === "queue" && { onPendingChange: cancelOnStartup }),
+      });
+      if (boundary === "message")
+        startupLog.subscribe((event) => {
+          if (event.type === "user/message") cancelOnStartup();
+        });
+      const cancelled = startup.prompt("startup input");
+      expect(startup.running).toBe(true);
+      expect(await cancelled).toBe("aborted");
+      await expect(overlap).rejects.toThrow("Work is running");
+      expect(observedRunning).toBe(true);
+      expect(requests).toBe(0);
+      expect(localCalls).toBe(0);
+      expect(startup.running).toBe(false);
+      expect(startup.pending).toMatchObject([{ text: "startup observer input", paused: true }]);
+      expect(startupLog.events.filter((event) => event.type === "user/message")).toHaveLength(1);
+      await startup.continuePending();
+      expect(requests).toBe(1);
+      expect(startup.pending).toEqual([]);
+    }
   });
 
   it("终结后暂停待发送消息,新问题不夹带旧消息,可编辑移除并手动继续", async () => {
@@ -218,7 +336,17 @@ describe("Agent", () => {
         return { text: "ok", toolCalls: [], stopReason: "end" };
       },
     };
-    const agent = new Agent({ log, provider, tools: [] });
+    let failInitialization = false;
+    const agent = new Agent({
+      log,
+      provider,
+      tools: [],
+      onPendingChange() {
+        if (!failInitialization) return;
+        failInitialization = false;
+        throw new Error("initialization failed");
+      },
+    });
 
     const running = agent.prompt("任务A");
     await tick();
@@ -249,6 +377,13 @@ describe("Agent", () => {
       "修改后的留言",
     ]);
     expect(agent.queued).toBe(0);
+
+    const beforeInitializationFailure = JSON.stringify(log.events);
+    failInitialization = true;
+    await expect(agent.prompt("initialization failure")).rejects.toThrow("initialization failed");
+    expect(agent.running).toBe(false);
+    expect(JSON.stringify(log.events)).toBe(beforeInitializationFailure);
+    await agent.prompt("initialization recovered");
 
     let fail = true;
     agent.setProvider({

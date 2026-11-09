@@ -93,17 +93,17 @@ export class Agent {
     }
     const first = this.queue[0];
     if (!first) return;
-    this.opts.log.append({
-      type: "user/message",
-      at: now(),
-      text: first.text,
-      inputId: first.id,
-      ...(first.images?.length && { images: first.images }),
+    return this.run(() => {
+      // 先解除已有留言的暂停;投递回调中的取消或新输入不能被后续批量改写。
+      for (const item of this.queue) item.paused = false;
+      this.opts.log.append({
+        type: "user/message",
+        at: now(),
+        text: first.text,
+        inputId: first.id,
+        ...(first.images?.length && { images: first.images }),
+      });
     });
-    this.queue.shift();
-    for (const item of this.queue) item.paused = false;
-    this.changed();
-    return this.run();
   }
 
   get running(): boolean {
@@ -212,37 +212,30 @@ export class Agent {
     if (this.localRunning) throw new Error("User shell is running; wait or press Esc first");
     this.ensureStorage();
     const log = this.opts.log;
+    const inputId = opts.inputId;
+    const images = opts.images?.length ? structuredClone(opts.images) : undefined;
     if (this.active) {
       this.queue.push({
-        id: opts.inputId ?? randomUUID(),
+        id: inputId ?? randomUUID(),
         text,
         deliverAs: opts.deliverAs ?? "steer",
         paused: this.stopping,
-        ...(opts.images?.length && { images: structuredClone(opts.images) }),
+        ...(images && { images }),
       });
       this.changed();
       return this.active;
     }
-    // 暂停内容必须手动继续;新输入不会夹带中断、失败或恢复留下的消息。
-    for (const leftover of this.queue.filter((item) => !item.paused)) {
+    return this.run(() => {
+      // 空闲队列只含恢复或上一轮收尾暂停的留言,必须显式继续。
+      this.changed();
       log.append({
         type: "user/message",
         at: now(),
-        text: leftover.text,
-        inputId: leftover.id,
-        ...(leftover.images?.length && { images: leftover.images }),
+        text,
+        ...(inputId && { inputId }),
+        ...(images && { images }),
       });
-      this.queue = this.queue.filter((item) => item.id !== leftover.id);
-    }
-    this.changed();
-    log.append({
-      type: "user/message",
-      at: now(),
-      text,
-      ...(opts.inputId && { inputId: opts.inputId }),
-      ...(opts.images?.length && { images: structuredClone(opts.images) }),
     });
-    return this.run();
   }
 
   /**
@@ -251,12 +244,8 @@ export class Agent {
    */
   async retry(access: ContextAccess = {}): Promise<TurnOutcome> {
     this.ensureStorage();
-    changeContext(
-      this.opts.log,
-      { type: "retry" },
-      { ...access, running: this.running || access.running === true },
-    );
-    return this.run();
+    const contextAccess = { ...access, running: this.running || access.running === true };
+    return this.run(() => changeContext(this.opts.log, { type: "retry" }, contextAccess));
   }
 
   /** 手动压缩也占用同一个运行周期:Esc、退出等待和排队输入与普通 turn 一致。 */
@@ -264,44 +253,46 @@ export class Agent {
     if (this.active) throw new Error("cannot compact while running; interrupt first");
     if (!this.opts.compaction) throw new Error("Compaction is not configured");
     this.ensureStorage();
-    return this.run(instructions);
+    return this.run(undefined, instructions);
   }
 
-  private async run(manualCompaction?: string): Promise<TurnOutcome> {
+  private async run(initialize?: () => void, manualCompaction?: string): Promise<TurnOutcome> {
     const log = this.opts.log;
-    return this.runActivity("model", (signal) =>
-      runTurn({
-        log,
-        provider: this.opts.provider,
-        tools: () => this.tools,
-        signal,
-        drainQueue: (boundary) => {
-          const take = (q: PendingInput) =>
-            !q.paused && (boundary === "turn" || q.deliverAs === "steer");
-          return this.queue.filter(take).map((q) => ({
-            text: q.text,
-            inputId: q.id,
-            ...(q.images?.length && { images: q.images }),
-          }));
-        },
-        ...(this.opts.slots && { slots: this.opts.slots }),
-        ...(this.opts.compaction && { compaction: this.opts.compaction }),
-        ...(manualCompaction !== undefined && { manualCompaction }),
-        ...(this.opts.onDelta && { onDelta: this.opts.onDelta }),
-        ...(this.opts.onReasoning && { onReasoning: this.opts.onReasoning }),
-        ...(this.opts.onRaw && { onRaw: this.opts.onRaw }),
-        ...(this.opts.onRequest && { onRequest: this.opts.onRequest }),
-        effort: () => this.opts.effort,
-        ...(this.opts.agent && { agent: this.opts.agent }),
-        ...(this.opts.facts && { facts: this.opts.facts }),
-        ...(this.opts.planReminder !== undefined && { planReminder: this.opts.planReminder }),
-      }),
+    return this.runActivity(
+      "model",
+      (signal) =>
+        runTurn({
+          log,
+          provider: this.opts.provider,
+          tools: () => this.tools,
+          signal,
+          drainQueue: (boundary) => {
+            const take = (q: PendingInput) =>
+              !q.paused && (boundary === "turn" || q.deliverAs === "steer");
+            return this.queue.filter(take).map((q) => ({
+              text: q.text,
+              inputId: q.id,
+              ...(q.images?.length && { images: q.images }),
+            }));
+          },
+          ...(this.opts.slots && { slots: this.opts.slots }),
+          ...(this.opts.compaction && { compaction: this.opts.compaction }),
+          ...(manualCompaction !== undefined && { manualCompaction }),
+          ...(this.opts.onDelta && { onDelta: this.opts.onDelta }),
+          ...(this.opts.onReasoning && { onReasoning: this.opts.onReasoning }),
+          ...(this.opts.onRaw && { onRaw: this.opts.onRaw }),
+          ...(this.opts.onRequest && { onRequest: this.opts.onRequest }),
+          effort: () => this.opts.effort,
+          ...(this.opts.agent && { agent: this.opts.agent }),
+          ...(this.opts.facts && { facts: this.opts.facts }),
+          ...(this.opts.planReminder !== undefined && { planReminder: this.opts.planReminder }),
+        }),
+      initialize,
     );
   }
 
   /** 用户本地操作不请求模型、不消费留言;取消、保存与退出等待复用普通运行周期。 */
   async runLocal(operation: (signal: AbortSignal) => Promise<void>): Promise<TurnOutcome> {
-    if (this.running) throw new Error("Work is running; wait or press Esc first");
     this.ensureStorage();
     return this.runActivity("local", async (signal) => {
       await operation(signal);
@@ -312,7 +303,9 @@ export class Agent {
   private runActivity(
     kind: "model" | "local",
     operation: (signal: AbortSignal) => Promise<TurnOutcome>,
+    initialize?: () => void,
   ): Promise<TurnOutcome> {
+    if (this.active) throw new Error("Work is running; wait or press Esc first");
     const log = this.opts.log;
     const controller = new AbortController();
     this.ac = controller;
@@ -323,15 +316,16 @@ export class Agent {
       controller.abort(RECORDING_FULL);
       this.changed();
     };
-    const stopWatching = log.recording?.subscribe(stopIfFull);
-    stopIfFull();
-    const unsubscribe = log.subscribe((event) => {
-      if (event.type !== "user/message" || !event.inputId) return;
-      this.queue = this.queue.filter((item) => item.id !== event.inputId);
-      this.changed();
+    let stopWatching: (() => void) | undefined;
+    let unsubscribe: (() => void) | undefined;
+    let resolveReady!: () => void;
+    let rejectReady!: (reason: unknown) => void;
+    const ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
     });
-    // 先登记 active 再执行回调,同步订阅者也不能趁本地操作启动时发起另一轮。
-    this.active = Promise.resolve()
+    // 同步接纳输入供宿主确认;观察回调前已有活动周期,模型请求仍异步启动。
+    this.active = ready
       .then(() => operation(controller.signal))
       .finally(async () => {
         try {
@@ -346,7 +340,7 @@ export class Agent {
           await log.checkpoint();
         } finally {
           stopWatching?.();
-          unsubscribe();
+          unsubscribe?.();
           // 终结时尚未投递的留言一律等待明确继续,不夹带进下一条新问题。
           for (const item of this.queue) item.paused = true;
           this.active = undefined;
@@ -355,6 +349,19 @@ export class Agent {
           this.changed();
         }
       });
+    try {
+      stopWatching = log.recording?.subscribe(stopIfFull);
+      stopIfFull();
+      unsubscribe = log.subscribe((event) => {
+        if (event.type !== "user/message" || !event.inputId) return;
+        this.queue = this.queue.filter((item) => item.id !== event.inputId);
+        this.changed();
+      });
+      initialize?.();
+      resolveReady();
+    } catch (error) {
+      rejectReady(error);
+    }
     return this.active;
   }
 

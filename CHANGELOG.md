@@ -27,6 +27,8 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Register Agent activity before publishing startup events or pending-input callbacks. Keep reentrant prompts queued and cancellation attached to the only active run across new input, pending continuation and retry.
+- Expose immutable event-array snapshots to readers. Appending creates the next snapshot; external array mutations cannot reorder in-memory history or change event indices.
 - Apply current user-message edits and exclusions to `userMessagesOnly` child contexts while retaining early requirements covered by compaction. Preserve images and the recorded system document.
 - Reject model changes in the Agent interface while work is running, before changing selection or recording a model fact. Keep the existing idle-only model-switch behavior across callers.
 - Exclude messages that survive a compaction from its replaced-message comparison and totals. Use the actual context projection so protected directory facts remain consistent across the workbench, inspector and replay.

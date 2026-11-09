@@ -380,29 +380,55 @@ describe("EventLog", () => {
     }
   });
 
-  it("订阅是只读旁路:收到每个事件,退订后停止", () => {
-    const log = new EventLog();
-    const seen: string[] = [];
-    const off = log.subscribe((e) => seen.push(e.type));
-    log.append(START);
-    off();
-    log.append(ASK);
-    expect(seen).toEqual(["session/start"]);
-    const event: AgentEvent = {
-      type: "ext/event",
-      at: "t",
-      source: "fixture",
-      kind: "snapshot",
-      payload: { nested: { value: "original" } },
-    };
-    log.append(event);
-    (event.payload.nested as { value: string }).value = "changed outside log";
-    const captured = log.events.at(-1);
-    expect(captured).toMatchObject({ payload: { nested: { value: "original" } } });
-    if (captured?.type !== "ext/event") throw new Error("missing snapshot");
-    expect(Reflect.set(captured.payload.nested as object, "value", "changed by reader")).toBe(
-      false,
-    );
+  it("订阅读取独立快照:外部修改不能改变事实或恢复后的投影", () => {
+    const dir = mkdtempSync(join(tmpdir(), "clarook-snapshot-"));
+    const file = join(dir, "s.jsonl");
+    const log = new EventLog(file);
+    try {
+      const seen: string[] = [];
+      const off = log.subscribe((e) => seen.push(e.type));
+      log.append(START);
+      off();
+      log.append(ASK);
+      expect(seen).toEqual(["session/start"]);
+      const event: AgentEvent = {
+        type: "ext/event",
+        at: "t",
+        source: "fixture",
+        kind: "snapshot",
+        payload: { nested: { value: "original" } },
+      };
+      log.append(event);
+      (event.payload.nested as { value: string }).value = "changed outside log";
+      const before = log.events;
+      const captured = before.at(-1);
+      expect(captured).toMatchObject({ payload: { nested: { value: "original" } } });
+      if (captured?.type !== "ext/event") throw new Error("missing snapshot");
+      expect(Reflect.set(captured.payload.nested as object, "value", "changed by reader")).toBe(
+        false,
+      );
+      expect(() => Array.prototype.reverse.call(before)).toThrow(TypeError);
+      expect(() => Array.prototype.splice.call(before, 1, 1)).toThrow(TypeError);
+      log.append({ type: "context/edit", at: "t", target: 1, field: "content", value: "edited" });
+      expect(before).toHaveLength(3);
+      expect(deriveMessages(before).map((message) => message.content)).toEqual([
+        START.system,
+        ASK.text,
+      ]);
+      expect(log.events[1]).toEqual(ASK);
+      expect(deriveMessages(log.events).map((message) => message.content)).toEqual([
+        START.system,
+        "edited",
+      ]);
+      log.recording?.flush();
+      const loaded = EventLog.load(file);
+      expect(loaded.events).toEqual(log.events);
+      expect(deriveMessages(loaded.events)).toEqual(deriveMessages(log.events));
+      expect(Reflect.set(loaded.events, "1", START)).toBe(false);
+    } finally {
+      log.recording?.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

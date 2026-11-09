@@ -104,6 +104,8 @@ Skills are manual by default: `/name your request`. Automatic selection is optio
 
 MCP tool refreshes use a complete paginated list. Repeated cursors or more than 100 pages reject the refresh and keep the previous catalog. Closing a stdio connection also cleans up its local pipes and remaining POSIX process group when the direct server has already exited.
 
+Extensions read `log.events` as an immutable snapshot. Read the property again to see later events; copy the array before sorting or reversing it. Append new facts through `log.append`.
+
 Context management includes Pi, Codex, ZCode and OpenCode reference compositions. New setups default to the Pi reference. Choose a composition, then adjust its trigger, recent-history budget, summary template, output limit and application rule. Details show the actual prompt, output format and differences from the source implementation. Use a `.md` file for your own summary prompt. These are text-based adaptations sharing Clarook's compaction loop; existing explicit settings take precedence.
 
 For earlier compaction, set `compactionRatio` in `/settings`: `0` disables it; `0.8` is a starting point when enabled. Context length can affect information use, so earlier summaries may improve focus, but can lose detail and add requests. The context reserve may trigger sooner. `/compact` gives you manual control.

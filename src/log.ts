@@ -12,7 +12,7 @@ function seal<T>(value: T): T {
 
 /** 一份追加式事实数组。编辑通过事件改变投影;文件格式与恢复完全归 Recording。 */
 export class EventLog {
-  private entries: AgentEvent[] = [];
+  private entries: readonly AgentEvent[] = Object.freeze([]);
   private listeners = new Set<(e: AgentEvent) => void>();
   readonly recording?: Recording;
 
@@ -31,6 +31,7 @@ export class EventLog {
     }
   }
 
+  /** 借出的数组固定在读取时的版本;后续事实通过重新读取获得。 */
   get events(): readonly AgentEvent[] {
     return this.entries;
   }
@@ -44,7 +45,7 @@ export class EventLog {
     const json = JSON.stringify(e);
     const snapshot = seal(JSON.parse(json) as AgentEvent);
     this.recording?.appendEvent(json);
-    this.entries.push(snapshot);
+    this.entries = Object.freeze([...this.entries, snapshot]);
     for (const fn of this.listeners) {
       try {
         fn(snapshot);
@@ -70,7 +71,7 @@ export class EventLog {
     const log = new EventLog(opts.attach ? filePath : undefined);
     try {
       const events = (log.recording ?? new Recording(filePath)).loadEvents(opts.attach);
-      for (const event of events) log.entries.push(seal(event));
+      log.entries = Object.freeze(events.map((event) => seal(event)));
       return log;
     } catch (error) {
       log.recording?.dispose();
