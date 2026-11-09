@@ -7,7 +7,7 @@ import { maxSteps, queueToTurnEnd, runTurn, steer } from "../src/loop.js";
 import { deriveMessages, type Message, requestMessages } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { toAnthropicWire } from "../src/providers/anthropic.js";
-import { toolDefinitionsForRequest } from "../src/tool-definitions.js";
+import { captureToolDefinitions, toolDefinitionsForRequest } from "../src/tool-definitions.js";
 import { defineTool, type Tool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
 
@@ -449,6 +449,87 @@ describe("runTurn", () => {
       );
       expect(requestMessages(restored.events, oldRequest)).toEqual(oldInput);
       expect(signatures(prior)).toHaveLength(legacy === "mixed" ? 8 : 4);
+    }
+
+    // 真实重新观测 A 必须给新回复建立前向身份,不能因 raw 旧快照同值而一直 unknown。
+    for (const boundary of ["unknown", "empty", "compaction"] as const) {
+      let restored = newLog();
+      const a: Tool = { ...echoTool, description: "A" };
+      const b: Tool = { ...a, description: "B" };
+      captureToolDefinitions(restored, [a]);
+      const request = (names: string[], reason: "turn" | "compaction" = "turn") =>
+        restored.append({
+          type: "request",
+          at: "t",
+          model: "fake",
+          messages: 1,
+          tools: names,
+          estimatedTokens: 1,
+          reason,
+        });
+      if (boundary === "unknown") request(["other"]);
+      request(
+        boundary === "unknown" ? ["echo"] : [],
+        boundary === "compaction" ? "compaction" : "turn",
+      );
+      if (boundary !== "compaction")
+        restored.append({
+          type: "assistant/message",
+          at: "t",
+          text: "G",
+          toolCalls: [],
+          stopReason: "end",
+          opaque: opaque(90),
+        });
+      const original = JSON.stringify(restored.events);
+      const historicalRequest = restored.events.reduce(
+        (last, event, index) => (event.type === "request" ? index : last),
+        -1,
+      );
+      const historicalInput = requestMessages(restored.events, historicalRequest);
+      const inputs: Message[][] = [];
+      const provider: Provider = {
+        model: "fake",
+        async complete(messages) {
+          inputs.push(messages);
+          return {
+            text: "F",
+            toolCalls: [],
+            stopReason: "end",
+            opaque: opaque(90 + inputs.length),
+          };
+        },
+      };
+      await runTurn({ log: restored, provider, tools: [a], facts: { date: false } });
+      const snapshotCount = boundary === "compaction" ? 1 : 2;
+      expect(restored.events.filter((event) => event.type === "tools/snapshot")).toHaveLength(
+        snapshotCount,
+      );
+      const reloaded = new EventLog();
+      for (const event of JSON.parse(JSON.stringify(restored.events))) reloaded.append(event);
+      restored = reloaded;
+      await runTurn({ log: restored, provider, tools: [a], facts: { date: false } });
+      expect(signatures(inputs[1] ?? [])).toEqual([
+        ...(boundary === "unknown" ? ["signature-90", "redacted-90"] : []),
+        "signature-91",
+        "redacted-91",
+      ]);
+      expect(restored.events.filter((event) => event.type === "tools/snapshot")).toHaveLength(
+        snapshotCount,
+      );
+      await runTurn({ log: restored, provider, tools: [b], facts: { date: false } });
+      expect(signatures(inputs[2] ?? [])).toEqual(
+        boundary === "unknown" ? ["signature-90", "redacted-90"] : [],
+      );
+      expect(restored.events.filter((event) => event.type === "tools/snapshot")).toHaveLength(
+        snapshotCount + 1,
+      );
+      expect(JSON.stringify(restored.events.slice(0, JSON.parse(original).length))).toBe(original);
+      expect(requestMessages(restored.events, historicalRequest)).toEqual(historicalInput);
+      const firstFresh = restored.events.find(
+        (event) => event.type === "assistant/message" && event.text === "F",
+      );
+      expect(firstFresh).toMatchObject({ opaque: opaque(91) });
     }
   });
 

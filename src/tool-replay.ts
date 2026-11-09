@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { AgentEvent } from "./events.js";
 import type { Composition, Message } from "./messages.js";
 import type { ToolDef } from "./provider.js";
+import { matchingToolDefinitions } from "./tool-definitions.js";
 
 type BaseComposition = (upTo: number) => Composition;
 type Replay = { invalid: Set<number>; omittedAt: Map<number, number> };
@@ -91,14 +92,7 @@ export function toolReplay(
       producerKnown = false;
       if (event.reason === "compaction") continue;
       if (event.tools.length === 0) change([]);
-      else if (
-        definitions &&
-        !isDeepStrictEqual(
-          event.tools,
-          definitions.map((tool) => tool.name),
-        )
-      )
-        definitions = undefined;
+      else definitions = matchingToolDefinitions(event, definitions);
       producerKnown = definitions !== undefined;
       if (invalid.size === 0 || (!event.body && unresolved.size === 0)) continue;
       const standard = projected(index);

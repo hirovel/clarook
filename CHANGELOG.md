@@ -16,12 +16,11 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 - Expose child step limits and delegation depth in `/settings`, Ctrl+K, presets and CLI flags through the shared settings registry. Move the two values from top-level `subagents` into `defaults.subagents`; reject the old locations. Explain step units, parent inheritance, type precedence and next-start scope. Existing child identities keep their original limits.
 - Require positive integers for the three step/depth settings. Make explicit `--max-steps none` override saved finite limits; child `inherit` keeps parent-limit semantics.
 
-### Changed
-
 - Clarify legacy signed-thinking replay: missing historical tool definitions alone do not invalidate original blocks. Retain the existing model and context-edit checks without adding a blocking or retry policy.
 
 ### Fixed
 
+- Record a fresh complete tool snapshot after incomplete request history, even when its declarations equal an older snapshot. Newly generated replies then follow the existing known-change replay rules; unknown older blocks remain unchanged. Distinguish ordinary empty catalogs from temporary summary tools.
 - Reconstruct compaction comparisons from the effective context at that historical boundary. Apply edits, exclusions, previous summaries and cleared results consistently in inspectors and replay; render source control characters as visible escapes. Replay compaction JSON now exports effective messages with their source event indices.
 - Match context usage baselines to complete active tool declarations, including same-name description and schema updates before automatic compaction. Fall back for incompatible known catalogs and let fresh valid usage take over without counting tools twice.
 - Omit earlier signed Anthropic thinking after known tool-definition changes. Retain eligible blocks produced from cleaned inputs, prevent revival when returning to old definitions, and preserve original request inputs across reloads without optional recordings.

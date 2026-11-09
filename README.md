@@ -58,7 +58,7 @@ Clarook checks for updates after startup and shows a manual update command. Disa
 
 Ctrl+R opens requests in order. Select a request in the transcript with Shift+PgUp/PgDn, then press Ctrl+R to open its received content directly. Inspect sent messages, tool definitions, captured HTTP JSON, replies, returned reasoning and original tool output. In the sent and received views, use ↑↓ to select a block, Enter to expand it and PgUp/PgDn to page through its contents. Saved bodies, reconstructed views and missing records are labeled separately.
 
-The event history saves the full tool declarations for the first ordinary request and whenever they change. Unchanged requests share the previous snapshot. Historical definitions remain inspectable after reload without optional recording attachments; older requests without sufficient evidence are labeled unavailable. These snapshots stay in the local history and do not add messages to the model input.
+The event history saves full tool declarations for the first ordinary request, whenever they change, and when a complete observation restores the current catalog's missing evidence. Unchanged, known catalogs share the previous snapshot. A restored snapshot applies to later requests, not earlier gaps. Historical definitions remain inspectable after reload without optional recording attachments; older requests without sufficient evidence are labeled unavailable. These snapshots stay in the local history and do not add messages to the model input.
 
 The received view includes replacement previews for `edit` and submitted content for `write`, alongside the tool's result state. Complete arguments remain available. These previews describe submitted text, not full-file snapshots.
 

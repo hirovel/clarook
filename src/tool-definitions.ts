@@ -15,10 +15,18 @@ export function modelToolDefinitions(tools: readonly ToolDef[]): ToolDef[] {
 /** 保存模型可见声明,交给 adapter 的对象与历史事实独立。 */
 export function captureToolDefinitions(log: EventLog, tools: readonly ToolDef[]): ToolDef[] {
   const definitions = modelToolDefinitions(tools);
-  const snapshot = log.events[snapshotBefore(log.events, log.events.length)];
-  const previous = snapshot?.type === "tools/snapshot" ? snapshot.tools : undefined;
+  const snapshotIndex = snapshotBefore(log.events, log.events.length);
+  const snapshot = log.events[snapshotIndex];
+  let previous: readonly ToolDef[] | undefined =
+    snapshot?.type === "tools/snapshot" ? snapshot.tools : undefined;
+  // 旧快照后的普通请求可能失去目录证据,也可能明确切到空目录;真实新观测不能被 raw 值去重丢掉。
+  for (let index = snapshotIndex + 1; index < log.events.length; index++) {
+    const event = log.events[index];
+    if (event?.type === "request" && event.reason !== "compaction")
+      previous = matchingToolDefinitions(event, previous);
+  }
   // 对象键序不改变声明,目录及 schema 中的数组顺序仍是实际请求的一部分。
-  if (!previous || !isDeepStrictEqual(previous, definitions))
+  if (snapshotIndex < 0 || previous === undefined || !isDeepStrictEqual(previous, definitions))
     log.append({ type: "tools/snapshot", at: now(), tools: definitions });
   // append 自己隔离并冻结事实;交给 adapter 的对象独立且仍可修改。
   return definitions;
@@ -32,6 +40,20 @@ export function toolDefinitionsForRequest(
   return createToolDefinitionQuery(events)(requestIndex);
 }
 
+/** 只匹配本请求与调用者已有的完整目录;不替调用者选择跨历史缺口的权威。 */
+export function matchingToolDefinitions(
+  request: Pick<Extract<AgentEvent, { type: "request" }>, "tools" | "reason">,
+  definitions: readonly ToolDef[] | undefined,
+): readonly ToolDef[] | undefined {
+  if (request.tools.length === 0) return [];
+  // 摘要请求有自己的工具输入;普通目录不能证明它当时用了哪些完整声明。
+  if (request.reason === "compaction" || definitions === undefined) return undefined;
+  if (request.tools.length !== definitions.length) return undefined;
+  for (let index = 0; index < definitions.length; index++)
+    if (request.tools[index] !== definitions[index]?.name) return undefined;
+  return definitions;
+}
+
 /** 单次只读遍历复用已查过的区间;更晚的查询自动重新定位。 */
 export function createToolDefinitionQuery(events: readonly AgentEvent[]) {
   let previousIndex = events.length;
@@ -40,21 +62,14 @@ export function createToolDefinitionQuery(events: readonly AgentEvent[]) {
     if (!Number.isInteger(requestIndex)) return undefined;
     const request = events[requestIndex];
     if (request?.type !== "request") return undefined;
-    if (request.tools.length === 0) return [];
-    // 摘要请求有自己的工具输入;普通目录不能证明它当时用了哪些完整声明。
-    if (request.reason === "compaction") return undefined;
+    if (request.tools.length === 0 || request.reason === "compaction")
+      return matchingToolDefinitions(request, undefined);
     if (requestIndex > previousIndex || snapshotIndex >= requestIndex)
       snapshotIndex = snapshotBefore(events, requestIndex);
     previousIndex = requestIndex;
     const snapshot = events[snapshotIndex];
     const definitions = snapshot?.type === "tools/snapshot" ? snapshot.tools : undefined;
-    return definitions &&
-      isDeepStrictEqual(
-        request.tools,
-        definitions.map((tool) => tool.name),
-      )
-      ? definitions
-      : undefined;
+    return matchingToolDefinitions(request, definitions);
   };
 }
 
