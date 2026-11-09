@@ -2,6 +2,7 @@ import { Type } from "@sinclair/typebox";
 import { describe, expect, it, vi } from "vitest";
 import { Agent } from "../src/agent.js";
 import { EventLog } from "../src/log.js";
+import { maxSteps } from "../src/loop.js";
 import type { Provider } from "../src/provider.js";
 import { defineTool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
@@ -174,7 +175,7 @@ describe("Agent", () => {
     expect(agent.running).toBe(false);
   });
 
-  it("中断或失败暂停待发送消息,新问题不夹带旧消息,可编辑移除并手动继续", async () => {
+  it("终结后暂停待发送消息,新问题不夹带旧消息,可编辑移除并手动继续", async () => {
     const log = newLog();
     let firstRun = true;
     const provider: Provider = {
@@ -247,5 +248,54 @@ describe("Agent", () => {
       log.events.filter((e) => e.type === "user/message" && e.text === "失败前排队的留言"),
     ).toHaveLength(1);
     expect(agent.queued).toBe(0);
+
+    for (const stop of ["limit", "aborted"] as const) {
+      const stoppedLog = newLog();
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let first = true;
+      const stoppedAgent = new Agent({
+        log: stoppedLog,
+        tools: [echoTool],
+        slots: { termination: maxSteps(1) },
+        provider: {
+          model: "fake",
+          async complete() {
+            if (first) {
+              first = false;
+              await gate;
+              return stop === "limit"
+                ? {
+                    text: "",
+                    toolCalls: [{ id: "c1", name: "echo", args: { text: "x" } }],
+                    stopReason: "tool",
+                  }
+                : { text: "", toolCalls: [], stopReason: "aborted" };
+            }
+            return { text: "ok", toolCalls: [], stopReason: "end" };
+          },
+        },
+      });
+      const stopped = stoppedAgent.prompt("first task");
+      await tick();
+      const followUp = stoppedAgent.prompt("unfinished follow-up", { deliverAs: "followUp" });
+      release();
+      expect(await stopped).toEqual(
+        stop === "limit" ? { stopped: "step limit 1 reached" } : "aborted",
+      );
+      await followUp;
+      expect(stoppedAgent.pending).toMatchObject([{ text: "unfinished follow-up", paused: true }]);
+      await stoppedAgent.prompt("new question");
+      const texts = () =>
+        stoppedLog.events.filter((e) => e.type === "user/message").map((e) => e.text);
+      expect(texts()).toEqual(["first task", "new question"]);
+      await stoppedAgent.continuePending();
+      await stoppedAgent.continuePending();
+      expect(texts()).toEqual(["first task", "new question", "unfinished follow-up"]);
+      expect(stoppedAgent.queued).toBe(0);
+      expect(stoppedLog.events.some((e) => e.type === "session/interrupt")).toBe(false);
+    }
   });
 });

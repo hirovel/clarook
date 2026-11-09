@@ -66,6 +66,8 @@ The received view includes replacement previews for `edit` and submitted content
 
 Use Ctrl+R to inspect past requests and Ctrl+E to review the current projected context. The draft is excluded; sending may compact history or append context. Edit active system instructions, messages and tool results in the internal editor. Exclude messages, restore edited text, or rewind context to an earlier step. Original content and edit records remain available for comparison. Edits to summarized or cleared content and rewinds across a summary are refused because they would not produce the promised input. Retry selects an assistant reply from the active context.
 
+System-section switches are available when the recorded sections can reproduce the current system text exactly. After an arbitrary full-text edit, the section view stays read-only to preserve your changes. Keep editing the full system text, or rebuild the composition through `/session` to use section switches again.
+
 Excluding history also marks the changed prefix for Anthropic's existing conservative thinking-replay policy: earlier blocks stay eligible, later historical blocks are omitted from the request. Recorded content remains inspectable. Chat reasoning keeps its configured replay behavior.
 
 Known tool-definition changes omit earlier signed Anthropic thinking before sending. Blocks produced from the cleaned input can be replayed while definitions stay stable and the existing model and context-edit checks allow it. Returning to a previous definition does not restore omitted blocks. Original records remain available.
@@ -74,9 +76,11 @@ Legacy requests without complete tool-definition evidence retain their original 
 
 Summaries append paths referenced by read and write/edit calls. These lists identify calls, not confirmed file operations; inspect tool results to check their outcomes.
 
-Compaction comparisons show the effective context before the whole compaction, including edits, exclusions, earlier summaries and previously cleared results. Ctrl+E uses the same content. A pipeline can change this input before its summary call; inspect the summary request separately for that call's input. Raw originals remain in Events. Source text displays terminal controls as visible escapes. In `replay --compaction N --json`, `covered` and `cleared` contain effective messages; the corresponding `*Indices` identify their source events.
+Compaction comparisons show the effective context before the whole compaction, including edits, exclusions, earlier summaries and previously cleared results. Messages retained in the resulting context, such as the protected session directory, are excluded from the replaced-message list and its totals. Ctrl+E uses the same content. A pipeline can change this input before its summary call; inspect the summary request separately for that call's input. Raw originals remain in Events. Source text displays terminal controls as visible escapes. In `replay --compaction N --json`, `covered` and `cleared` contain effective messages; the corresponding `*Indices` identify their source events.
 
 Each action states whether it changes the next input, sends a request immediately or creates a session file. After sending, inspect the captured request in Ctrl+R to check what was actually sent. Intervening log records appear in folded rows; select one and press Enter to inspect them.
+
+While work is running, Enter queues steering input and Alt+Enter queues a follow-up for the end of the current turn. Input left undelivered when work ends stays paused, including after cancellation, failure or a step limit. A new question does not send those paused messages; use `/session inputs` to edit, remove or explicitly continue them.
 
 Context estimates include the current tool definitions when no valid API measurement is available. A valid measurement already includes tools and is extended by newly added messages. Model changes, recorded tool changes and new images invalidate that baseline. Local estimates leave image tokens, private replay data and provider framing unmeasured; historical API usage remains available for comparison.
 

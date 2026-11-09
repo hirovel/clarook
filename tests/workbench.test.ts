@@ -9,7 +9,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { systemPromptFor } from "../cli/bootstrap.js";
 import { RequestInspector } from "../cli/inspector.js";
 import { coveredLines, workbench, workbenchLine } from "../cli/inspector-workbench.js";
-import { replaceSystemSection, sectionStates, systemWithSections } from "../cli/prompt-sections.js";
+import {
+  currentSystem,
+  replaceSystemSection,
+  sectionStates,
+  systemWithSections,
+} from "../cli/prompt-sections.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
@@ -185,6 +190,53 @@ describe("工作台的行", () => {
     expect(original).not.toContain("q2");
     edited.push({ type: "context/edit", at, target: 3, field: "text", value: "LATER_CHANGE" });
     expect(coveredLines(edited, editedCovered).map(stripAnsi).join("\n")).toBe(original);
+    const directoryHistory: AgentEvent[] = [
+      { type: "session/start", at, model: "m", system: "sys" },
+      { type: "session/directory", at, cwd: "/A", environment: "CURRENT_DIR_A" },
+      { type: "user/message", at, text: "task" },
+      { type: "assistant/message", at, text: "answer", toolCalls: [], stopReason: "end" },
+      { type: "compaction", at, summary: "FIRST_SUMMARY", coversFrom: 1, coversUpTo: 4 },
+    ];
+    const directoryCovered = workbench({ events: directoryHistory, tools: [] }).rows.find(
+      (r) => r.kind === "covered",
+    );
+    if (directoryCovered?.kind !== "covered") throw new Error("应有真实替换的对话");
+    expect(directoryCovered.count).toBe(2);
+    expect(directoryCovered.tok).toBe(3);
+    const firstComparison = coveredLines(directoryHistory, directoryCovered)
+      .map(stripAnsi)
+      .join("\n");
+    expect(firstComparison).toContain("task");
+    expect(firstComparison).toContain("answer");
+    expect(firstComparison).not.toContain("CURRENT_DIR_A");
+    directoryHistory.push(
+      { type: "session/directory", at, cwd: "/D", environment: "CURRENT_DIR_D" },
+      { type: "user/message", at, text: "next task" },
+      { type: "assistant/message", at, text: "next answer", toolCalls: [], stopReason: "end" },
+      { type: "compaction", at, summary: "NEXT_SUMMARY", coversFrom: 1, coversUpTo: 8 },
+    );
+    expect(coveredLines(directoryHistory, directoryCovered).map(stripAnsi).join("\n")).toBe(
+      firstComparison,
+    );
+    const nextCovered = workbench({ events: directoryHistory, tools: [] }).rows.find(
+      (r) => r.kind === "covered",
+    );
+    if (nextCovered?.kind !== "covered") throw new Error("应有下一次真实替换的内容");
+    expect(nextCovered.count).toBe(4);
+    const nextComparison = coveredLines(directoryHistory, nextCovered).map(stripAnsi).join("\n");
+    expect(nextComparison).toContain("FIRST_SUMMARY");
+    expect(nextComparison).toContain("CURRENT_DIR_A");
+    expect(nextComparison).not.toContain("CURRENT_DIR_D");
+    const changedFrom: AgentEvent[] = [
+      ...compacted,
+      { type: "compaction", at, summary: "SHIFTED_SUMMARY", coversFrom: 2, coversUpTo: 8 },
+    ];
+    const shiftedCovered = workbench({ events: changedFrom, tools: [] }).rows.find(
+      (r) => r.kind === "covered",
+    );
+    if (shiftedCovered?.kind !== "covered") throw new Error("应有保留策略改变后的替换内容");
+    expect(shiftedCovered.count).toBe(3); // 旧摘要、done、q2;旧摘要的合成位置在新范围之外。
+    expect(coveredLines(changedFrom, shiftedCovered).map(stripAnsi).join("\n")).toContain("SUM");
     const live = sample();
     const inspector = new RequestInspector({
       events: () => live,
@@ -372,6 +424,31 @@ describe("工作台的界面", () => {
     expect(systemWithSections(after ?? [], "Environment")).toContain(
       states?.find((s) => s.name === "Environment")?.text,
     );
+    const recoverable = currentSystem(log.events) ?? "";
+    const customized = `${recoverable}\n\nMANUAL_REQUIREMENT_KEEP`;
+    await app.command(`/edit 0 system ${customized}`);
+    expect(sectionStates(log.events)).toBeUndefined();
+    const count = log.events.length;
+    app.inspector.openComposition(0);
+    app.inspector.key("\r");
+    app.inspector.key("2");
+    app.inspector.key("\r");
+    expect(log.events).toHaveLength(count);
+    expect(currentSystem(log.events)).toBe(customized);
+    expect(ins()).toContain("Read-only");
+    await app.command(`/edit 0 system ${recoverable}`);
+    expect(sectionStates(log.events)?.map((s) => s.on)).toEqual(after?.map((s) => s.on));
+    await app.command(`/edit 0 system ${customized}`);
+    const replacement = replaceSystemSection(log.events, "Skills", {
+      name: "Skills",
+      text: "# Skills\n- audit",
+    });
+    if (!replacement) throw new Error("missing customized catalog edit");
+    log.append(replacement);
+    expect(currentSystem(log.events)).toContain("MANUAL_REQUIREMENT_KEEP");
+    expect(currentSystem(log.events)).not.toContain("- review");
+    expect(currentSystem(log.events)?.match(/# Skills/g)).toHaveLength(1);
+    expect(sectionStates(log.events)).toBeDefined();
     // 旧日志:段长度对不上全文 → 只读
     const old = new EventLog();
     old.append({

@@ -339,11 +339,6 @@ export class Agent {
     // 先登记 active 再执行回调,同步订阅者也不能趁本地操作启动时发起另一轮。
     this.active = Promise.resolve()
       .then(() => operation(controller.signal))
-      .catch((error) => {
-        // 失败后保留尚未投递的消息,与中断一样等待用户明确继续。
-        for (const item of this.queue) item.paused = true;
-        throw error;
-      })
       .finally(async () => {
         try {
           if (controller.signal.reason === RECORDING_FULL)
@@ -358,6 +353,8 @@ export class Agent {
         } finally {
           stopWatching?.();
           unsubscribe();
+          // 终结时尚未投递的留言一律等待明确继续,不夹带进下一条新问题。
+          for (const item of this.queue) item.paused = true;
           this.active = undefined;
           this.ac = undefined;
           this.activity = undefined;

@@ -1,4 +1,3 @@
-import { contextPosition } from "../src/compaction.js";
 import { estimateTokens, messageTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
 import { composeContext, type Message, type Provenance } from "../src/messages.js";
@@ -37,18 +36,17 @@ export function compactionChanges(events: readonly AgentEvent[], index: number):
   const cleared: CompactionSource[] = [];
   if (event?.type === "compaction") {
     const before = composeContext(events, index);
+    // 核心可保留覆盖范围内的执行事实;阅读层只列实际被替换的来源,不复制豁免规则。
+    const retained =
+      event.summary === undefined
+        ? undefined
+        : new Set(composeContext(events, index + 1).provenance.map((source) => source.event));
     const clear = new Set(event.cleared);
     for (const [i, message] of before.messages.entries()) {
       const source = before.provenance[i];
       if (!source) continue;
-      const position = contextPosition(events, source.event);
       const row = { ...source, message };
-      if (
-        event.summary !== undefined &&
-        position >= (event.coversFrom ?? 1) &&
-        position < (event.coversUpTo ?? 0)
-      )
-        covered.push(row);
+      if (retained && !retained.has(source.event)) covered.push(row);
       if (message.role === "tool" && clear.has(source.event)) cleared.push(row);
     }
   }

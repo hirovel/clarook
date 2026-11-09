@@ -15,7 +15,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { toolDefinitionTokens } from "../src/context.js";
+import { estimateTokens, toolDefinitionTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
 import { editState, type Message, requestMessages } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
@@ -84,7 +84,7 @@ import {
   workbenchHeader,
   workbenchLine,
 } from "./inspector-workbench.js";
-import { type SectionState, sectionStates } from "./prompt-sections.js";
+import { currentSystem, type SectionState, sectionStates } from "./prompt-sections.js";
 import type { RecordingSection, RequestRecording } from "./session-records.js";
 import { c, G, selectedText } from "./theme.js";
 import { visibleSourceText } from "./tui-format.js";
@@ -1347,11 +1347,11 @@ export class RequestInspector implements Component {
       const { states, names } = this.sections();
       const start = events.find((e) => e.type === "session/start");
       const metas = start?.type === "session/start" ? (start.sections ?? []) : [];
-      const total = metas.reduce((n, s) => n + Math.ceil(s.chars / 4), 0);
-      const title = `${c.bold(c.ink("System prompt"))}  ${c.soft(`${metas.length} sections · ≈${total} tok`)}`;
-      const head = [pad(title), focusLine, pad(rule)];
       const list =
         states ?? names.map((name) => ({ name, on: true, text: "", chars: 0, source: undefined }));
+      const total = estimateTokens(currentSystem(events) ?? "");
+      const title = `${c.bold(c.ink("System prompt"))}  ${c.soft(`${list.length} ${states ? "sections" : "recorded sections"} · ≈${total} text tok`)}`;
+      const head = [pad(title), focusLine, pad(rule)];
       const foot = [
         pad(rule),
         ...controls(
@@ -1372,7 +1372,9 @@ export class RequestInspector implements Component {
                 inner,
               )
             : wrapTextWithAnsi(
-                c.faint("Read-only · Section text not recorded in this session"),
+                c.faint(
+                  "Read-only · Sections cannot be reconstructed. Use /edit 0 system for the full text, or /session to rebuild from current/defaults.",
+                ),
                 inner,
               )
       ).map(pad);

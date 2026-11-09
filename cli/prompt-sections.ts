@@ -29,9 +29,25 @@ export function currentSystem(events: readonly AgentEvent[]): string | undefined
 }
 
 /**
- * 各段与开关状态。切不回来(没有分段元数据,或长度对不上)返回 undefined:调用方只列元数据,不给开关。
+ * 只有分段能精确重建当前全文时才提供开关,不能用原文子串猜测手改文字的归属。
  */
 export function sectionStates(events: readonly AgentEvent[]): SectionState[] | undefined {
+  const current = currentSystem(events);
+  if (current === undefined) return undefined;
+  const states = recoverSections(events, current);
+  return states
+    ?.filter((s) => s.on)
+    .map((s) => s.text)
+    .join("\n\n") === current
+    ? states
+    : undefined;
+}
+
+/** 恢复已记录的原段,供具名段精确替换;不代表任意手改全文仍可按原段切换。 */
+function recoverSections(
+  events: readonly AgentEvent[],
+  current: string,
+): SectionState[] | undefined {
   const s = startOf(events);
   if (!s) return undefined;
   let full = s.e.system;
@@ -54,7 +70,6 @@ export function sectionStates(events: readonly AgentEvent[]): SectionState[] | u
       previousSystem = e.value;
     }
   }
-  const current = currentSystem(events) ?? full;
   const active = splitSections(full, sections, current);
   if (!active) return undefined;
   for (const { section: old, index } of inactive.values())
@@ -101,7 +116,7 @@ export function replaceSystemSection(
   const start = startOf(events);
   if (!start) return undefined;
   const current = currentSystem(events) ?? "";
-  const states = sectionStates(events);
+  const states = recoverSections(events, current);
   let sections: PromptSection[];
   if (
     states &&

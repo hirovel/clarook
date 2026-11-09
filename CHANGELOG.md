@@ -22,6 +22,9 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Keep system-section switches read-only when arbitrary full-text edits no longer match the recorded sections. Preserve manual instructions and retain the existing full-system editor and composition rebuild paths.
+- Exclude messages that survive a compaction from its replaced-message comparison and totals. Use the actual context projection so protected directory facts remain consistent across the workbench, inspector and replay.
+- Pause all undelivered input when an activity ends, including step-limit and provider-aborted results. Keep paused follow-ups out of new questions until explicitly continued.
 - Bind file and search tools, attachments, completion, skills, memory, approval, extensions, subagents and MCP processes to the session directory. Resolve explicit CLI resource files at launch and saved relative resources at the session root. Commit directory changes after the target view and resources are ready; cancellation or preparation failure keeps the previous binding and draft.
 - Record a fresh complete tool snapshot after incomplete request history, even when its declarations equal an older snapshot. Newly generated replies then follow the existing known-change replay rules; unknown older blocks remain unchanged. Distinguish ordinary empty catalogs from temporary summary tools.
 - Reconstruct compaction comparisons from the effective context at that historical boundary. Apply edits, exclusions, previous summaries and cleared results consistently in inspectors and replay; render source control characters as visible escapes. Replay compaction JSON now exports effective messages with their source event indices.

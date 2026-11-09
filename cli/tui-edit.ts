@@ -280,7 +280,7 @@ export function flipSection(ctx: TuiContext, name: string): void {
   if (!states || target < 0) {
     ctx.note(
       c.zhu(
-        "the section texts cannot be recovered from this session's log; start a new session to switch sections",
+        "Section text cannot be reconstructed. Use /edit 0 system for the full text, or /session to rebuild from current/defaults.",
       ),
     );
     return;
