@@ -12,6 +12,8 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Changed
 
+- Group single-file text replacements in the built-in `edit` tool's nonempty `edits` array. Match every item against the original file, reject overlapping targets, preserve per-item `replaceAll`, and write only after all checks pass. Reject the former top-level replacement arguments.
+- Show each requested edit and its unique/all-occurrences range in tool previews and complete inspectors. Preserve historical parameter reading and keep context text comparisons independent of tool input formats.
 - Apply Skills mode, sources, range and loading settings during future session preparation. Preserve the current system document and tools; share initial skill discovery with runtime assembly, and reuse prepared skills for explicit prompt rebuilds.
 - Compare document changes, message text, complete tool declarations and provider-dependent replay state separately. Locate system text changes within known sections; distinguish captured HTTP byte changes from JSON structure and actual cache usage.
 - Store system sections with stable identities, full text and enabled state instead of character-count metadata. Edit and toggle explicit sections; preserve saved manual instructions while prepared skills remain available for loading. System text is rendered from the recorded document.
@@ -27,6 +29,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Preserve reported array type errors in built-in tool arguments instead of converting single objects into arrays. Keep existing scalar conversion and raw argument history.
 - Register Agent activity before publishing startup events or pending-input callbacks. Keep reentrant prompts queued and cancellation attached to the only active run across new input, pending continuation and retry.
 - Expose immutable event-array snapshots to readers. Appending creates the next snapshot; external array mutations cannot reorder in-memory history or change event indices.
 - Apply current user-message edits and exclusions to `userMessagesOnly` child contexts while retaining early requirements covered by compaction. Preserve images and the recorded system document.

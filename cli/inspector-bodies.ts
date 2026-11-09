@@ -6,7 +6,7 @@ import { compareInputs, textDifferenceLabel } from "./input-comparison.js";
 import { firstLine, fmtMs, messageTokens, pctOf, roleLabel } from "./inspector-format.js";
 import { messageBodyLines, type RequestRecord } from "./inspector-requests.js";
 import type { RecordedBody, RequestRecording } from "./session-records.js";
-import { toolCallDetail, visibleSourceText } from "./tui-format.js";
+import { editPreviewItems, toolCallDetail, visibleSourceText } from "./tui-format.js";
 
 function textBlock(id: string, title: string, text: string, meta = ""): BodyBlock {
   let preview = firstLine(visibleSourceText(text.slice(0, 512)));
@@ -204,10 +204,8 @@ export function receivedBlocks(rec: RequestRecord, saved?: RequestRecording): Bo
       group,
       preview: Object.keys(args ?? {}).join(" · ") || "(no arguments)",
     });
-    const edit =
-      call.name === "edit" &&
-      typeof args?.oldText === "string" &&
-      typeof args?.newText === "string";
+    const edits = call.name === "edit" ? editPreviewItems(call.args) : [];
+    const edit = edits.length > 0;
     const write = call.name === "write" && typeof args?.content === "string";
     if (edit || write) {
       const state = outcome(results.get(call.id));
@@ -216,7 +214,7 @@ export function receivedBlocks(rec: RequestRecord, saved?: RequestRecording): Bo
         group,
         title: `${edit ? "Requested replacement" : "Submitted file content"} · ${state}`,
         meta: edit
-          ? `Parameter preview${args?.replaceAll === true ? " · all occurrences requested" : ""} · not a full-file diff`
+          ? `Parameter preview · ${edits.length} edit${edits.length === 1 ? "" : "s"} · not a full-file diff`
           : "Previous file content not recorded · not a full-file diff",
         preview: "Enter to inspect · complete parameters in Arguments",
         version: call,

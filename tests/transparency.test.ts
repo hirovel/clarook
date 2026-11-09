@@ -246,20 +246,35 @@ describe("请求层记录", () => {
     expect(unknownBlock?.title).toContain("outcome unknown");
     expect(unknownBlock?.lines()).toEqual(["Check external state"]);
     // 文件预览来自请求参数,失败与未知不能冒充已修改;展开不改原文或模型输入。
+    const control = "\x1b]52;c;dGVzdA==\x07\x1b[2J\x1b[H";
     const calls = [
       {
         id: "edit-ok",
         name: "edit",
         args: {
           path,
-          oldText: Array.from({ length: 70 }, (_, i) => `old-${i}`).join("\n"),
-          newText: Array.from({ length: 70 }, (_, i) => `new-${i}`).join("\n"),
-          replaceAll: true,
+          edits: [
+            {
+              oldText: Array.from({ length: 70 }, (_, i) => `old-${i}`).join("\n"),
+              newText: Array.from({ length: 70 }, (_, i) => `new-${i}`).join("\n"),
+            },
+            { oldText: "old-name", newText: `new-name${control}`, replaceAll: true },
+          ],
         },
       },
       { id: "write-failed", name: "write", args: { path, content: "" } },
-      { id: "edit-unknown", name: "edit", args: { path, oldText: "a", newText: "b" } },
-      { id: "edit-missing", name: "edit", args: { path, oldText: "x", newText: "y" } },
+      {
+        id: "edit-unknown",
+        name: "edit",
+        args: { path, edits: [{ oldText: "a", newText: "b" }] },
+      },
+      {
+        id: "edit-missing",
+        name: "edit",
+        args: { path, edits: [{ oldText: "x", newText: "y" }] },
+      },
+      // 历史已经写入的旧参数仍保留原样阅读。
+      { id: "edit-legacy", name: "edit", args: { path, oldText: "past", newText: "present" } },
     ];
     const fileRecord = {
       ...first,
@@ -283,10 +298,18 @@ describe("请求层记录", () => {
       "Submitted file content · error",
       "Requested replacement · outcome unknown",
       "Requested replacement · result not recorded",
+      "Requested replacement · result not recorded",
     ]);
-    expect(previews[0]?.meta).toContain("all occurrences requested");
+    expect(previews[0]?.meta).toContain("Parameter preview · 2 edits · not a full-file diff");
     expect(previews[1]?.meta).toContain("Previous file content not recorded");
-    expect(previews[0]?.lines().map(stripAnsi).join("\n")).toContain("+ new-69");
+    const fullEdit = previews[0]?.lines().map(stripAnsi).join("\n");
+    expect(fullEdit).toContain("Parameter preview · not a full-file diff");
+    expect(fullEdit).toContain("Edit 1/2 · unique match required");
+    expect(fullEdit).toContain("Edit 2/2 · all occurrences requested");
+    expect(fullEdit).toContain("+ new-69");
+    expect(fullEdit).toContain("+ new-name");
+    expect(previews[0]?.lines().join("\n")).not.toContain(control);
+    expect(previews[4]?.lines().map(stripAnsi).join("\n")).toContain("+ present");
     expect(previews[1]?.lines().map(stripAnsi)).toEqual(["+ "]);
     const fileBrowser = new BodyBrowser();
     fileBrowser.set("files", fileBlocks);

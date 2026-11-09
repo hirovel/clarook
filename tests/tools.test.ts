@@ -39,6 +39,31 @@ describe("validateArgs", () => {
     validateArgs(SCHEMA, raw);
     expect(raw.limit).toBe("5");
   });
+
+  it("edit 只接受非空 edits 数组,拒绝旧输入、形状修复和两级额外字段", () => {
+    const edit = { oldText: "before", newText: "after" };
+    const valid = { path: "a.txt", edits: [edit] };
+    expect(validateArgs(editTool.parameters, valid)).toEqual({ ok: true, value: valid });
+    expect(
+      validateArgs(editTool.parameters, {
+        path: "a.txt",
+        edits: [{ oldText: 5, newText: 6, replaceAll: "true" }],
+      }),
+    ).toEqual({
+      ok: true,
+      value: { path: "a.txt", edits: [{ oldText: "5", newText: "6", replaceAll: true }] },
+    });
+    for (const raw of [
+      { path: "a.txt", ...edit },
+      { path: "a.txt", edits: [] },
+      { path: "a.txt", edits: edit },
+      { path: "a.txt", edits: JSON.stringify([edit]) },
+      { ...valid, replaceAll: true },
+      { path: "a.txt", edits: [{ ...edit, extra: true }] },
+    ]) {
+      expect(validateArgs(editTool.parameters, raw).ok).toBe(false);
+    }
+  });
 });
 
 describe("文件工具", () => {
@@ -60,10 +85,17 @@ describe("文件工具", () => {
         [relative, join(root, relative)],
         [absolute, absolute],
       ] as const) {
-        await write.execute({ path, content: "aaa bbb ccc" }, ctx);
-        expect(await read.execute({ path }, ctx)).toBe("1\taaa bbb ccc");
-        await edit.execute({ path, oldText: "bbb", newText: "xxx" }, ctx);
-        expect(readFileSync(actual, "utf8")).toBe("aaa xxx ccc");
+        const edits = [
+          { oldText: "ccc", newText: "CCC" },
+          { oldText: "bbb", newText: "ccc" },
+        ];
+        for (const items of [edits, [...edits].reverse()]) {
+          await write.execute({ path, content: "aaa bbb ccc" }, ctx);
+          expect(await read.execute({ path }, ctx)).toBe("1\taaa bbb ccc");
+          const result = await edit.execute({ path, edits: items }, ctx);
+          expect(result).toBe(`applied 2 edits with 2 replacements in ${path}.`);
+          expect(readFileSync(actual, "utf8")).toBe("aaa ccc CCC");
+        }
       }
     } finally {
       // 根绑定回归时,也清理测试可能误写到启动目录的唯一临时文件。
@@ -71,39 +103,105 @@ describe("文件工具", () => {
     }
   });
 
-  it("不存在→报错提示先 read", async () => {
+  it("后项不存在或依赖前项生成的文字时整组不写,错误标出下标并提示先 read", async () => {
     const path = tempFile("aaa");
-    await expect(editTool.execute({ path, oldText: "zzz", newText: "x" }, ctx)).rejects.toThrow(
-      "not found",
-    );
+    for (const oldText of ["missing", "zzz"]) {
+      await expect(
+        editTool.execute(
+          {
+            path,
+            edits: [
+              { oldText: "aaa", newText: "zzz" },
+              { oldText, newText: "x" },
+            ],
+          },
+          ctx,
+        ),
+      ).rejects.toThrow(/edits\[1\].*not found/);
+      expect(readFileSync(path, "utf8")).toBe("aaa");
+    }
   });
 
   it("标点或空白不同时拒绝写入,让模型按文件原文重试", async () => {
     const original = "cost—benefit  \n";
     const path = tempFile(original);
     await expect(
-      editTool.execute({ path, oldText: "cost-benefit", newText: "gain" }, ctx),
+      editTool.execute({ path, edits: [{ oldText: "cost-benefit", newText: "gain" }] }, ctx),
     ).rejects.toThrow("not found");
     expect(readFileSync(path, "utf8")).toBe(original);
   });
 
-  it("多处匹配→报错并给出次数,提示 replaceAll", async () => {
-    const path = tempFile("aa aa");
-    await expect(editTool.execute({ path, oldText: "aa", newText: "x" }, ctx)).rejects.toThrow(
-      /occurs 2 times.*replaceAll/,
-    );
+  it("前项 replaceAll 不放宽后项唯一性,后项多处匹配时整组不写", async () => {
+    const original = "aa aa bb bb";
+    const path = tempFile(original);
+    await expect(
+      editTool.execute(
+        {
+          path,
+          edits: [
+            { oldText: "aa", newText: "x", replaceAll: true },
+            { oldText: "bb", newText: "y" },
+          ],
+        },
+        ctx,
+      ),
+    ).rejects.toThrow(/edits\[1\].*occurs 2 times.*replaceAll/);
+    expect(readFileSync(path, "utf8")).toBe(original);
   });
 
-  it("replaceAll→全部替换并报次数;没有命中仍走 not found", async () => {
-    const path = tempFile("foo(a); foo(b);\nbar();");
-    const out = await editTool.execute(
-      { path, oldText: "foo(", newText: "baz(", replaceAll: true },
+  it("原文区间交叉、包含或全量重复目标时整组不写;相邻区间可改", async () => {
+    const original = "abcde abcde";
+    const path = tempFile(original);
+    for (const oldText of ["cde", "bc", "abc"]) {
+      await expect(
+        editTool.execute(
+          {
+            path,
+            edits: [
+              { oldText: "abc", newText: "X", replaceAll: true },
+              { oldText, newText: "Y", replaceAll: true },
+            ],
+          },
+          ctx,
+        ),
+      ).rejects.toThrow(/edits\[0\] and edits\[1\].*overlap/);
+      expect(readFileSync(path, "utf8")).toBe(original);
+    }
+    await editTool.execute(
+      {
+        path,
+        edits: [
+          { oldText: "abc", newText: "X", replaceAll: true },
+          { oldText: "de", newText: "Y", replaceAll: true },
+        ],
+      },
       ctx,
     );
-    expect(out).toBe(`replaced 2 occurrences in ${path}.`);
-    expect(readFileSync(path, "utf8")).toBe("baz(a); baz(b);\nbar();");
+    expect(readFileSync(path, "utf8")).toBe("XY XY");
+  });
+
+  it("replaceAll 只替换原文非重叠命中并保留替换字面量;没有命中仍失败", async () => {
+    const path = tempFile("foo(a); foo(b);\nbar();");
+    const out = await editTool.execute(
+      {
+        path,
+        edits: [
+          { oldText: "foo(", newText: "$&$`$'$$foo(", replaceAll: true },
+          { oldText: "bar();", newText: "" },
+        ],
+      },
+      ctx,
+    );
+    expect(out).toBe(`applied 2 edits with 3 replacements in ${path}.`);
+    expect(readFileSync(path, "utf8")).toBe("$&$`$'$$foo(a); $&$`$'$$foo(b);\n");
     await expect(
-      editTool.execute({ path, oldText: "nope", newText: "x", replaceAll: true }, ctx),
-    ).rejects.toThrow("not found");
+      editTool.execute({ path, edits: [{ oldText: "nope", newText: "x", replaceAll: true }] }, ctx),
+    ).rejects.toThrow(/edits\[0\].*not found/);
+    const overlapping = tempFile("aaaaa");
+    await editTool.execute(
+      { path: overlapping, edits: [{ oldText: "aa", newText: "x", replaceAll: true }] },
+      ctx,
+    );
+    expect(readFileSync(overlapping, "utf8")).toBe("xxa");
   });
 });

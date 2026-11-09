@@ -261,20 +261,35 @@ export function createEditTool(cwd = process.cwd()) {
     name: "edit",
     ...described({
       core:
-        "Replace text in a file. oldText must match the file exactly, indentation included, and occur exactly once unless replaceAll is set. " +
-        "Uniform CRLF files also accept LF in oldText. No match or several matches fail with the reason.",
+        "Replace text in one file with a non-empty edits array. Each oldText matches the original file exactly, indentation included, and must occur exactly once unless that item's replaceAll is set. " +
+        "Uniform CRLF files also accept LF in oldText. All items are checked before one write; missing, ambiguous, unchanged, or overlapping targets fail without writing. Replacement text is literal and is not searched by other items.",
       guidance:
-        "Keep oldText as short as it can be while still unique. Set replaceAll to change every occurrence, e.g. for a rename. " +
+        "Keep each oldText as short as it can be while still unique. Set an item's replaceAll to change every non-overlapping occurrence, e.g. for a rename. Combine changes to the same region into one item. " +
         "Read the file in this session before editing it.",
       rules:
-        "You MUST read the file in this session before editing it. oldText MUST match exactly and MUST occur exactly once unless replaceAll is set.",
+        "You MUST read the file in this session before editing it. Each oldText MUST match the original file exactly and MUST occur exactly once unless that item's replaceAll is set. Targets MUST NOT overlap.",
     }),
-    parameters: Type.Object({
-      path: Type.String({ description: "file path" }),
-      oldText: Type.String({ description: "text to replace; must be unique unless replaceAll" }),
-      newText: Type.String({ description: "replacement text" }),
-      replaceAll: Type.Optional(Type.Boolean({ description: "replace every occurrence" })),
-    }),
+    parameters: Type.Object(
+      {
+        path: Type.String({ description: "file path" }),
+        edits: Type.Array(
+          Type.Object(
+            {
+              oldText: Type.String({
+                description: "original text to replace; must be unique unless replaceAll",
+              }),
+              newText: Type.String({ description: "literal replacement text" }),
+              replaceAll: Type.Optional(
+                Type.Boolean({ description: "replace every non-overlapping original occurrence" }),
+              ),
+            },
+            { additionalProperties: false },
+          ),
+          { minItems: 1, description: "replacements matched against the same original file" },
+        ),
+      },
+      { additionalProperties: false },
+    ),
     async execute(args) {
       const path = resolve(directory, args.path);
       // 编辑会重写文件;解码失败时拒绝修改,避免把未知字节变成替换字符。
@@ -291,30 +306,62 @@ export function createEditTool(cwd = process.cwd()) {
       // 仅对统一 CRLF 文件归一化。混合换行按原文匹配,保留未触及的行。
       const crlf = raw.includes("\r\n") && !raw.replaceAll("\r\n", "").includes("\n");
       const content = crlf ? raw.replaceAll("\r\n", "\n") : raw;
-      const oldText = crlf ? args.oldText.replaceAll("\r\n", "\n") : args.oldText;
-      const newText = crlf ? args.newText.replaceAll("\r\n", "\n") : args.newText;
-      if (!oldText) throw new Error("oldText must not be empty.");
-      const count = content.split(oldText).length - 1;
-      if (args.replaceAll && count > 0) {
-        const all = content.replaceAll(oldText, () => newText);
-        if (all === content)
-          throw new Error("replacement is identical to the original; nothing written.");
-        writeFileSync(path, crlf ? all.replaceAll("\n", "\r\n") : all, "utf8");
-        return `replaced ${count} occurrences in ${args.path}.`;
+      const matches: { start: number; end: number; newText: string; editIndex: number }[] = [];
+      for (const [editIndex, edit] of args.edits.entries()) {
+        const oldText = crlf ? edit.oldText.replaceAll("\r\n", "\n") : edit.oldText;
+        const newText = crlf ? edit.newText.replaceAll("\r\n", "\n") : edit.newText;
+        if (!oldText) throw new Error(`edits[${editIndex}].oldText must not be empty.`);
+        let count = 0;
+        for (
+          let start = content.indexOf(oldText);
+          start !== -1;
+          start = content.indexOf(oldText, start + oldText.length)
+        ) {
+          count++;
+          matches.push({ start, end: start + oldText.length, newText, editIndex });
+        }
+        if (count === 0) {
+          throw new Error(
+            `edits[${editIndex}].oldText not found in ${args.path}; read the file first to confirm it.`,
+          );
+        }
+        if (count > 1 && !edit.replaceAll) {
+          throw new Error(
+            `edits[${editIndex}].oldText occurs ${count} times in ${args.path}, not unique. Provide more context, or set this item's replaceAll to change every occurrence.`,
+          );
+        }
+        if (newText === oldText) {
+          throw new Error(
+            `edits[${editIndex}] replacement is identical to the original; nothing written.`,
+          );
+        }
       }
-      if (count > 1) {
+      matches.sort((a, b) => a.start - b.start);
+      let previous: (typeof matches)[number] | undefined;
+      for (const current of matches) {
+        if (previous && previous.end > current.start) {
+          throw new Error(
+            `edits[${previous.editIndex}] and edits[${current.editIndex}] overlap in ${args.path}; combine them into one item or target separate regions.`,
+          );
+        }
+        previous = current;
+      }
+      // 只拼接原文间隙与替换字面量,后项不读取前项生成的内容,也不解释 $ 替换语法。
+      const parts: string[] = [];
+      let from = 0;
+      for (const match of matches) {
+        parts.push(content.slice(from, match.start), match.newText);
+        from = match.end;
+      }
+      parts.push(content.slice(from));
+      const next = parts.join("");
+      if (next === content) {
         throw new Error(
-          `oldText occurs ${count} times in ${args.path}, not unique. Provide more context, or set replaceAll to change every occurrence.`,
+          `edits[0] through edits[${args.edits.length - 1}] together produce identical content; nothing written.`,
         );
       }
-      if (count === 0) {
-        throw new Error(`oldText not found in ${args.path}; read the file first to confirm it.`);
-      }
-      const next = content.replace(oldText, () => newText);
-      if (next === content)
-        throw new Error("replacement is identical to the original; nothing written.");
       writeFileSync(path, crlf ? next.replaceAll("\n", "\r\n") : next, "utf8");
-      return `replaced one occurrence in ${args.path}.`;
+      return `applied ${args.edits.length} edit${args.edits.length === 1 ? "" : "s"} with ${matches.length} replacement${matches.length === 1 ? "" : "s"} in ${args.path}.`;
     },
   });
 }

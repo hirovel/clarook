@@ -1,4 +1,5 @@
 import { Kind, type Static, type TSchema } from "@sinclair/typebox";
+import { ValueErrorType } from "@sinclair/typebox/errors";
 import { Value } from "@sinclair/typebox/value";
 import type { ToolOutput } from "./exchange.js";
 
@@ -91,11 +92,14 @@ export function validateArgs(schema: TSchema, raw: unknown): ValidationResult {
   }
   // 外来的 JSON Schema(MCP 服务器给的,没有 TypeBox 的 Kind 标记)不在这里校验:服务器自己校验,协议错误会回来。
   if (!(Kind in schema)) return { ok: true, value: raw };
+  // 数组是调用结构,不能把误传的单对象包成数组;标量仍沿用已有转换。
+  const rawErrors = [...Value.Errors(schema, raw)];
+  const arrayMismatch = rawErrors.some((error) => error.type === ValueErrorType.Array);
   // Clone:raw 已作为事件入日志,Convert 不许碰历史。
-  const converted = Value.Convert(schema, Value.Clone(raw));
+  const converted = arrayMismatch ? raw : Value.Convert(schema, Value.Clone(raw));
   if (Value.Check(schema, converted)) return { ok: true, value: converted };
 
-  const lines = [...Value.Errors(schema, converted)].map(
+  const lines = (arrayMismatch ? rawErrors : [...Value.Errors(schema, converted)]).map(
     (e) => `  - ${e.path || "/"}: ${e.message}`,
   );
   return {

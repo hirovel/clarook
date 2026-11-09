@@ -308,6 +308,15 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
 
   it("edit 调用显示行级 diff,write 显示前几行与总行数", async () => {
     const control = "\x1b]52;c;dGVzdA==\x07\x1b[2J\x1b[H";
+    const edits = [
+      { oldText: "x = 1\ny = 2", newText: `x = 1\ny = 3${control}` },
+      { oldText: "old-name", newText: `new-name${control}`, replaceAll: true },
+      {
+        oldText: Array.from({ length: 70 }, (_, i) => `old-${i}`).join("\n"),
+        newText: Array.from({ length: 70 }, (_, i) => `new-${i}`).join("\n"),
+        replaceAll: false,
+      },
+    ];
     const writeContent = Array.from({ length: 20 }, (_, i) => `L${i}`)
       .join("\n")
       .replace("L0\n", `L0${control}\n`);
@@ -319,7 +328,7 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
             {
               id: "c1",
               name: "edit",
-              args: { path: "a.ts", oldText: "x = 1\ny = 2", newText: "x = 1\ny = 3" },
+              args: { path: "a.ts", edits },
             },
             {
               id: "c2",
@@ -342,8 +351,16 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     );
     await app.submit("改");
     const doc = text(app);
+    expect(doc).toContain("Parameter preview · not a full-file diff");
+    expect(doc).toContain("Edit 1/3 · unique match required");
+    expect(doc).toContain("Edit 2/3 · all occurrences requested");
+    expect(doc).toContain("Edit 3/3 · unique match required");
     expect(doc).toContain("- y = 2");
     expect(doc).toContain("+ y = 3");
+    expect(doc).toContain("+ new-name");
+    expect(doc).toContain("more changed lines");
+    expect(toolCallDetail("edit", { edits }).split("\n")).toHaveLength(61);
+    expect(doc).not.toContain("+ new-69");
     expect(doc).toContain("+ L0");
     expect(doc).toContain("… 20 lines total");
     expect(doc).not.toContain("+ L19");
@@ -354,6 +371,10 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     expect(app.lines(100).join("\n")).not.toContain(control);
     const assistant = log.events.find((event) => event.type === "assistant/message");
     if (assistant?.type !== "assistant/message") throw new Error("Missing assistant message");
+    expect(assistant.toolCalls.find((call) => call.id === "c1")?.args).toEqual({
+      path: "a.ts",
+      edits,
+    });
     expect(assistant.toolCalls.find((call) => call.id === "c2")?.args).toEqual({
       path: "b.txt",
       content: writeContent,
@@ -918,8 +939,15 @@ describe("文本小工具", () => {
     expect(write).toContain("… 15 lines total");
     const oldText = Array.from({ length: 70 }, (_, i) => `a${i}`).join("\n");
     const newText = Array.from({ length: 70 }, (_, i) => `b${i}`).join("\n");
+    // 历史记录的旧顶层参数仍可阅读,执行 schema 不因此接受它。
     const big = plain(toolCallDetail("edit", { oldText, newText }));
     expect(big).toContain("more changed lines");
+    const scalarFlag = plain(
+      toolCallDetail("edit", { edits: [{ oldText: "a", newText: "b", replaceAll: "true" }] }),
+    );
+    expect(scalarFlag).toContain('Edit 1/1 · replaceAll="true" (raw)');
+    expect(scalarFlag).not.toContain("unique match required");
+    expect(scalarFlag).not.toContain("all occurrences requested");
     expect(toolCallDetail("bash", { command: "x" })).toBe("");
   });
 });

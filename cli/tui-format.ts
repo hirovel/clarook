@@ -70,6 +70,52 @@ const DETAIL_MAX_LINES = 60;
 const DEL = (s: string) => c.delBg(c.zhu(s));
 const ADD = (s: string) => c.addBg(c.green(s));
 
+function detailLines(lines: string[], view: "preview" | "full"): string[] {
+  if (view === "preview" && lines.length > DETAIL_MAX_LINES) {
+    return [
+      ...lines.slice(0, DETAIL_MAX_LINES),
+      c.faint(`… ${lines.length - DETAIL_MAX_LINES} more changed lines`),
+    ];
+  }
+  return lines;
+}
+
+/** 工具参数和上下文比较共用文本排版,不赋予文件执行语义。 */
+export function textDiff(
+  oldText: string,
+  newText: string,
+  view: "preview" | "full" = "preview",
+): string[] {
+  const lines = hunks(diffLines(oldText, newText)).map((line) => {
+    const text = plainDisplayText(line.text);
+    return line.kind === "-"
+      ? DEL(`- ${text}`)
+      : line.kind === "+"
+        ? ADD(`+ ${text}`)
+        : c.faint(`  ${text}`);
+  });
+  return detailLines(lines, view);
+}
+
+type EditPreviewItem = { oldText: string; newText: string; replaceAll?: unknown };
+
+/** 只识别已记录参数的显示形态;旧顶层字段不流入工具执行。 */
+export function editPreviewItems(args: unknown): EditPreviewItem[] {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return [];
+  const a = args as Record<string, unknown>;
+  const isItem = (item: unknown): item is EditPreviewItem =>
+    !!item &&
+    typeof item === "object" &&
+    "oldText" in item &&
+    typeof item.oldText === "string" &&
+    "newText" in item &&
+    typeof item.newText === "string";
+  if (Object.hasOwn(a, "edits")) {
+    return Array.isArray(a.edits) && a.edits.every(isItem) ? a.edits : [];
+  }
+  return isItem(a) ? [a] : [];
+}
+
 /** edit → 行级 diff(- 朱字深红底 / + 绿字深绿底 / 上下文淡字无底);write → 前几行加总行数。其它工具无详情。 */
 export function toolCallDetail(
   name: string,
@@ -78,20 +124,25 @@ export function toolCallDetail(
 ): string {
   const a = (args ?? {}) as Record<string, unknown>;
   let lines: string[] = [];
-  if (name === "edit" && typeof a.oldText === "string" && typeof a.newText === "string") {
-    lines = hunks(diffLines(a.oldText, a.newText)).map((l) => {
-      const text = plainDisplayText(l.text);
-      switch (l.kind) {
-        case "-":
-          return DEL(`- ${text}`);
-        case "+":
-          return ADD(`+ ${text}`);
-        case "…":
-          return c.faint(`  ${text}`);
-        default:
-          return c.faint(`  ${text}`);
-      }
-    });
+  if (name === "edit") {
+    const edits = editPreviewItems(args);
+    if (edits.length) {
+      lines = [
+        c.faint("Parameter preview · not a full-file diff"),
+        ...edits.flatMap((edit, i) => {
+          const scope =
+            edit.replaceAll === true
+              ? "all occurrences requested"
+              : edit.replaceAll === false || edit.replaceAll === undefined
+                ? "unique match required"
+                : `replaceAll=${plainDisplayText(JSON.stringify(edit.replaceAll) ?? String(edit.replaceAll))} (raw)`;
+          return [
+            c.faint(`Edit ${i + 1}/${edits.length} · ${scope}`),
+            ...textDiff(edit.oldText, edit.newText, "full"),
+          ];
+        }),
+      ];
+    }
   } else if (name === "write" && typeof a.content === "string") {
     const all = a.content.split("\n");
     lines = (view === "full" ? all : all.slice(0, 12)).map((l) => ADD(`+ ${plainDisplayText(l)}`));
@@ -110,11 +161,7 @@ export function toolCallDetail(
     });
   }
   if (lines.length === 0) return "";
-  if (view === "preview" && lines.length > DETAIL_MAX_LINES) {
-    const rest = lines.length - DETAIL_MAX_LINES;
-    lines = [...lines.slice(0, DETAIL_MAX_LINES), c.faint(`… ${rest} more changed lines`)];
-  }
-  return lines.join("\n");
+  return detailLines(lines, view).join("\n");
 }
 
 export function pct(share: number): string {

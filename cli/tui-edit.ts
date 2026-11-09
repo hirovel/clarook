@@ -16,7 +16,7 @@ import type { CompositionRow, ContextAction } from "./inspector-composition.js";
 import { c, G } from "./theme.js";
 import { diffLines } from "./tools/diff.js";
 import type { TuiContext } from "./tui-context.js";
-import { plainDisplayText, toolCallDetail } from "./tui-format.js";
+import { plainDisplayText, textDiff } from "./tui-format.js";
 import { TextEditor } from "./tui-text-editor.js";
 
 /** 运行与只读属于宿主,每次读视图和提交都取当前值。 */
@@ -211,9 +211,9 @@ export function compareCommand(ctx: TuiContext, arg: string): string {
         `· #${target}.${field}  original ${before.length} chars → current ${value.length} chars`,
       ),
     );
+    const difference = textDiff(before, value);
     out.push(
-      (toolCallDetail("edit", { oldText: before, newText: value }) || c.faint("(identical)"))
-        .split("\n")
+      (difference.length ? difference : [c.faint("(identical)")])
         .map((line) => `    ${line}`)
         .join("\n"),
     );

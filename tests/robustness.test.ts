@@ -16,6 +16,7 @@ import { isRetryable, ProviderError } from "../src/providers/errors.js";
 import { feedChunk, finishAcc, newAcc } from "../src/providers/openai-chat.js";
 import { StreamStall, sseData, sseEvents, streamError } from "../src/providers/sse.js";
 import { ToolOutcomeUnknownError } from "../src/tools.js";
+import { testDirectory } from "./helpers/setup.js";
 
 const enc = new TextEncoder();
 async function* chunks(parts: string[], delayMs = 0): AsyncGenerator<Uint8Array> {
@@ -208,19 +209,28 @@ describe("bash 工具的边界", () => {
 });
 
 describe("文件工具的边界", () => {
-  const dir = mkdtempSync(join(tmpdir(), "kernel-robust-"));
+  const dir = testDirectory("kernel-robust-");
 
-  it("edit:CRLF 文件按 LF 匹配、按 CRLF 写回", async () => {
+  it("edit:整组按 LF 匹配 CRLF 文件,保留 BOM 并统一按 CRLF 写回", async () => {
     const file = join(dir, "crlf.txt");
-    writeFileSync(file, "a\r\nb\r\nc\r\n");
-    await editTool.execute({ path: file, oldText: "a\nb", newText: "x\ny\nz" }, ctx);
-    expect(readFileSync(file, "utf8")).toBe("x\r\ny\r\nz\r\nc\r\n");
+    writeFileSync(file, "\uFEFFa\r\nb\r\nc\r\n");
+    await editTool.execute(
+      {
+        path: file,
+        edits: [
+          { oldText: "a\nb", newText: "x\r\ny\nz" },
+          { oldText: "c", newText: "C" },
+        ],
+      },
+      ctx,
+    );
+    expect(readFileSync(file, "utf8")).toBe("\uFEFFx\r\ny\r\nz\r\nC\r\n");
   });
 
   it("edit:混合换行时未修改的行保持原样", async () => {
     const file = join(dir, "mixed-eol.txt");
     writeFileSync(file, "first\r\nsecond\nthird\r\n");
-    await editTool.execute({ path: file, oldText: "second", newText: "changed" }, ctx);
+    await editTool.execute({ path: file, edits: [{ oldText: "second", newText: "changed" }] }, ctx);
     expect(readFileSync(file, "utf8")).toBe("first\r\nchanged\nthird\r\n");
   });
 
@@ -228,9 +238,9 @@ describe("文件工具的边界", () => {
     const file = join(dir, "invalid-utf8.txt");
     const original = Buffer.from([0x61, 0xff, 0x62]);
     writeFileSync(file, original);
-    await expect(editTool.execute({ path: file, oldText: "a", newText: "x" }, ctx)).rejects.toThrow(
-      /not valid UTF-8 text; edit refused/,
-    );
+    await expect(
+      editTool.execute({ path: file, edits: [{ oldText: "a", newText: "x" }] }, ctx),
+    ).rejects.toThrow(/not valid UTF-8 text; edit refused/);
     expect(readFileSync(file)).toEqual(original);
   });
 
@@ -238,18 +248,39 @@ describe("文件工具的边界", () => {
     const file = join(dir, "utf16-like.txt");
     const original = Buffer.from([0x61, 0x00, 0x62, 0x00]);
     writeFileSync(file, original);
-    await expect(editTool.execute({ path: file, oldText: "a", newText: "x" }, ctx)).rejects.toThrow(
-      /contains NUL bytes/,
-    );
+    await expect(
+      editTool.execute({ path: file, edits: [{ oldText: "a", newText: "x" }] }, ctx),
+    ).rejects.toThrow(/contains NUL bytes/);
     expect(readFileSync(file)).toEqual(original);
   });
 
-  it("edit:oldText 为空 → 报错", async () => {
+  it("edit:后项 oldText 为空或替换未改变内容时整组不写", async () => {
     const file = join(dir, "e.txt");
-    writeFileSync(file, "abc");
-    await expect(editTool.execute({ path: file, oldText: "", newText: "x" }, ctx)).rejects.toThrow(
-      /must not be empty/,
-    );
+    const original = "a\r\nb\r\nc\r\n";
+    writeFileSync(file, original);
+    for (const [edit, reason] of [
+      [{ oldText: "", newText: "x" }, /edits\[1\].*must not be empty/],
+      [{ oldText: "a\nb", newText: "a\r\nb" }, /edits\[1\].*identical/],
+    ] as const) {
+      await expect(
+        editTool.execute({ path: file, edits: [{ oldText: "c", newText: "C" }, edit] }, ctx),
+      ).rejects.toThrow(reason);
+      expect(readFileSync(file, "utf8")).toBe(original);
+    }
+    writeFileSync(file, "ab");
+    await expect(
+      editTool.execute(
+        {
+          path: file,
+          edits: [
+            { oldText: "a", newText: "ab" },
+            { oldText: "b", newText: "" },
+          ],
+        },
+        ctx,
+      ),
+    ).rejects.toThrow(/edits\[0\].*edits\[1\].*identical/);
+    expect(readFileSync(file, "utf8")).toBe("ab");
   });
 
   it("read:二进制文件 → 报错而不是吐乱码", async () => {
