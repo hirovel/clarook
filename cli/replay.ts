@@ -11,6 +11,7 @@ import { deriveMessages, requestMessages } from "../src/messages.js";
 import {
   COMPACTION_SECTIONS,
   collectCompactions,
+  compactionChanges,
   compactionLines,
   compactionRow,
 } from "./inspector-compactions.js";
@@ -36,9 +37,9 @@ console.log("─".repeat(72));
 // 一行一请求,与 TUI 检视器列表同一份渲染。
 for (const r of records) console.log(listRow(r, false));
 const compactions = collectCompactions(log.events);
-if (compactions.length > 0) {
+if (compactions.length > 0 && !flags.includes("--compaction")) {
   console.log(`\n${compactions.length} compactions (--compaction N to compare):`);
-  for (const r of compactions) console.log(compactionRow(r, false));
+  for (const r of compactions) console.log(compactionRow(log.events, r, false));
 }
 
 const requestFlag = flags.indexOf("--request");
@@ -71,28 +72,28 @@ if (requestFlag >= 0) {
 const compactionFlag = flags.indexOf("--compaction");
 if (compactionFlag >= 0) {
   const n = Number(flags[compactionFlag + 1]);
-  const comps = collectCompactions(log.events);
-  const rec = comps.find((r) => r.n === n);
+  const rec = compactions.find((r) => r.n === n);
   if (!rec) {
-    console.error(`no compaction #${n} (${comps.length} total)`);
+    console.error(`no compaction #${n} (${compactions.length} total)`);
     process.exit(1);
   }
   if (flags.includes("--json")) {
+    const changes = compactionChanges(log.events, rec.index);
     console.log(
       JSON.stringify(
         {
           n: rec.n,
           strategy: rec.event.strategy ?? null,
           at: rec.event.at,
-          coveredIndices: rec.covered,
-          coveredTokens: rec.coveredTokens,
+          coveredIndices: changes.covered.map((source) => source.event),
+          coveredTokens: changes.coveredTokens,
           summaryTokens: rec.summaryTokens,
-          ratio: rec.coveredTokens > 0 ? rec.summaryTokens / rec.coveredTokens : null,
-          covered: rec.covered.map((i) => log.events[i]),
+          ratio: changes.coveredTokens > 0 ? rec.summaryTokens / changes.coveredTokens : null,
+          covered: changes.covered.map((source) => source.message),
           summary: rec.event.summary ?? null,
-          clearedIndices: rec.cleared,
-          clearedTokens: rec.clearedTokens,
-          cleared: rec.cleared.map((i) => log.events[i]),
+          clearedIndices: changes.cleared.map((source) => source.event),
+          clearedTokens: changes.clearedTokens,
+          cleared: changes.cleared.map((source) => source.message),
           usage: rec.event.usage ?? null,
           latencyMs: rec.event.latencyMs ?? null,
         },

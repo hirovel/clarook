@@ -13,6 +13,7 @@ import type { AgentEvent } from "../src/events.js";
 import { compactionState, editState, type Message } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
 import { firstLine, unchangedPrefix } from "./cards.js";
+import { compactionChanges, compactionSourceLines } from "./inspector-compactions.js";
 import { type CompositionRow, compositionRows } from "./inspector-composition.js";
 import { eventSummary } from "./inspector-events.js";
 import { fmtTok } from "./inspector-format.js";
@@ -144,16 +145,13 @@ export function workbench(input: WorkbenchInput): Workbench {
       rows.push({ kind: "tools", count: tools.length, names: tools.map((t) => t.name), tok: ttok });
     } else rows.push({ kind: "message", row: r, tok });
     if (r.stages.some((s) => s.startsWith("summary")) && covered.length > 0) {
-      const ctok = covered.reduce((n, o) => {
-        const e = events[o.event];
-        return n + (e ? eventTokens(e) : 0);
-      }, 0);
+      const before = compactionChanges(events, r.event);
       rows.push({
         kind: "covered",
         from: state.coversFrom,
         upTo: state.coversUpTo,
-        count: covered.length,
-        tok: ctok,
+        count: before.covered.length,
+        tok: before.coveredTokens,
         summary: r.event,
       });
     }
@@ -512,44 +510,17 @@ export function previewLines(
   return out.slice(0, opts.lines + 2);
 }
 
-/** 被摘要覆盖的原文:每条一段,只读。 */
+/** 与独立压缩页使用同一份发生前投影,不把原事件误作当时有效输入。 */
 export function coveredLines(
   events: readonly AgentEvent[],
   r: Extract<WorkbenchRow, { kind: "covered" }>,
 ): string[] {
   const out: string[] = [
     c.faint(
-      `${r.count} messages (events #${r.from} to #${r.upTo - 1}, ≈${fmtTok(r.tok)} tok) were replaced by the summary #${r.summary}. They stay in the log; Ctrl+R → compactions compares them with the summary.`,
+      `${r.count} effective messages (≈${fmtTok(r.tok)} text tok) were replaced by summary #${r.summary}. Raw originals remain in Events; Ctrl+R → compactions compares input and summary.`,
     ),
     "",
   ];
-  for (let i = r.from; i < r.upTo; i++) {
-    const e = events[i];
-    if (!e) continue;
-    let who: string;
-    let text: string;
-    if (e.type === "user/message") {
-      who = "user";
-      text = e.text;
-    } else if (e.type === "assistant/message") {
-      who = "assistant";
-      text =
-        e.text ||
-        e.toolCalls.map((t) => `${G.call} ${t.name} ${JSON.stringify(t.args)}`).join("\n");
-    } else if (e.type === "tool/result") {
-      who = `result ${e.name}`;
-      text = e.content;
-    } else continue;
-    out.push(`${c.ink(`#${i}`)} ${c.soft(who)}  ${c.faint(`≈${eventTokens(e)} tok`)}`);
-    out.push(
-      ...text
-        .split("\n")
-        .slice(0, 8)
-        .map((l) => c.soft(`    ${l}`)),
-    );
-    if (text.split("\n").length > 8)
-      out.push(c.faint(`    … ${text.split("\n").length - 8} more lines`));
-    out.push("");
-  }
+  out.push(...compactionSourceLines(compactionChanges(events, r.summary).covered));
   return out;
 }

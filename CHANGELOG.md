@@ -18,6 +18,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Reconstruct compaction comparisons from the effective context at that historical boundary. Apply edits, exclusions, previous summaries and cleared results consistently in inspectors and replay; render source control characters as visible escapes. Replay compaction JSON now exports effective messages with their source event indices.
 - Match context usage baselines to complete active tool declarations, including same-name description and schema updates before automatic compaction. Fall back for incompatible known catalogs and let fresh valid usage take over without counting tools twice.
 - Omit earlier signed Anthropic thinking after known tool-definition changes. Retain eligible blocks produced from cleaned inputs, prevent revival when returning to old definitions, and preserve original request inputs across reloads without optional recordings.
 - Render ordinary requests from their recorded input and count omitted thinking and redacted blocks individually. Distinguish saved opaque data from replay eligibility in inspectors.

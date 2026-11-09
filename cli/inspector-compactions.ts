@@ -1,8 +1,10 @@
-import { estimateTokens } from "../src/context.js";
+import { contextPosition } from "../src/compaction.js";
+import { estimateTokens, messageTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
-import { isProjected } from "../src/messages.js";
-import { clock, eventTokens, fmtMs, fmtTok, indent } from "./inspector-format.js";
+import { composeContext, type Message, type Provenance } from "../src/messages.js";
+import { clock, fmtMs, fmtTok, indent, roleLabel } from "./inspector-format.js";
 import { c, G, selectedText } from "./theme.js";
+import { visibleSourceText } from "./tui-format.js";
 
 type CompactionEvent = Extract<AgentEvent, { type: "compaction" }>;
 
@@ -11,119 +13,128 @@ export type CompactionSection = 1 | 2 | 3 | 4;
 
 // ---------- 压缩对照:哪一大段变成了什么 ----------
 
+type CompactionSource = Provenance & { message: Message };
+
+type CompactionChanges = {
+  covered: CompactionSource[];
+  coveredTokens: number;
+  cleared: CompactionSource[];
+  clearedTokens: number;
+};
+
 export type CompactionRecord = {
   n: number;
   /** compaction 事件的下标。 */
   index: number;
   event: CompactionEvent;
-  /** 被摘要覆盖的、模型可见的事件下标。 */
-  covered: number[];
-  coveredTokens: number;
   summaryTokens: number;
-  /** 被清除的工具结果下标。 */
-  cleared: number[];
-  clearedTokens: number;
 };
 
-/** 把每次压缩与它覆盖的原文配对。原文永远留在数组里,这里只是把对应关系算出来。 */
+/** 压缩发生前的有效内容;后置编辑不能改写历史对照,原事件另在 Events 阅读。 */
+export function compactionChanges(events: readonly AgentEvent[], index: number): CompactionChanges {
+  const event = events[index];
+  const covered: CompactionSource[] = [];
+  const cleared: CompactionSource[] = [];
+  if (event?.type === "compaction") {
+    const before = composeContext(events, index);
+    const clear = new Set(event.cleared);
+    for (const [i, message] of before.messages.entries()) {
+      const source = before.provenance[i];
+      if (!source) continue;
+      const position = contextPosition(events, source.event);
+      const row = { ...source, message };
+      if (
+        event.summary !== undefined &&
+        position >= (event.coversFrom ?? 1) &&
+        position < (event.coversUpTo ?? 0)
+      )
+        covered.push(row);
+      if (message.role === "tool" && clear.has(source.event)) cleared.push(row);
+    }
+  }
+  const tokens = (sources: CompactionSource[]) =>
+    sources.reduce((n, source) => n + messageTokens(source.message), 0);
+  return { covered, coveredTokens: tokens(covered), cleared, clearedTokens: tokens(cleared) };
+}
+
+/** 把每次压缩与当时被替换的有效输入配对。 */
 export function collectCompactions(events: readonly AgentEvent[]): CompactionRecord[] {
   const out: CompactionRecord[] = [];
   for (let i = 0; i < events.length; i++) {
     const e = events[i];
     if (e?.type !== "compaction") continue;
-    const covered: number[] = [];
-    if (e.summary !== undefined) {
-      const from = e.coversFrom ?? 1;
-      const upTo = e.coversUpTo ?? 0;
-      for (let k = from; k < upTo; k++) {
-        const x = events[k];
-        if (x && isProjected(x)) covered.push(k);
-      }
-    }
-    const cleared = (e.cleared ?? []).filter((k) => events[k]?.type === "tool/result");
-    const tokensOf = (idx: number[]) =>
-      idx.reduce((n, k) => {
-        const x = events[k];
-        return n + (x ? eventTokens(x) : 0);
-      }, 0);
     out.push({
       n: out.length + 1,
       index: i,
       event: e,
-      covered,
-      coveredTokens: tokensOf(covered),
       summaryTokens: e.summary ? estimateTokens(e.summary) : 0,
-      cleared,
-      clearedTokens: tokensOf(cleared),
     });
   }
   return out;
 }
 
-export function compactionRow(rec: CompactionRecord, selected: boolean): string {
+export function compactionRow(
+  events: readonly AgentEvent[],
+  record: CompactionRecord,
+  selected: boolean,
+): string {
+  const rec = { ...record, ...compactionChanges(events, record.index) };
   const e = rec.event;
   const parts: string[] = [];
   if (rec.covered.length > 0) {
     const ratio =
       rec.coveredTokens > 0 ? Math.round((rec.summaryTokens / rec.coveredTokens) * 100) : 0;
     parts.push(
-      `original #${rec.covered[0]}–#${rec.covered.at(-1)} (${rec.covered.length} events · ${fmtTok(rec.coveredTokens)} tok) → summary ${fmtTok(rec.summaryTokens)} tok · ${ratio}%`,
+      `input (${rec.covered.length} messages · ${fmtTok(rec.coveredTokens)} tok) → summary ${fmtTok(rec.summaryTokens)} tok · ${ratio}%`,
     );
   }
   if (rec.cleared.length > 0) {
     parts.push(`cleared ${rec.cleared.length} tool results (${fmtTok(rec.clearedTokens)} tok)`);
   }
-  const body = `${`#${rec.n}`.padEnd(4)} ${clock(e.at)}  ${e.strategy ?? "unnamed strategy"}  ${parts.join("  ")}`;
+  const body = `${`#${rec.n}`.padEnd(4)} ${visibleSourceText(clock(e.at))}  ${visibleSourceText(e.strategy ?? "unnamed strategy")}  ${parts.join("  ")}`;
   return `${selected ? selectedText(G.cursor) : " "} ${selected ? selectedText(body) : c.soft(body)}`;
 }
 
-function eventBodyLines(events: readonly AgentEvent[], i: number): string[] {
-  const e = events[i];
-  if (!e) return [];
-  const head = (label: string) =>
-    `${c.ink(`#${i}`)} ${c.ink(label)}  ${c.soft(`${eventTokens(e)} tok`)}`;
-  switch (e.type) {
-    case "user/message":
-      return [head("user"), ...indent(e.text).map((l) => c.ink(l)), ""];
-    case "assistant/message": {
-      const lines = [head("assistant")];
-      if (e.reasoning) lines.push(...indent(e.reasoning).map((l) => c.faint(c.italic(l))));
-      if (e.text) lines.push(...indent(e.text).map((l) => c.ink(l)));
-      for (const tc of e.toolCalls) {
-        lines.push(c.soft(`    » ${tc.name} ${JSON.stringify(tc.args)}`));
-      }
-      lines.push("");
-      return lines;
-    }
-    case "tool/result":
-      return [
-        head(`tool:${e.name}${e.isError ? " ✗" : ""}`),
-        ...indent(e.content).map((l) => c.faint(l)),
-        "",
-      ];
-    case "session/start":
-      return [head("system"), ...indent(e.system).map((l) => c.ink(l)), ""];
-    default:
-      return [];
+/** 两处压缩阅读共用有效消息的显示;控制字符可见,不交给终端执行。 */
+export function compactionSourceLines(sources: readonly CompactionSource[]): string[] {
+  const lines: string[] = [];
+  for (const { event, message, stages } of sources) {
+    lines.push(
+      `${c.ink(`#${event}`)} ${c.ink(visibleSourceText(roleLabel(message)))}  ${c.soft(`${messageTokens(message)} tok`)}${stages.length ? c.faint(` · ${stages.join(" → ")}`) : ""}`,
+    );
+    if (message.role === "assistant" && message.reasoning)
+      lines.push(...indent(visibleSourceText(message.reasoning)).map((l) => c.faint(c.italic(l))));
+    lines.push(...indent(visibleSourceText(message.content)).map((l) => c.ink(l)));
+    if (message.role === "assistant")
+      for (const call of message.toolCalls)
+        lines.push(
+          c.soft(
+            `    » ${visibleSourceText(call.name)} ${visibleSourceText(JSON.stringify(call.args))}`,
+          ),
+        );
+    lines.push("");
   }
+  return lines;
 }
 
 export function compactionLines(
   events: readonly AgentEvent[],
-  rec: CompactionRecord,
+  record: CompactionRecord,
   section: CompactionSection,
 ): string[] {
+  const rec = { ...record, ...compactionChanges(events, record.index) };
   const e = rec.event;
   switch (section) {
     case 1: {
-      const row = (k: string, v: string) => `${c.soft(k.padEnd(12))} ${c.ink(v)}`;
+      const row = (k: string, v: string) =>
+        `${c.soft(k.padEnd(12))} ${c.ink(visibleSourceText(v))}`;
       const lines = [row("time", e.at), row("strategy", e.strategy ?? "unnamed")];
       if (rec.covered.length > 0) {
         const ratio = rec.coveredTokens > 0 ? rec.summaryTokens / rec.coveredTokens : 0;
         lines.push(
           row(
             "covers",
-            `events #${e.coversFrom ?? 1} to #${(e.coversUpTo ?? 0) - 1}, ${rec.covered.length} model-visible`,
+            `input positions #${e.coversFrom ?? 1} to #${(e.coversUpTo ?? 0) - 1}, ${rec.covered.length} messages`,
           ),
           row("original", `${rec.coveredTokens} tok`),
           row("summary", `${rec.summaryTokens} tok`),
@@ -160,21 +171,30 @@ export function compactionLines(
       }
       lines.push(
         c.faint(
-          "Nothing was deleted; the original is still in the array. Only the projection changed. Section 2 original, 3 summary, 4 cleared tool results.",
+          "Section 2 is context before this compaction, 3 summary, 4 results before clearing. Pipeline stages can change the summary request; inspect that request separately. Raw originals remain in Events.",
         ),
       );
       return lines;
     }
     case 2: {
       if (rec.covered.length === 0)
-        return [c.faint("This compaction has no summary (clear only).")];
+        return [
+          c.faint(
+            e.summary === undefined
+              ? "This compaction has no summary (clear only)."
+              : "No effective messages in this covered range.",
+          ),
+        ];
       const lines = [
         c.faint(
-          `The ${rec.covered.length} model-visible events the summary replaced, ${rec.coveredTokens} tok, in full.`,
+          `Context before this compaction: ${rec.covered.length} effective messages replaced, ${rec.coveredTokens} text tok.`,
+        ),
+        c.faint(
+          "Pipeline stages can change the summary request; inspect that request separately. Raw originals remain in Events.",
         ),
         "",
       ];
-      for (const k of rec.covered) lines.push(...eventBodyLines(events, k));
+      lines.push(...compactionSourceLines(rec.covered));
       return lines;
     }
     case 3: {
@@ -184,18 +204,18 @@ export function compactionLines(
           `Summary, ${rec.summaryTokens} tok; enters every later request as one user message.`,
         ),
         "",
-        ...indent(e.summary, "").map((l) => c.ink(l)),
+        ...indent(visibleSourceText(e.summary), "").map((l) => c.ink(l)),
       ];
     }
     case 4: {
       if (rec.cleared.length === 0) return [c.faint("This compaction cleared no tool results.")];
       const lines = [
         c.faint(
-          `The ${rec.cleared.length} tool results replaced by placeholders, ${rec.clearedTokens} tok, original text.`,
+          `The ${rec.cleared.length} effective tool results before clearing, ${rec.clearedTokens} text tok. Raw originals remain in Events.`,
         ),
         "",
       ];
-      for (const k of rec.cleared) lines.push(...eventBodyLines(events, k));
+      lines.push(...compactionSourceLines(rec.cleared));
       return lines;
     }
   }

@@ -8,7 +8,7 @@ import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { systemPromptFor } from "../cli/bootstrap.js";
 import { RequestInspector } from "../cli/inspector.js";
-import { workbench, workbenchLine } from "../cli/inspector-workbench.js";
+import { coveredLines, workbench, workbenchLine } from "../cli/inspector-workbench.js";
 import { replaceSystemSection, sectionStates, systemWithSections } from "../cli/prompt-sections.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import type { AgentEvent } from "../src/events.js";
@@ -171,6 +171,20 @@ describe("工作台的行", () => {
     const covered = wb2.rows.find((r) => r.kind === "covered");
     expect(covered).toMatchObject({ kind: "covered", from: 1, upTo: 5, summary: 8 });
     expect(recorded(wb2)).toEqual([2, 5]); // 被摘要覆盖的原消息仍归原文折叠页,请求记录不消失。
+    const edited = [
+      ...events,
+      { type: "compaction", at, summary: "SUM", coversFrom: 1, coversUpTo: 8 } satisfies AgentEvent,
+    ];
+    const editedCovered = workbench({ events: edited, tools: [] }).rows.find(
+      (r) => r.kind === "covered",
+    );
+    if (editedCovered?.kind !== "covered") throw new Error("应有有效输入折叠行");
+    expect(editedCovered.count).toBe(4); // q1、调用、结果、回复;已排除的 q2 不计入。
+    const original = coveredLines(edited, editedCovered).map(stripAnsi).join("\n");
+    expect(original).toContain("reading carefully");
+    expect(original).not.toContain("q2");
+    edited.push({ type: "context/edit", at, target: 3, field: "text", value: "LATER_CHANGE" });
+    expect(coveredLines(edited, editedCovered).map(stripAnsi).join("\n")).toBe(original);
     const live = sample();
     const inspector = new RequestInspector({
       events: () => live,

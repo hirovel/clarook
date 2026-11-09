@@ -87,6 +87,7 @@ import {
 import { type SectionState, sectionStates } from "./prompt-sections.js";
 import type { RecordingSection, RequestRecording } from "./session-records.js";
 import { c, G, selectedText } from "./theme.js";
+import { visibleSourceText } from "./tui-format.js";
 
 export type SessionSource = {
   name: string;
@@ -1104,7 +1105,7 @@ export class RequestInspector implements Component {
       const comps = this.compactions();
       const title = `${c.bold(c.ink("Compactions"))}  ${c.soft(`${comps.length} compactions`)}  ${c.faint("what became what; the original always stays in the array")}`;
       const columns = c.faint(
-        "  #    time      strategy  original (events · tok) → summary tok · ratio  cleared",
+        "  #    time      strategy  input (messages · tok) → summary tok · ratio  cleared",
       );
       const head = withSession([pad(title), pad(columns), pad(rule)]);
       const foot = [
@@ -1128,7 +1129,7 @@ export class RequestInspector implements Component {
         const start = windowStart(this.compactionSelected, comps.length, viewport);
         body = comps
           .slice(start, start + viewport)
-          .map((r, i) => pad(compactionRow(r, start + i === this.compactionSelected)));
+          .map((r, i) => pad(compactionRow(events, r, start + i === this.compactionSelected)));
       }
       return [...head, ...fill(body, viewport), ...foot];
     }
@@ -1435,7 +1436,7 @@ export class RequestInspector implements Component {
         return this.render(width);
       }
       const tabs = this.tabs(COMPACTION_SECTIONS, this.compactionSection);
-      const title = `${c.bold(c.ink(`Compaction #${rec.n}`))}  ${c.ink(rec.event.strategy ?? "")}  ${c.faint(clock(rec.event.at))}  ${c.faint(`(${this.compactionSelected + 1}/${comps.length})`)}`;
+      const title = `${c.bold(c.ink(`Compaction #${rec.n}`))}  ${c.ink(visibleSourceText(rec.event.strategy ?? ""))}  ${c.faint(visibleSourceText(clock(rec.event.at)))}  ${c.faint(`(${this.compactionSelected + 1}/${comps.length})`)}`;
       const head = [pad(title), focusLine, pad(tabs), pad(rule)];
       const content = this.cached(
         cacheKey(`compaction:${rec.index}:${this.compactionSection}`),

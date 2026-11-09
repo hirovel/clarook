@@ -4,12 +4,14 @@ import { describe, expect, it } from "vitest";
 import { RequestInspector } from "../cli/inspector.js";
 import {
   collectCompactions,
+  compactionChanges,
   compactionLines,
   compactionRow,
 } from "../cli/inspector-compactions.js";
 import { childEventLines, createTuiApp } from "../cli/tui-app.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
+import { CLEARED_PLACEHOLDER } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { type ChildInfo, createTaskTool } from "../src/subagent.js";
 import { defineTool } from "../src/tools.js";
@@ -266,31 +268,123 @@ describe("压缩对照", () => {
   ];
 
   it("collectCompactions:覆盖的模型可见事件、token、摘要 token、清除条目", () => {
-    const recs = collectCompactions(events);
+    const recs = collectCompactions(events).map((rec) => ({
+      ...rec,
+      ...compactionChanges(events, rec.index),
+    }));
     expect(recs).toHaveLength(2);
     const [a, b] = recs;
     if (!a || !b) throw new Error("应有两条");
-    expect(a.covered).toEqual([3, 4, 5]); // request(2) 只给人看,不算
+    expect(a.covered.map((source) => source.event)).toEqual([3, 4, 5]); // request(2) 只给人看,不算
     expect(a.coveredTokens).toBeGreaterThan(1000);
     expect(a.summaryTokens).toBeGreaterThan(0);
     expect(a.cleared).toEqual([]);
     expect(b.covered).toEqual([]);
-    expect(b.cleared).toEqual([8]);
+    expect(b.cleared.map((source) => source.event)).toEqual([8]);
     expect(b.clearedTokens).toBe(200);
+
+    // 同次 clear→summary 的左侧是整次操作前值,不冒充中间摘要请求的占位输入。
+    const combined: AgentEvent[] = [...events.slice(0, 7), { ...a.event, cleared: [4] }];
+    expect(
+      compactionChanges(combined, 7).covered.find((source) => source.event === 4)?.message.content,
+    ).toBe("x".repeat(4000));
+
+    const modified: AgentEvent[] = [
+      ...events.slice(0, 7),
+      { type: "context/edit", at: "t", target: 4, field: "content", value: "EDITED_INPUT" },
+      { type: "context/drop", at: "t", target: 5 },
+      { ...a.event, summary: "FIRST_SUMMARY" },
+      {
+        type: "user/shell",
+        at: "t",
+        id: "s1",
+        command: "echo shell",
+        cwd: "/tmp",
+        content: "SHELL_OUTPUT",
+        excludeFromContext: false,
+        isError: false,
+        status: "completed",
+      },
+      {
+        type: "assistant/message",
+        at: "t",
+        text: "",
+        toolCalls: [{ id: "missing", name: "read", args: { path: "pending" } }],
+        stopReason: "tool",
+      },
+      {
+        type: "tool/unresolved",
+        at: "t",
+        callEvent: 11,
+        callId: "missing",
+        name: "read",
+        content: "UNKNOWN_RESULT",
+      },
+      { type: "user/message", at: "t", text: "DROPPED_NOTE" },
+      { type: "context/drop", at: "t", target: 13 },
+      {
+        type: "assistant/message",
+        at: "t",
+        text: "",
+        toolCalls: [{ id: "c3", name: "read", args: { path: "c" } }],
+        stopReason: "tool",
+      },
+      {
+        type: "tool/result",
+        at: "t",
+        callId: "c3",
+        name: "read",
+        content: "RAW_RESULT",
+        isError: false,
+      },
+      { type: "context/edit", at: "t", target: 16, field: "content", value: "EDITED_BEFORE_CLEAR" },
+      { type: "compaction", at: "t", cleared: [16] },
+      { type: "user/message", at: "t", text: "KEEP_TAIL" },
+      { type: "compaction", at: "t", summary: "SECOND_SUMMARY", coversFrom: 2, coversUpTo: 19 },
+    ];
+    const readHistory = () =>
+      collectCompactions(modified).map((rec) => ({
+        ...rec,
+        ...compactionChanges(modified, rec.index),
+      }));
+    const history = readHistory();
+    const [first, clear, second] = history;
+    if (!first || !clear || !second) throw new Error("应有编辑后摘要、清除与滚动摘要");
+    expect(first.covered.map((source) => source.event)).toEqual([3, 4]);
+    const before = compactionLines(modified, first, 2).map(stripAnsi).join("\n");
+    expect(before).toContain("EDITED_INPUT");
+    expect(before).not.toContain("x".repeat(100));
+    expect(before).not.toContain("看完了");
+    expect(compactionLines(modified, clear, 4).map(stripAnsi).join("\n")).toContain(
+      "EDITED_BEFORE_CLEAR",
+    );
+    const repeated = compactionLines(modified, second, 2).map(stripAnsi).join("\n");
+    for (const content of ["FIRST_SUMMARY", "SHELL_OUTPUT", "UNKNOWN_RESULT", CLEARED_PLACEHOLDER])
+      expect(repeated).toContain(content);
+    for (const absent of ["EDITED_INPUT", "DROPPED_NOTE", "RAW_RESULT", "EDITED_BEFORE_CLEAR"])
+      expect(repeated).not.toContain(absent);
+    modified.push({
+      type: "context/edit",
+      at: "t",
+      target: 4,
+      field: "content",
+      value: "LATER_EDIT",
+    });
+    expect(readHistory()).toEqual(history);
   });
 
   it("列表行与四个分区:对照数字、原文全文、摘要、被清除的工具结果", () => {
     const [a, b] = collectCompactions(events);
     if (!a || !b) throw new Error("应有两条");
-    const row = stripAnsi(compactionRow(a, true));
+    const row = stripAnsi(compactionRow(events, a, true));
     expect(row).toContain("#1");
     expect(row).toContain("llmSummarize(structuredFull, replay)");
-    expect(row).toContain("original #3–#5 (3 events");
+    expect(row).toContain("input (3 messages");
     expect(row).toContain("→ summary");
     const overview = compactionLines(events, a, 1).map(stripAnsi).join("\n");
     expect(overview).toContain("ratio");
     expect(overview).toContain("summary request");
-    expect(overview).toContain("Nothing was deleted");
+    expect(overview).toContain("Raw originals remain in Events");
     const original = compactionLines(events, a, 2).map(stripAnsi).join("\n");
     expect(original).toContain("#4 tool:bash");
     expect(original).toContain("x".repeat(100));
@@ -305,6 +399,20 @@ describe("压缩对照", () => {
     expect(compactionLines(events, b, 2).map(stripAnsi).join("\n")).toContain(
       "has no summary (clear only)",
     );
+    const control = "\u001b]52;c;dGVzdA==\u0007";
+    const external: AgentEvent[] = [
+      ...events.slice(0, 7),
+      { type: "context/edit", at: "t", target: 4, field: "content", value: control },
+      { ...a.event, summary: control },
+    ];
+    const record = collectCompactions(external)[0];
+    if (!record) throw new Error("应有带原始控制字符的摘要");
+    for (const section of [2, 3] as const) {
+      const shown = compactionLines(external, record, section).join("\n");
+      expect(shown).not.toContain(control);
+      expect(shown).toContain("\\u001b]52;c;dGVzdA==\\u0007");
+    }
+    expect(external.at(-1)).toMatchObject({ summary: control });
   });
 
   it("检视器:Tab 两次进压缩对照,Enter 看详情,分区切换,Esc 返回", () => {
@@ -334,7 +442,7 @@ describe("压缩对照", () => {
     expect(doc).toContain("[1 compare]");
     insp.handleInput("2");
     expect(insp.render(120).map(stripAnsi).join("\n")).toContain(
-      "The 3 model-visible events the summary replaced",
+      "Context before this compaction: 3 effective messages replaced",
     );
     insp.handleInput("\x1b[C");
     expect(insp.render(120).map(stripAnsi).join("\n")).toContain("[3 summary]");

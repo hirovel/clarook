@@ -72,6 +72,8 @@ Known tool-definition changes omit earlier signed Anthropic thinking before send
 
 Summaries append paths referenced by read and write/edit calls. These lists identify calls, not confirmed file operations; inspect tool results to check their outcomes.
 
+Compaction comparisons show the effective context before the whole compaction, including edits, exclusions, earlier summaries and previously cleared results. Ctrl+E uses the same content. A pipeline can change this input before its summary call; inspect the summary request separately for that call's input. Raw originals remain in Events. Source text displays terminal controls as visible escapes. In `replay --compaction N --json`, `covered` and `cleared` contain effective messages; the corresponding `*Indices` identify their source events.
+
 Each action states whether it changes the next input, sends a request immediately or creates a session file. After sending, inspect the captured request in Ctrl+R to check what was actually sent. Intervening log records appear in folded rows; select one and press Enter to inspect them.
 
 Context estimates include the current tool definitions when no valid API measurement is available. A valid measurement already includes tools and is extended by newly added messages. Model changes, recorded tool changes and new images invalidate that baseline. Local estimates leave image tokens, private replay data and provider framing unmeasured; historical API usage remains available for comparison.

@@ -58,7 +58,7 @@ function preserveTail(events: readonly AgentEvent[], current: Composition, budge
 }
 
 /** 合成消息按其内容的位置切分,不能用后来追加记录的位置。 */
-function contextPosition(events: readonly AgentEvent[], source: number): number {
+export function contextPosition(events: readonly AgentEvent[], source: number): number {
   const event = events[source];
   return event?.type === "compaction"
     ? (event.coversFrom ?? 1)
