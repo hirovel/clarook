@@ -6,11 +6,11 @@
 import { estimateAfter } from "../src/compaction.js";
 import type { UsageTotals } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
-import type { Message } from "../src/messages.js";
+import { type Message, requestMessages } from "../src/messages.js";
 import { predictedCache, unchangedPrefix } from "./cards.js";
 import { collectCompactions } from "./inspector-compactions.js";
 import { fmtMs, fmtTok } from "./inspector-format.js";
-import { collectRequests, messagesFor } from "./inspector-requests.js";
+import { collectRequests } from "./inspector-requests.js";
 import { restoreSessionSetup } from "./session-setup.js";
 
 export type CheckupRow = {
@@ -94,7 +94,7 @@ export function analyze(events: readonly AgentEvent[], recording?: ResponseCover
   for (const rec of records) {
     const previous = records[rec.n - 2];
     const previousRow = rows.at(-1);
-    const messages = messagesFor(events, rec);
+    const messages = requestMessages(events, rec.index);
     const keep = unchangedPrefix(lastSent, messages);
     // 新图片的供应商视觉用量无法由本地文字估算推得;下一轮已有实测基准,仍可比较。
     const newImage = messages.slice(keep).some((m) => m.role === "user" && m.images?.length);

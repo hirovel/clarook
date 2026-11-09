@@ -5,13 +5,13 @@ import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { RequestInspector } from "../cli/inspector.js";
 import { cacheUsageLines, fmtMs, fmtTok } from "../cli/inspector-format.js";
-import { messagesFor } from "../cli/inspector-requests.js";
 import type { RequestRecording } from "../cli/session-records.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
-import { deriveMessages } from "../src/messages.js";
+import { deriveMessages, requestMessages } from "../src/messages.js";
 import type { AssistantTurn, Provider, ToolDef } from "../src/provider.js";
+import { anthropic } from "../src/providers/anthropic.js";
 import { defineTool } from "../src/tools.js";
 import { stripAnsi } from "./helpers/virtual-terminal.js";
 
@@ -298,6 +298,112 @@ describe("请求检视器", () => {
       restored.insp.showRequest(3, 4);
       expect(restored.text()).toContain("replacement description");
       expect(restored.text()).toContain('"replacement": {');
+
+      // 无附件重载必须复现实际清理输入,不能把 B 的新块或旧请求一起重写。
+      const thinkingLog = new EventLog();
+      thinkingLog.append({ type: "session/start", at: "t", model: "m", system: "S" });
+      const adapter = anthropic({ apiKey: "", model: "m", promptCache: false });
+      const inputs: Parameters<Provider["complete"]>[0][] = [];
+      const thinkingProvider: Provider = {
+        model: "m",
+        async complete(messages) {
+          inputs.push(structuredClone(messages));
+          const signature = `sig-${inputs.length}`;
+          return {
+            text: `answer-${inputs.length}`,
+            toolCalls: [],
+            stopReason: "end",
+            opaque: {
+              kind: "anthropic-thinking",
+              model: "m",
+              blocks: [
+                { type: "thinking", thinking: "saved reasoning", signature },
+                { type: "redacted_thinking", data: `redacted-${inputs.length}` },
+              ],
+            },
+          };
+        },
+      };
+      const changedEcho = { ...echo, description: "changed description" };
+      for (const [i, tools] of [[echo], [echo], [changedEcho], [changedEcho]].entries()) {
+        thinkingLog.append({ type: "user/message", at: "t", text: `prompt-${i + 1}` });
+        await runTurn({ log: thinkingLog, provider: thinkingProvider, tools });
+      }
+      const thinkingFile = join(directory, "thinking.jsonl");
+      writeFileSync(
+        thinkingFile,
+        `${thinkingLog.events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      );
+      const thinkingEvents = EventLog.load(thinkingFile).events;
+      const thinkingInspector = new RequestInspector({
+        events: () => thinkingEvents,
+        providerFor: () => adapter,
+        tools: () => [],
+        rows: () => 40,
+        onClose() {},
+        requestRender() {},
+      });
+      for (const record of thinkingInspector.records()) {
+        expect(requestMessages(thinkingEvents, record.index)).toEqual(inputs[record.n - 1]);
+        const sent = stripAnsi(thinkingInspector.sectionLines(record, 3).join("\n"));
+        const wire = stripAnsi(thinkingInspector.sectionLines(record, 5).join("\n"));
+        expect(sent).toContain("reconstructed from recorded events");
+        expect(wire).toContain("Reconstructed preview");
+        if (record.n === 2) {
+          expect(sent).toContain("sig-1");
+          expect(wire).toContain("sig-1");
+        } else {
+          expect(sent).not.toContain("sig-1");
+          expect(wire).not.toContain("sig-1");
+        }
+        if (record.n >= 3) {
+          expect(sent).not.toContain("sig-2");
+          expect(wire).not.toContain("sig-2");
+        }
+        if (record.n === 4) {
+          expect(sent).toContain("sig-3");
+          expect(wire).toContain("sig-3");
+          expect(wire).toContain("redacted-3");
+        }
+      }
+      // 捕获输入与 HTTP 是旧行为证据,其优先级高于当前重建规则。
+      const records = thinkingInspector.records();
+      const dirty =
+        inputs[3]?.map((message) =>
+          message.role === "assistant" && message.content === "answer-1"
+            ? {
+                ...message,
+                opaque: {
+                  kind: "anthropic-thinking",
+                  model: "m",
+                  blocks: [{ type: "thinking", thinking: "old", signature: "captured-dirty" }],
+                },
+              }
+            : message,
+        ) ?? [];
+      const captured = new RequestInspector({
+        events: () => thinkingEvents,
+        sessions: () => [
+          {
+            name: "main",
+            events: thinkingEvents,
+            recordingFor: () => ({
+              input: { messages: dirty, tools: [] },
+              bodies: ['{"historical":"captured-dirty"}'],
+              attempts: [],
+            }),
+          },
+        ],
+        providerFor: () => adapter,
+        tools: () => [],
+        rows: () => 40,
+        onClose() {},
+        requestRender() {},
+      });
+      const latest = records[3];
+      if (!latest) throw new Error("Expected stable tool request");
+      expect(stripAnsi(captured.sectionLines(latest, 3).join("\n"))).toContain("captured-dirty");
+      expect(stripAnsi(captured.sectionLines(latest, 5).join("\n"))).toContain("captured-dirty");
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -578,7 +684,7 @@ describe("请求检视器", () => {
                       ? ['{"tools":[{"name":"echo","description":"captured HTTP definition"}]}']
                       : [],
                   input: {
-                    messages: messagesFor(log.events, rec),
+                    messages: requestMessages(log.events, rec.index),
                     tools: [
                       { name: "echo", parameters: {}, description: rec.n === 1 ? "old" : "new" },
                     ],

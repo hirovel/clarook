@@ -112,7 +112,11 @@ describe("上下文面板的动作与后果", () => {
         stopReason: "tool",
         reasoning: "why",
         reasoningKind: "full",
-        opaque: { kind: "anthropic-thinking", model: "m", blocks: [] },
+        opaque: {
+          kind: "anthropic-thinking",
+          model: "m",
+          blocks: [{ type: "thinking", thinking: "read the file", signature: "sig" }],
+        },
       },
       {
         type: "tool/result",
@@ -238,6 +242,7 @@ describe("面板动作菜单", () => {
     let lastInput: Message[] = [];
     const provider: Provider = {
       model: "m",
+      fields: { protocol: "anthropic", sends: [], reads: [], ignores: [] },
       async complete(messages) {
         lastInput = messages;
         return {
@@ -246,6 +251,13 @@ describe("面板动作菜单", () => {
           stopReason: "end",
           reasoning: "deep thought",
           reasoningKind: "full",
+          ...(messages.length === 2 && {
+            opaque: {
+              kind: "anthropic-thinking",
+              model: "m",
+              blocks: [{ type: "thinking", thinking: "first thought", signature: "sig" }],
+            },
+          }),
         };
       },
     };
@@ -416,11 +428,21 @@ describe("面板动作菜单", () => {
     terminal.feed("\x1b");
 
     // 通过真正的循环入口发送,核对编辑后的正文和思考都进入下一次请求。
+    // 自定义组装只去掉旧回传物并重排对象键,来源与省略数量仍应准确。
+    app.agent.setSlot("assemble", (events) =>
+      deriveMessages(events).map((message) => {
+        const clean = { ...message };
+        if (clean.role === "assistant") delete clean.opaque;
+        return Object.fromEntries(Object.entries(clean).reverse()) as Message;
+      }),
+    );
     await app.submit("continue with edited context");
     expect(lastInput.find((m) => m.role === "user")?.content).toBe("keep typed file.png");
     expect(lastInput.filter((m) => m.role === "assistant").at(-1)).toMatchObject({
       reasoning: `deep thought\n${addition}`,
     });
+    expect(lastInput.some((message) => message.role === "assistant" && message.opaque)).toBe(false);
+    expect(doc(app)).toContain("1 thinking block dropped");
 
     // Rewind 到第一条:之后的消息全部丢弃
     app.inspector.openComposition();

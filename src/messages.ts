@@ -1,6 +1,7 @@
 import type { AgentEvent, ToolCall } from "./events.js";
 import type { ImageInput } from "./images.js";
 import { unresolvedCalls } from "./recovery.js";
+import { applyToolOmissions, prepareReplay, toolReplay } from "./tool-replay.js";
 
 /**
  * 内部消息模型:自有类型,不绑任何 provider 的 wire 格式。
@@ -198,6 +199,27 @@ export function composeContext(
   /** 只看前 upTo 条:回放历史请求时不用复制前缀。 */
   upTo = events.length,
 ): Composition {
+  const base = (before: number) => baseComposition(events, before);
+  const replay = toolReplay(events, upTo, base);
+  return applyToolOmissions(base(upTo), replay.omittedAt, upTo);
+}
+
+/** 实际输入在 request 自己的历史边界重建,不受后来的清理事实影响。 */
+export function requestMessages(events: readonly AgentEvent[], requestIndex: number): Message[] {
+  const request = events[requestIndex];
+  if (request?.type !== "request") return [];
+  return request.body
+    ? [...composeContext(events, request.body.prefixEvents).messages, ...request.body.tail]
+    : composeContext(events, requestIndex).messages;
+}
+
+/** 先形成真正的清理输入,request.body 落盘后后续投影才延续省略。 */
+export function prepareToolReplay(events: readonly AgentEvent[], messages: Message[]): Message[] {
+  const replay = toolReplay(events, events.length, (before) => baseComposition(events, before));
+  return prepareReplay(events, messages, replay.invalid);
+}
+
+function baseComposition(events: readonly AgentEvent[], upTo: number): Composition {
   const c = compactionState(events, upTo);
   const ed = editState(events, upTo);
   const messages: Message[] = [];

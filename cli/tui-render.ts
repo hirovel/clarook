@@ -4,9 +4,10 @@
 import { type Component, Container, Markdown, Spacer } from "@earendil-works/pi-tui";
 import type { AgentEvent } from "../src/events.js";
 import { imageSummary } from "../src/images.js";
-import { type Composition, composeContext, type Message } from "../src/messages.js";
+import { composeContext, requestMessages } from "../src/messages.js";
 import { classifyError, type ErrorKind, hintFor } from "../src/providers/errors.js";
 import type { ChildInfo } from "../src/subagent.js";
+import { sameReplayShape } from "../src/tool-replay.js";
 import {
   cacheNote,
   callLine,
@@ -16,12 +17,12 @@ import {
   predictedCache,
   resultLines,
   resultView,
+  thinkingReplayCounts,
   unchangedPrefix,
   userLine,
 } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
 import { fmtMs, fmtTok } from "./inspector-format.js";
-import { messagesFor } from "./inspector-requests.js";
 import { PROMPT_MARK } from "./terminal-extras.js";
 import { c, G, markdownTheme } from "./theme.js";
 import { Block } from "./tui-block.js";
@@ -457,26 +458,24 @@ function renderRequest(
   if (!ctx.view.afterUser) transcript.addChild(new Spacer(1));
   ctx.view.afterUser = false;
   transcript.addChild(step.summary);
-  // 来历:正常步的正文就是之前事件的投影,每条都能对回事件号;摘要请求的正文由策略记的 body 重建,没有来历。
-  let messages: Message[];
-  let provenance: Composition["provenance"] | undefined;
-  if (e.body) {
-    messages = messagesFor(log.events, {
-      index: req.lastIndex,
-      request: e,
-    });
-  } else {
-    const comp = composeContext(log.events, req.lastIndex);
-    messages = comp.messages;
-    provenance = comp.provenance;
-  }
+  const messages = requestMessages(log.events, req.lastIndex);
+  const comp = composeContext(log.events, req.lastIndex);
+  // 仅去签名 opaque 的实际输入仍与标准投影逐条同形,可沿用来源。
+  const aligned = !e.body || sameReplayShape(messages, comp.messages);
+  const provenance = aligned ? comp.provenance : undefined;
+  const originalOpaque = provenance?.map(({ event }) => {
+    const source = log.events[event];
+    return source?.type === "assistant/message" ? source.opaque : undefined;
+  });
   const note = changeNote({
     n: req.count,
     request: e,
     messages,
     ...(req.lastSent && { previous: req.lastSent }),
     ...(provenance && { provenance }),
-    dropsThinking: agent.provider.fields?.protocol.startsWith("anthropic") ?? false,
+    ...(agent.provider.fields?.protocol.startsWith("anthropic") && {
+      droppedThinking: thinkingReplayCounts(messages, e.model, originalOpaque).dropped,
+    }),
     ...(ctx.model.info.capabilitySource && { limitSource: ctx.model.info.capabilitySource }),
     contextWindow: ctx.model.contextWindow,
   });

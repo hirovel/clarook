@@ -1,8 +1,12 @@
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
+import { contextSize } from "../src/compaction.js";
+import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { maxSteps, queueToTurnEnd, runTurn, steer } from "../src/loop.js";
+import { deriveMessages, type Message, requestMessages } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
+import { toAnthropicWire } from "../src/providers/anthropic.js";
 import { toolDefinitionsForRequest } from "../src/tool-definitions.js";
 import { defineTool, type Tool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
@@ -148,12 +152,32 @@ describe("runTurn", () => {
     const log = newLog();
     const parameters = Type.Object({ text: Type.String({ description: "first" }) });
     const tools: Tool[] = [{ ...echoTool, parameters }];
+    const seen: Message[][] = [];
+    const opaque = (n: number) => ({
+      kind: "anthropic-thinking",
+      model: "fake",
+      blocks: [
+        { type: "thinking", thinking: `reasoning ${n}`, signature: `signature-${n}` },
+        { type: "redacted_thinking", data: `redacted-${n}` },
+      ],
+    });
+    const signatures = (messages: Message[]) =>
+      toAnthropicWire(messages, { model: "fake" }).messages.flatMap((message) =>
+        message.content.flatMap((block) =>
+          block.type === "thinking"
+            ? [block.signature]
+            : block.type === "redacted_thinking"
+              ? [block.data]
+              : [],
+        ),
+      );
     let requests = 0;
     const outcome = await runTurn({
       log,
       provider: {
         model: "fake",
         async complete(_messages, definitions) {
+          seen.push(_messages);
           if (requests++ === 0) {
             expect(definitions).toEqual([
               {
@@ -187,15 +211,31 @@ describe("runTurn", () => {
                 return "wrong version";
               },
             };
-            return { text: "", toolCalls: [call("echo", { text: "hi" })], stopReason: "tool" };
+            return {
+              text: "",
+              toolCalls: [call("echo", { text: "hi" })],
+              stopReason: "tool",
+              opaque: opaque(1),
+              reasoning: "reasoning 1",
+              reasoningKind: "summary",
+            };
           }
           expect(definitions[0]?.description).toBe("updated");
-          return { text: "完成", toolCalls: [], stopReason: "end" };
+          return { text: "完成", toolCalls: [], stopReason: "end", opaque: opaque(2) };
         },
       },
       tools: () => tools,
     });
     expect(outcome).toBe("idle");
+    // 第二个真实输入先清掉旧块;旧正文、调用与事件仍保留。
+    expect(signatures(seen[1] ?? [])).toEqual([]);
+    expect(seen[1]?.find((message) => message.role === "assistant")).toMatchObject({
+      reasoning: "reasoning 1",
+      toolCalls: [{ id: "c1", name: "echo", args: { text: "hi" } }],
+    });
+    expect(log.events.find((event) => event.type === "assistant/message")?.opaque).toEqual(
+      opaque(1),
+    );
     // 每次模型请求前落一条 request(只给人看),响应紧随其后。
     expect(log.events.map((e) => e.type)).toEqual([
       "session/start",
@@ -223,12 +263,25 @@ describe("runTurn", () => {
     });
 
     const snapshots = () => log.events.filter((event) => event.type === "tools/snapshot");
+    const historic = JSON.stringify(log.events);
     const next = async () => {
       log.append({ type: "user/message", at: "t", text: "next" });
       await runTurn({
         log,
         tools: () => tools,
-        provider: scripted([{ text: "done", toolCalls: [], stopReason: "end" }]),
+        provider: {
+          model: "fake",
+          async complete(messages) {
+            seen.push(messages);
+            return {
+              text: "done",
+              toolCalls: [],
+              stopReason: "end",
+              opaque: opaque(++requests),
+              usage: { inputTokens: 100, outputTokens: 10 },
+            };
+          },
+        },
       });
       const index = log.events.reduce(
         (last, event, at) => (event.type === "request" ? at : last),
@@ -251,6 +304,9 @@ describe("runTurn", () => {
     };
     await next();
     expect(snapshots()).toHaveLength(2);
+    expect(signatures(seen.at(-1) ?? [])).toEqual(["signature-2", "redacted-2"]);
+    expect(log.events.filter((event) => event.type === "request").at(-1)?.body).toBeUndefined();
+    expect(contextSize(log.events)).toEqual({ basis: "usage", tokens: 110 });
 
     tools[0] = {
       ...updated,
@@ -258,6 +314,7 @@ describe("runTurn", () => {
     };
     await next();
     expect(snapshots()).toHaveLength(3);
+    expect(signatures(seen.at(-1) ?? [])).toEqual([]);
     tools[0] = {
       ...updated,
       parameters: Type.Object({ text: Type.Union([Type.Literal("b"), Type.Literal("a")]) }),
@@ -276,7 +333,123 @@ describe("runTurn", () => {
     expect(snapshots()).toHaveLength(7);
     await next();
     expect(snapshots()).toHaveLength(7);
+    expect(signatures(seen.at(-1) ?? [])).toEqual(["signature-8", "redacted-8"]);
     expect(first?.[0]?.description).toBe("回显");
+    tools.push({
+      ...echoTool,
+      parameters: Type.Object({ text: Type.String({ description: "first" }) }),
+    });
+    await next();
+    expect(signatures(seen.at(-1) ?? [])).toEqual([]);
+    await next();
+    expect(signatures(seen.at(-1) ?? [])).toEqual(["signature-10", "redacted-10"]);
+    tools[0] = { ...(tools[0] as Tool), description: "Explain before editing." };
+    await next();
+    expect(signatures(seen.at(-1) ?? [])).toEqual([]);
+    await next();
+    expect(signatures(seen.at(-1) ?? [])).toEqual(["signature-12", "redacted-12"]);
+    tools[0] = { ...(tools[0] as Tool), description: "Read now." };
+    await runTurn({
+      log,
+      tools: () => tools,
+      slots: {
+        assemble: (events) => [
+          ...deriveMessages(events),
+          { role: "user", content: "Only this request." },
+        ],
+      },
+      provider: {
+        model: "fake",
+        async complete(messages) {
+          seen.push(messages);
+          return { text: "custom", toolCalls: [], stopReason: "end", opaque: opaque(++requests) };
+        },
+      },
+    });
+    expect(signatures(seen.at(-1) ?? [])).toEqual([]);
+    // 自定义结构的请求不会把清理或额外消息变成后续默认上下文。
+    expect(
+      deriveMessages(log.events).some((message) => message.content === "Only this request."),
+    ).toBe(false);
+    expect(signatures(deriveMessages(log.events))).toEqual([
+      "signature-12",
+      "redacted-12",
+      "signature-13",
+      "redacted-13",
+      "signature-14",
+      "redacted-14",
+    ]);
+    expect(JSON.stringify(log.events.slice(0, JSON.parse(historic).length))).toBe(historic);
+
+    // 升级前 B 请求没有清理输入,它的响应不能只凭发生在 B 之后获准回传。
+    for (const legacy of ["known-dirty", "unknown", "mixed"] as const) {
+      const restored = new EventLog();
+      const historicalEvents: AgentEvent[] = JSON.parse(historic);
+      const appendUnknown = (n: number) => {
+        restored.append({
+          type: "request",
+          at: "t",
+          model: "fake",
+          messages: 1,
+          tools: ["legacy"],
+          estimatedTokens: 1,
+          reason: "turn",
+        });
+        restored.append({
+          type: "assistant/message",
+          at: "t",
+          text: "legacy",
+          toolCalls: [],
+          stopReason: "end",
+          opaque: opaque(n),
+        });
+      };
+      for (const [index, event] of historicalEvents.entries()) {
+        if (legacy === "unknown" && event.type === "tools/snapshot") continue;
+        if (event.type === "request") delete event.body;
+        restored.append(event);
+        if (legacy === "mixed" && index === 0) {
+          // 这个producer确实缺定义证据,后面的已知A→B也不能反过来补证。
+          appendUnknown(99);
+        }
+        if (legacy === "mixed" && event.type === "tool/result") appendUnknown(98);
+      }
+      const prior = deriveMessages(restored.events);
+      const unknownBlocks =
+        legacy === "mixed" ? ["signature-99", "redacted-99", "signature-98", "redacted-98"] : [];
+      expect(signatures(prior)).toEqual([
+        ...(legacy === "mixed" ? ["signature-99", "redacted-99"] : []),
+        "signature-1",
+        "redacted-1",
+        ...(legacy === "mixed" ? ["signature-98", "redacted-98"] : []),
+        "signature-2",
+        "redacted-2",
+      ]);
+      const oldRequest = restored.events.reduce(
+        (last, event, index) => (event.type === "request" ? index : last),
+        -1,
+      );
+      const oldInput = requestMessages(restored.events, oldRequest);
+      let actual: Message[] = [];
+      await runTurn({
+        log: restored,
+        tools: [updated],
+        provider: {
+          model: "fake",
+          async complete(messages) {
+            actual = messages;
+            return { text: "resumed", toolCalls: [], stopReason: "end", opaque: opaque(12) };
+          },
+        },
+      });
+      expect(signatures(actual)).toEqual(
+        legacy === "unknown"
+          ? ["signature-1", "redacted-1", "signature-2", "redacted-2"]
+          : unknownBlocks,
+      );
+      expect(requestMessages(restored.events, oldRequest)).toEqual(oldInput);
+      expect(signatures(prior)).toHaveLength(legacy === "mixed" ? 8 : 4);
+    }
   });
 
   it("工具抛异常→isError 结果回喂,循环继续不炸", async () => {

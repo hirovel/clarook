@@ -8,6 +8,7 @@ import type { ResultView } from "../src/config.js";
 import { messageTokens as estimateMessageTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
 import type { Message } from "../src/messages.js";
+import { isAnthropicOpaque, toAnthropicWire } from "../src/providers/anthropic.js";
 import { fmtMs, fmtTok } from "./inspector-format.js";
 import { fmtWindow } from "./registry.js";
 import { c, G } from "./theme.js";
@@ -120,12 +121,40 @@ export type ChangeInput = {
   provenance?: { event: number; stages: string[] }[];
   /** 上一次正常步发出的消息;没有就是第一次。 */
   previous?: Message[];
-  /** 该 provider 在编辑点之后丢弃思考块(Anthropic)。 */
-  dropsThinking?: boolean;
+  /** 实际输入省略的 thinking/redacted 块数,由来源与适配器结果派生。 */
+  droppedThinking?: number;
   /** 窗口数据的出处(config / models.dev / assumed)。 */
   limitSource?: string;
   contextWindow?: number;
 };
+
+/** 展示只数实际回传块;签名资格由适配器决定,不在界面复制边界规则。 */
+export function thinkingReplayCounts(
+  messages: Message[],
+  model: string,
+  originalOpaque?: readonly unknown[],
+): { kept: number; dropped: number } {
+  const source = messages.reduce((total, message, i) => {
+    const opaque =
+      originalOpaque?.[i] ?? (message.role === "assistant" ? message.opaque : undefined);
+    return (
+      total +
+      (message.role === "assistant" && isAnthropicOpaque(opaque) && opaque.model === model
+        ? opaque.blocks.filter((b) => b.type === "thinking" || b.type === "redacted_thinking")
+            .length
+        : 0)
+    );
+  }, 0);
+  const kept = toAnthropicWire(messages, { model }).messages.reduce(
+    (total, message) =>
+      total +
+      message.content.filter(
+        (block) => block.type === "thinking" || block.type === "redacted_thinking",
+      ).length,
+    0,
+  );
+  return { kept, dropped: Math.max(0, source - kept) };
+}
 
 /**
  * 变化说明:一次请求相对上一次,有没有别的工具看不见的事。有就是一行(或两行),没有就不印。
@@ -173,13 +202,8 @@ export function changeNote(input: ChangeInput): string | undefined {
   // 前缀断了:上次发过的某条消息变了或没了,而上面两种来历都解释不了。
   if (keep < input.previous.length && parts.length === 0)
     parts.push(`prefix recomputed from #${marks[keep]?.idx ?? keep + 1}`);
-  // 编辑点之后的思考块:签名绑定前缀,改过之后的思考块不再回传。
-  const firstEdited = messages.findIndex((m) => m.edited);
-  const thinking =
-    input.dropsThinking && firstEdited >= 0
-      ? messages.slice(firstEdited).filter((m) => m.role === "assistant" && m.opaque !== undefined)
-          .length
-      : 0;
+  // 已省略的旧块会留在来源记录里;稳定追加时不重复报告同一变化。
+  const thinking = keep < input.previous.length ? (input.droppedThinking ?? 0) : 0;
   if (thinking > 0) parts.push(`${thinking} thinking block${thinking > 1 ? "s" : ""} dropped`);
   if (parts.length === 0) return lines[0];
   const recomputed = messages.length - keep;

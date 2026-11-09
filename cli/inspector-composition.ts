@@ -11,6 +11,7 @@ import {
   type Message,
 } from "../src/messages.js";
 import type { Provider } from "../src/provider.js";
+import { thinkingReplayCounts } from "./cards.js";
 import { firstLine, fmtTok, indent, messageTokens, roleLabel } from "./inspector-format.js";
 import { c, G, selectedText } from "./theme.js";
 import { visibleSourceText } from "./tui-format.js";
@@ -96,7 +97,9 @@ export function compositionLines(events: readonly AgentEvent[], r: CompositionRo
   if (m.role === "assistant" && m.opaque !== undefined) {
     lines.push("");
     lines.push(
-      c.faint(`opaque: ${(m.opaque as { kind?: string }).kind ?? "?"} · echoed back verbatim`),
+      c.faint(
+        `opaque: ${(m.opaque as { kind?: string }).kind ?? "?"} · saved provider data; replay depends on input eligibility`,
+      ),
     );
   }
   return lines;
@@ -247,9 +250,15 @@ export function consequenceOf(
   const afterTok = after.reduce((s, x) => s + messageTokens(x.message), 0);
   const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
   const anthropic = provider?.fields?.protocol.startsWith("anthropic") ?? false;
-  const thinking = rows.filter(
-    (x) => x.i >= r.i && x.message.role === "assistant" && x.message.opaque !== undefined,
-  ).length;
+  const messages = rows.map((row) => row.message);
+  const thinking =
+    anthropic && provider
+      ? thinkingReplayCounts(messages, provider.model).kept -
+        thinkingReplayCounts(
+          rows.map((row) => (row.i === r.i ? { ...row.message, edited: true } : row.message)),
+          provider.model,
+        ).kept
+      : 0;
   const fromHere = [
     after.length > 0
       ? `Later input: ${plural(after.length, "message")} (${fmtTok(afterTok)} tok)`

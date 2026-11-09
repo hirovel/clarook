@@ -17,7 +17,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { toolDefinitionTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
-import { editState, type Message } from "../src/messages.js";
+import { editState, type Message, requestMessages } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
 import { toolDefinitionsForRequest } from "../src/tool-definitions.js";
 import { BodyBrowser } from "./body-browser.js";
@@ -64,7 +64,6 @@ import {
   eventLines,
   exchangeLines,
   listRow,
-  messagesFor,
   narrowListRows,
   type RequestRecord,
   SECTIONS,
@@ -402,7 +401,7 @@ export class RequestInspector implements Component {
         : undefined;
     const previous =
       prior && this.section === 3
-        ? (priorInput?.messages ?? messagesFor(events, prior))
+        ? (priorInput?.messages ?? requestMessages(events, prior.index))
         : undefined;
     if (this.section === 3) {
       const definitions = saved?.input?.tools ?? toolDefinitionsForRequest(events, rec.index);
@@ -421,7 +420,7 @@ export class RequestInspector implements Component {
     const blocks =
       this.section === 3
         ? inputBlocks(
-            saved?.input?.messages ?? messagesFor(events, rec),
+            saved?.input?.messages ?? requestMessages(events, rec.index),
             start?.type === "session/start" ? start.sections : undefined,
             previous,
           )
@@ -829,13 +828,13 @@ export class RequestInspector implements Component {
       rec.index,
       section === 4 || section === 5 ? "wire" : section === 1 ? "summary" : "input",
     );
-    const messages = recording?.input?.messages ?? messagesFor(events, rec);
+    const messages = recording?.input?.messages ?? requestMessages(events, rec.index);
     const defs = recording?.input?.tools ?? toolDefinitionsForRequest(events, rec.index);
     const missing = rec.request.tools.filter((name) => !defs?.some((d) => d.name === name));
     const previous = this.records()[rec.n - 2];
     const prior = previous
       ? (this.sessions()[this.sessionIndex]?.recordingFor?.(previous.index, "input")?.input
-          ?.messages ?? messagesFor(events, previous))
+          ?.messages ?? requestMessages(events, previous.index))
       : undefined;
     switch (section) {
       case 1:

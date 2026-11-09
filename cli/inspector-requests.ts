@@ -3,13 +3,7 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { toolDefinitionTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
-import {
-  compactionState,
-  deriveMessages,
-  editState,
-  isProjected,
-  type Message,
-} from "../src/messages.js";
+import { compactionState, editState, isProjected, type Message } from "../src/messages.js";
 import { type Provider, parseEffort, type ToolDef } from "../src/provider.js";
 import { compactionDecisionText, unchangedPrefix } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
@@ -37,7 +31,7 @@ type CompactionEvent = Extract<AgentEvent, { type: "compaction" }>;
 export type RequestRecord = {
   /** 从 1 起的序号。 */
   n: number;
-  /** request 事件在日志中的下标。请求正文 = deriveMessages(events.slice(0, index))。 */
+  /** request 事件在日志中的下标,由核心 requestMessages 重建实际输入。 */
   index: number;
   request: RequestEvent;
   response?: AssistantEvent;
@@ -647,19 +641,6 @@ export function wireLines(
 }
 
 // ---------- 请求正文重建与写入视图 ----------
-
-/**
- * 某次请求实际发出的消息。正常步 = 请求之前全部事件的投影;
- * 策略自己发的请求(压缩摘要)记了 body:前缀投影 + 策略追加的尾部消息,同样逐字节可重建。
- */
-export function messagesFor(
-  events: readonly AgentEvent[],
-  rec: Pick<RequestRecord, "index" | "request">,
-): Message[] {
-  const b = rec.request.body;
-  if (b) return [...deriveMessages(events.slice(0, b.prefixEvents)), ...(b.tail as Message[])];
-  return deriveMessages(events.slice(0, rec.index));
-}
 
 const SHAPES = new Set(["compaction", "context/edit", "context/drop"]);
 

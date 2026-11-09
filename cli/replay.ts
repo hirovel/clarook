@@ -7,20 +7,14 @@
 
 import { contextBreakdown } from "../src/context.js";
 import { EventLog } from "../src/log.js";
-import { deriveMessages } from "../src/messages.js";
+import { deriveMessages, requestMessages } from "../src/messages.js";
 import {
   COMPACTION_SECTIONS,
   collectCompactions,
   compactionLines,
   compactionRow,
 } from "./inspector-compactions.js";
-import {
-  collectRequests,
-  decisionLines,
-  listRow,
-  messagesFor,
-  sentLines,
-} from "./inspector-requests.js";
+import { collectRequests, decisionLines, listRow, sentLines } from "./inspector-requests.js";
 import { readRequestRecording } from "./session-records.js";
 
 const [file, ...flags] = process.argv.slice(2);
@@ -63,7 +57,7 @@ if (requestFlag >= 0) {
     `\n${saved?.input ? "saved adapter input" : "input reconstructed from events"} for request #${n}:`,
   );
   for (const l of sentLines(
-    saved?.input?.messages ?? messagesFor(log.events, rec),
+    saved?.input?.messages ?? requestMessages(log.events, rec.index),
     false,
     sections,
     undefined,

@@ -2,12 +2,11 @@
 import { describe, expect, it } from "vitest";
 import { RequestInspector } from "../cli/inspector.js";
 import { compositionLines, compositionRows } from "../cli/inspector-composition.js";
-import { messagesFor } from "../cli/inspector-requests.js";
 import { legalizeCut } from "../src/compaction.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
-import { runTurn } from "../src/loop.js";
-import { composeContext, deriveMessages } from "../src/messages.js";
+import { describeRequestBody, runTurn } from "../src/loop.js";
+import { composeContext, deriveMessages, requestMessages } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { anthropic } from "../src/providers/anthropic.js";
 import { openaiCompat } from "../src/providers/openai-chat.js";
@@ -270,7 +269,7 @@ describe("组装槽", () => {
       if (!request) throw new Error("Expected recorded request");
       const requestIndex = log.events.indexOf(request);
       expect(request.estimatedTokens).toBe(mode === "append" ? 10004 : 2);
-      expect(messagesFor(log.events, { index: requestIndex, request })).toEqual(seen);
+      expect(requestMessages(log.events, requestIndex)).toEqual(seen);
       expect(request?.body).toEqual({
         prefixEvents: mode === "append" ? requestIndex : 1,
         tail: [{ role: "user", content: mode === "append" ? "r".repeat(40000) : "tiny" }],
@@ -295,12 +294,34 @@ describe("组装槽", () => {
       expect(identity?.estimatedTokens).toBe(505);
       expect(identity?.body).toBeUndefined();
       if (!identity) throw new Error("Expected identity request");
-      expect(
-        messagesFor(log.events, { index: log.events.indexOf(identity), request: identity }),
-      ).toEqual(seen);
+      expect(requestMessages(log.events, log.events.indexOf(identity))).toEqual(seen);
       expect(assemblies).toBe(2);
       expect(compactions).toBe(0);
     }
+    // 首差异之前有后来的编辑,候选前缀必须验证后回退,不能假设投影随事件单调增长。
+    const edited: AgentEvent[] = [
+      ...sample(),
+      { type: "context/edit", at: "", target: 0, field: "system", value: "new system" },
+    ];
+    const cleaned = deriveMessages(edited).map((message) => {
+      if (message.role !== "assistant") return message;
+      const copy = { ...message };
+      delete copy.opaque;
+      return copy;
+    });
+    const body = describeRequestBody(edited, cleaned);
+    expect(body.prefixEvents).toBe(0);
+    const request: AgentEvent = {
+      type: "request",
+      at: "",
+      model: "m",
+      messages: cleaned.length,
+      tools: [],
+      estimatedTokens: 1,
+      reason: "turn",
+      body,
+    };
+    expect(requestMessages([...edited, request], edited.length)).toEqual(cleaned);
   });
 });
 

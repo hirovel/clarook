@@ -12,7 +12,7 @@ import { type AgentEvent, now, type ToolCall } from "./events.js";
 import { completeRecorded, recordEvent, toolOutput } from "./exchange.js";
 import { annotateResult, DEFAULT_FACTS, dateNote, type FactsConfig } from "./facts.js";
 import type { EventLog } from "./log.js";
-import { deriveMessages, type Message } from "./messages.js";
+import { composeContext, deriveMessages, type Message, prepareToolReplay } from "./messages.js";
 import { DEFAULT_PLAN_REMINDER, planOpen, planState, planText, stepsSincePlan } from "./plan.js";
 import type { AssistantTurn, EffortLevel, Provider } from "./provider.js";
 import { errorMessage, isContextOverflow } from "./providers/errors.js";
@@ -316,8 +316,10 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     }));
     const defs = captureToolDefinitions(log, tools);
     const assemble = deps.slots?.assemble;
-    const messages = assemble ? assemble(log.events) : deriveMessages(log.events);
-    const assembled = assemble ? describeRequestBody(log.events, messages) : undefined;
+    const projected = assemble ? assemble(log.events) : deriveMessages(log.events);
+    const messages = prepareToolReplay(log.events, projected);
+    const assembled =
+      assemble || messages !== projected ? describeRequestBody(log.events, messages) : undefined;
     const body =
       assembled && (assembled.tail.length > 0 || assembled.prefixEvents !== log.events.length)
         ? assembled
@@ -458,7 +460,38 @@ export function describeRequestBody(
   events: readonly AgentEvent[],
   messages: Message[],
 ): { prefixEvents: number; tail: Message[] } {
-  const same = (a: Message, b: Message) => JSON.stringify(a) === JSON.stringify(b);
+  const same = (a: Message, b: Message) => a === b || JSON.stringify(a) === JSON.stringify(b);
+  const current = composeContext(events);
+  if (
+    current.messages.length <= messages.length &&
+    current.messages.every((message, index) => same(message, messages[index] as Message))
+  )
+    return { prefixEvents: events.length, tail: messages.slice(current.messages.length) };
+  const first = current.messages.findIndex(
+    (message, index) => !same(message, messages[index] as Message),
+  );
+  const opaqueOnly =
+    current.messages.length === messages.length &&
+    current.messages.every((message, index) => {
+      const actual = messages[index];
+      return (
+        same(message, actual as Message) ||
+        (message.role === "assistant" &&
+          message.opaque !== undefined &&
+          actual?.role === "assistant" &&
+          actual.opaque === undefined &&
+          same({ ...message, opaque: undefined }, actual))
+      );
+    });
+  const candidate = current.provenance[first]?.event;
+  if (opaqueOnly && candidate !== undefined && candidate >= 0) {
+    const prefix = deriveMessages(events.slice(0, candidate));
+    if (
+      prefix.length <= messages.length &&
+      prefix.every((message, index) => same(message, messages[index] as Message))
+    )
+      return { prefixEvents: candidate, tail: messages.slice(prefix.length) };
+  }
   for (let k = events.length; k >= 0; k--) {
     const derived = deriveMessages(events.slice(0, k));
     if (derived.length > messages.length) continue;

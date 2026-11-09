@@ -382,7 +382,9 @@ export function eventViewLines(
       if (e.opaque !== undefined)
         out.push(
           "",
-          c.faint(`opaque: ${(e.opaque as { kind?: string }).kind ?? "?"} · echoed back verbatim`),
+          c.faint(
+            `opaque: ${(e.opaque as { kind?: string }).kind ?? "?"} · saved provider data; replay depends on input eligibility`,
+          ),
         );
       if (e.extras) out.push(...block("extras", JSON.stringify(e.extras, null, 2), c.faint));
       break;

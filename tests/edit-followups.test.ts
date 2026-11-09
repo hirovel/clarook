@@ -1,6 +1,6 @@
 // 编辑上下文的收口:压缩与清除当作编辑点、Anthropic 编辑点断点、变化说明里的编辑点与预计命中、/retry。
 import { describe, expect, it } from "vitest";
-import { cacheNote, changeNote, predictedCache } from "../cli/cards.js";
+import { cacheNote, changeNote, predictedCache, thinkingReplayCounts } from "../cli/cards.js";
 import { Agent } from "../src/agent.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
@@ -13,7 +13,10 @@ const plain = (s: string) => s.replace(ansi, "");
 const thinking = {
   kind: "anthropic-thinking",
   model: "m",
-  blocks: [{ type: "thinking", thinking: "t", signature: "s" }],
+  blocks: [
+    { type: "thinking", thinking: "t", signature: "s" },
+    { type: "redacted_thinking", data: "redacted" },
+  ],
 };
 
 function base(): AgentEvent[] {
@@ -107,13 +110,49 @@ describe("变化说明里的编辑点与预计命中", () => {
     const cur = deriveMessages(events);
     // 编辑点信息在变化说明里:改了哪条、从哪起重算、丢几条思考、预计命中上限。
     const edit = plain(
-      changeNote({ n: 3, request: req, messages: cur, previous: prev, dropsThinking: true }) ?? "",
+      changeNote({
+        n: 3,
+        request: req,
+        messages: cur,
+        previous: prev,
+        droppedThinking: thinkingReplayCounts(cur, "m").dropped,
+      }) ?? "",
     );
     expect(edit.startsWith("✎ ")).toBe(true);
     expect(edit).toContain("1 edited (#6)");
     expect(edit).toContain("2 after prefix");
-    expect(edit).toContain("1 thinking block dropped");
+    expect(edit).toContain("2 thinking blocks dropped");
     expect(edit).toMatch(/unchanged ≈\S+ tok/);
+    // 工具变化清理后的输入不带 edited,数量仍按来源中的真实块数展示。
+    const clean = prev.map((message) =>
+      message.role === "assistant" ? { ...message, opaque: undefined } : message,
+    );
+    const dropped = thinkingReplayCounts(
+      clean,
+      "m",
+      prev.map((message) => (message.role === "assistant" ? message.opaque : undefined)),
+    ).dropped;
+    expect(dropped).toBe(6);
+    expect(
+      plain(
+        changeNote({
+          n: 4,
+          request: req,
+          messages: clean,
+          previous: prev,
+          droppedThinking: dropped,
+        }) ?? "",
+      ),
+    ).toContain("6 thinking blocks dropped");
+    expect(
+      changeNote({
+        n: 5,
+        request: req,
+        messages: [...clean, { role: "user", content: "next" }],
+        previous: clean,
+        droppedThinking: dropped,
+      }),
+    ).toBeUndefined();
     const predicted = predictedCache(prev, cur);
     expect(predicted).toBeGreaterThan(0);
     // 实测命中明显低于预计时才有缓存说明;预计与实测并排。

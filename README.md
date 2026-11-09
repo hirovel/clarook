@@ -68,6 +68,8 @@ Use Ctrl+R to inspect past requests and Ctrl+E to review the current projected c
 
 Excluding history also marks the changed prefix for Anthropic's existing conservative thinking-replay policy: earlier blocks stay eligible, later historical blocks are omitted from the request. Recorded content remains inspectable. Chat reasoning keeps its configured replay behavior.
 
+Known tool-definition changes omit earlier signed Anthropic thinking before sending. Blocks produced from the cleaned input can be replayed while definitions stay stable and the existing model and context-edit checks allow it. Returning to a previous definition does not restore omitted blocks. Original records remain available; legacy requests without complete definition evidence keep their existing replay behavior.
+
 Summaries append paths referenced by read and write/edit calls. These lists identify calls, not confirmed file operations; inspect tool results to check their outcomes.
 
 Each action states whether it changes the next input, sends a request immediately or creates a session file. After sending, inspect the captured request in Ctrl+R to check what was actually sent. Intervening log records appear in folded rows; select one and press Enter to inspect them.
