@@ -5,6 +5,7 @@ import { toolDefinitionTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
 import { compactionState, editState, isProjected, type Message } from "../src/messages.js";
 import { type Provider, parseEffort, type ToolDef } from "../src/provider.js";
+import { type SystemPrompt, systemParts, systemText } from "../src/system-prompt.js";
 import { compactionDecisionText, unchangedPrefix } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
 import {
@@ -356,7 +357,7 @@ export function decisionLines(rec: RequestRecord): string[] {
         break;
       case "context/edit":
         lines.push(
-          `${c.zhu("·")} the user edited event #${e.target}.${e.field} (${e.value.length} chars${e.note ? `; ${e.note}` : ""})`,
+          `${c.zhu("·")} the user edited event #${e.target}.${e.field} (${(e.field === "system" ? systemText(e.value) : e.value).length} chars${e.note ? `; ${e.note}` : ""})`,
         );
         break;
       case "context/drop":
@@ -389,12 +390,10 @@ export function decisionLines(rec: RequestRecord): string[] {
   return lines;
 }
 
-export type PromptSectionMeta = { name: string; source?: string; chars: number };
-
 export function sentLines(
   messages: Message[],
   folded: boolean,
-  sections?: PromptSectionMeta[],
+  prompt?: SystemPrompt,
   previous?: Message[],
   recorded = false,
 ): string[] {
@@ -416,18 +415,14 @@ export function sentLines(
     lines.push(
       `${c.ink(`[${i + 1}] ${roleLabel(m)}`)}  ${c.soft(`~${tok} tok · ${pctOf(tok, total)}${previous ? (i < keep ? " · unchanged prefix" : " · after prefix") : ""}`)}${m.edited ? c.jin("  ✎ edited (original in the events view)") : ""}`,
     );
-    lines.push(...messageBodyLines(m, folded, sections));
+    lines.push(...messageBodyLines(m, folded, prompt));
     lines.push("");
   });
   return lines;
 }
 
 /** 输入正文的单一格式器;列表和文本回放共用。 */
-export function messageBodyLines(
-  m: Message,
-  folded: boolean,
-  sections?: PromptSectionMeta[],
-): string[] {
+export function messageBodyLines(m: Message, folded: boolean, prompt?: SystemPrompt): string[] {
   const lines: string[] = [];
   const content = visibleSourceText(m.content);
   if (m.role === "user" && m.images?.length)
@@ -438,17 +433,19 @@ export function messageBodyLines(
         ),
       ),
     );
-  // 系统提示词按段拆开:角色、环境、项目指令各占多少。
-  if (m.role === "system" && sections && sections.length > 0) {
-    lines.push(c.faint("    Initial system-section metadata (may differ after edits):"));
-    const chars = sections.reduce((n, s) => n + s.chars, 0);
-    for (const s of sections) {
+  // 结构只归属于同一时点且正文一致的输入;自定义 assemble 仍显示其实际全文。
+  if (m.role === "system" && prompt !== undefined && systemText(prompt) === m.content) {
+    const sections = systemParts(prompt);
+    const chars = sections
+      .filter((section) => section.enabled)
+      .reduce((n, section) => n + section.text.length, 0);
+    lines.push(c.faint("    System sections for this input:"));
+    for (const section of sections)
       lines.push(
         c.faint(
-          `    ├ ${visibleSourceText(s.name)}  ${Math.ceil(s.chars / 4)} tok · ${pctOf(s.chars, chars)}${s.source ? `  ${visibleSourceText(s.source)}` : ""}`,
+          `    ├ ${visibleSourceText(section.name)} [${visibleSourceText(section.id)}] ${section.enabled ? "on" : "off"}  ${Math.ceil(section.text.length / 4)} tok${section.enabled ? ` · ${pctOf(section.text.length, chars)}` : ""}${section.source ? `  ${visibleSourceText(section.source)}` : ""}`,
         ),
       );
-    }
   }
   if (m.role === "assistant" && m.reasoning) {
     const reasoning = visibleSourceText(m.reasoning);

@@ -550,7 +550,7 @@ scene = "10";
   ]);
   const log = new EventLog();
   const p = systemPromptFor({}, process.cwd());
-  log.append({ type: "session/start", at: new Date().toISOString(), model: "fake-agent", system: p.text, sections: p.sections });
+  log.append({ type: "session/start", at: new Date().toISOString(), model: "fake-agent", system: p.system });
   const { app } = boot(provider, {
 
     settings: {

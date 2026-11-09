@@ -1,13 +1,10 @@
 // 请求正文格式器:将输入、响应和已读取的证据转成内容块;选择与展开归正文浏览模块。
 import type { Message } from "../src/messages.js";
+import type { SystemPrompt } from "../src/system-prompt.js";
 import type { BodyBlock } from "./body-browser.js";
 import { unchangedPrefix } from "./cards.js";
 import { firstLine, fmtMs, messageTokens, pctOf, roleLabel } from "./inspector-format.js";
-import {
-  messageBodyLines,
-  type PromptSectionMeta,
-  type RequestRecord,
-} from "./inspector-requests.js";
+import { messageBodyLines, type RequestRecord } from "./inspector-requests.js";
 import type { RecordedBody, RequestRecording } from "./session-records.js";
 import { toolCallDetail, visibleSourceText } from "./tui-format.js";
 
@@ -54,7 +51,7 @@ function recordedBlock(
 
 export function inputBlocks(
   messages: Message[],
-  sections?: PromptSectionMeta[],
+  prompt?: SystemPrompt,
   previous?: Message[],
 ): BodyBlock[] {
   const tokens = messages.map(messageTokens);
@@ -81,7 +78,7 @@ export function inputBlocks(
       firstLine(visibleSourceText(message.content.slice(0, 512))) ||
       (message.role === "assistant" ? `${message.toolCalls.length} tool calls` : "(empty)"),
     // 共用消息格式器,不再维护另一套思考、opaque、工具参数的正文格式。
-    lines: () => messageBodyLines(message, false, sections),
+    lines: () => messageBodyLines(message, false, prompt),
   }));
 }
 

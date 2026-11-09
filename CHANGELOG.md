@@ -12,6 +12,9 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Changed
 
+- Store system sections with stable identities, full text and enabled state instead of character-count metadata. Edit and toggle explicit sections; preserve manual instructions while automatic Skills discovery, catalog refresh and tool loading continue. System text is rendered from the recorded document.
+- Route context edits, restores, exclusions, rewinds and retry preparation through one context operation module. Menus and execution use the same availability rules and report the actual affected input.
+- Compare complete system documents, including removed sections, disabled text, identities, sources and enabled state. Keep empty system documents editable through the Custom section action.
 - Start each built-in Bash call from its configured directory. Keep `cd` local to that invocation; remove cross-call directory tracking and the hidden output marker protocol.
 - Explain stable tool definitions in the existing tool prompt controls. Keep task-specific preferences in messages and make the possible prompt cache impact of definition edits visible.
 - Report observed token prediction gaps separately from drift stability in `checkup`, including absolute and relative gap summaries. Exclude missing or interrupted input measurements without treating them as zero error.
@@ -22,7 +25,6 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
-- Keep system-section switches read-only when arbitrary full-text edits no longer match the recorded sections. Preserve manual instructions and retain the existing full-system editor and composition rebuild paths.
 - Exclude messages that survive a compaction from its replaced-message comparison and totals. Use the actual context projection so protected directory facts remain consistent across the workbench, inspector and replay.
 - Pause all undelivered input when an activity ends, including step-limit and provider-aborted results. Keep paused follow-ups out of new questions until explicitly continued.
 - Bind file and search tools, attachments, completion, skills, memory, approval, extensions, subagents and MCP processes to the session directory. Resolve explicit CLI resource files at launch and saved relative resources at the session root. Commit directory changes after the target view and resources are ready; cancellation or preparation failure keeps the previous binding and draft.

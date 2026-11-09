@@ -4,6 +4,7 @@ import type { SessionSetup } from "./session-setup.js";
 
 import { DEFAULT_COMPACTION_SETTINGS } from "../src/compaction-presets.js";
 import type { Preset, ResultView, SkillsConfig } from "../src/config.js";
+import { changeContext } from "../src/context-edit.js";
 import { now } from "../src/events.js";
 import { DEFAULT_PLAN_REMINDER } from "../src/plan.js";
 import type { EffortLevel } from "../src/provider.js";
@@ -24,7 +25,6 @@ import { configuredValue, type SetupScope, sameSetting, setupSnapshot } from "..
 import { parsePreservation } from "./args.js";
 import { DEFAULT_RESULT_VIEWS } from "./cards.js";
 import { automaticSkills, discoverSkills, skillsSection } from "./prompt.js";
-import { replaceSystemSection } from "./prompt-sections.js";
 import { buildCompaction, loadSummaryPrompt, validateCompactionName } from "./strategies.js";
 import { applyToolPrompts } from "./tool-prompts.js";
 import { createSkillTool, skillCatalog } from "./tools/skill.js";
@@ -239,8 +239,21 @@ export async function applySettingNow(
         applyToolPrompts([tool], ctx.slots.toolPrompts);
         tools.push(tool);
       }
-      const edit = replaceSystemSection(ctx.log.events, "Skills", skillsSection(skills, config));
-      if (edit) ctx.log.append(edit);
+      const target = ctx.log.events.findIndex((event) => event.type === "session/start");
+      const section = skillsSection(skills, config);
+      changeContext(
+        ctx.log,
+        {
+          type: "replace-section",
+          target,
+          id: "skills",
+          ...(section && { section: { id: "skills", ...section, enabled: true } }),
+        },
+        {
+          running: ctx.agent.running,
+          ...(ctx.deps.readOnlyReason && { readOnlyReason: ctx.deps.readOnlyReason }),
+        },
+      );
       if (skills !== ctx.skills) ctx.skills.splice(0, ctx.skills.length, ...skills);
       ctx.tools.splice(0, ctx.tools.length, ...tools);
       ctx.setupBase = setSetting(ctx.setupBase, def.key, structuredClone(value));

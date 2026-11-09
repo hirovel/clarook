@@ -1,14 +1,15 @@
 // 上下文组装:composeContext 的来历与省略、三家 wireMap、组装槽记 body、检视器组装视图。
 import { describe, expect, it } from "vitest";
 import { RequestInspector } from "../cli/inspector.js";
-import { actionsFor, compositionLines, compositionRows } from "../cli/inspector-composition.js";
+import { compositionLines, compositionRows } from "../cli/inspector-composition.js";
 import { eventSummary, eventViewLines, modelSees } from "../cli/inspector-events.js";
 import { legalizeCut } from "../src/compaction.js";
 import { estimateTokens, eventTokens } from "../src/context.js";
+import { changeContext, contextView } from "../src/context-edit.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { describeRequestBody, runTurn } from "../src/loop.js";
-import { composeContext, contextFields, deriveMessages, requestMessages } from "../src/messages.js";
+import { composeContext, deriveMessages, requestMessages } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { anthropic } from "../src/providers/anthropic.js";
 import { openaiCompat } from "../src/providers/openai-chat.js";
@@ -88,7 +89,7 @@ describe("composeContext", () => {
       log.append({ type: "context/edit", at: "", target, field: "content", value: "wrong root" });
     }
     expect(composeContext(log.events)).toEqual(moved);
-    expect(contextFields(current, { content: "wrong root" })[0]).toMatchObject({
+    expect(contextView(log.events, currentIndex).fields[0]).toMatchObject({
       current: current.environment,
       readOnlyReason: expect.stringContaining("/session directory"),
     });
@@ -120,9 +121,9 @@ describe("composeContext", () => {
       "session/directory",
     );
     expect(
-      actionsFor(log.events, directoryRow, rows.length)
-        .map((action) => action.action)
-        .filter((action) => ["edit", "drop", "restore"].includes(action)),
+      contextView(log.events, { message: directoryRow.i - 1 }).actions.filter((action) =>
+        ["edit", "drop", "restore"].includes(action),
+      ),
     ).toEqual([]);
     const compactedRequest = log.events.length;
     log.append({
@@ -208,17 +209,16 @@ describe("composeContext", () => {
     expect(recovered.messages[4]).toMatchObject({ role: "tool", callId: "b", isError: true });
     expect(recovered.messages[4]?.content).toContain("execution outcome is unknown");
     expect(recovered.provenance[4]).toEqual({ event: 4, stages: ["unknown-result"] });
-    log.append({
-      type: "context/edit",
-      at: "",
+    changeContext(log, {
+      type: "edit",
       target: 4,
-      field: "content",
       value: "Verified separately by the user.",
     });
     expect(composeContext(log.events).messages[4]?.content).toBe(
       "Verified separately by the user.",
     );
-    log.append({ type: "context/drop", at: "", target: 2 });
+    const effect = changeContext(log, { type: "drop", target: 2 });
+    expect(effect.removed.filter((item) => item.message.role === "tool")).toHaveLength(2);
     expect(composeContext(log.events).messages.some((m) => m.role === "tool")).toBe(false);
     const late = new EventLog();
     for (const e of sample().slice(0, 4)) late.append(e);
@@ -277,9 +277,14 @@ describe("composeContext", () => {
         stopReason: "tool",
       },
       { type: "tool/result", at: "", callId: "reused", name: "r", content: "new", isError: false },
-      { type: "context/drop", at: "", target: 2 },
     ];
-    const comp = composeContext(events);
+    const log = new EventLog();
+    for (const event of events) log.append(event);
+    const preview = contextView(log.events, 2).effects.drop;
+    const effect = changeContext(log, { type: "drop", target: 2 });
+    expect(effect).toEqual(preview);
+    expect(effect.removed.map((item) => item.event)).toEqual([2, 3]);
+    const comp = composeContext(log.events);
     expect(comp.messages.filter((m) => m.role === "tool").map((m) => m.content)).toEqual(["new"]);
     expect(comp.omitted).toContainEqual({ event: 3, reason: "dropped" });
     expect(comp.omitted).not.toContainEqual({ event: 6, reason: "dropped" });

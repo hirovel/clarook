@@ -72,7 +72,7 @@ import type { MemoryFiles } from "./tools/memory.js";
 import { Block } from "./tui-block.js";
 import { applyTools, COMMANDS, command, openLogin, openPalette, submit } from "./tui-commands.js";
 import { FOLD_HEAD, type SessionTarget, type TuiContext } from "./tui-context.js";
-import { contextAction, flipSection } from "./tui-edit.js";
+import { contextAction, systemSectionAction } from "./tui-edit.js";
 import { brief, cleanPasteText } from "./tui-format.js";
 import { ListPicker, LoginDialog } from "./tui-login.js";
 import {
@@ -393,7 +393,7 @@ export function createTuiApp(
     readOnlyReason: () => deps.readOnlyReason,
     onClose: () => ctx.inspector.close(),
     onAction: (action, row) => void contextAction(ctx, action, row),
-    onSection: (name) => flipSection(ctx, name),
+    onSection: (target, section, action) => systemSectionAction(ctx, target, section, action),
     onTools: () => {
       ctx.inspector.close();
       void command(ctx, "/tools");

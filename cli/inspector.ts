@@ -16,9 +16,11 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { estimateTokens, toolDefinitionTokens } from "../src/context.js";
+import { contextView } from "../src/context-edit.js";
 import type { AgentEvent } from "../src/events.js";
-import { editState, type Message, requestMessages } from "../src/messages.js";
+import { type Message, requestMessages } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
+import { systemAt, systemText } from "../src/system-prompt.js";
 import { toolDefinitionsForRequest } from "../src/tool-definitions.js";
 import { BodyBrowser } from "./body-browser.js";
 import { inputBlocks, receivedBlocks, recordingErrorBlock } from "./inspector-bodies.js";
@@ -32,12 +34,12 @@ import {
 } from "./inspector-compactions.js";
 import {
   type ActionItem,
-  actionsFor,
   type CompositionRow,
   type ContextAction,
   compositionLines,
   compositionRows,
   consequenceOf,
+  contextActionItem,
 } from "./inspector-composition.js";
 import {
   EVENT_FILTERS,
@@ -84,7 +86,6 @@ import {
   workbenchHeader,
   workbenchLine,
 } from "./inspector-workbench.js";
-import { currentSystem, type SectionState, sectionStates } from "./prompt-sections.js";
 import type { RecordingSection, RequestRecording } from "./session-records.js";
 import { c, G, selectedText } from "./theme.js";
 import { visibleSourceText } from "./tui-format.js";
@@ -118,8 +119,8 @@ export type InspectorDeps = {
   readOnlyReason?: () => string | undefined;
   /** 工作台里选中一条消息并选了动作。view 由检视器自己处理,其余交给界面落到命令上。 */
   onAction?: (action: ContextAction, row: CompositionRow) => void;
-  /** 工作台的 system 行:翻一段(界面层追加 context/edit)。 */
-  onSection?: (name: string) => void;
+  /** 工作台的 system 行:明确段身份后交给宿主编辑或切换。 */
+  onSection?: (target: number, section: string, action: "toggle" | "edit" | "add") => void;
   /** 工作台的 tools 行:开 /tools 选单(界面层关掉检视器再开)。 */
   onTools?: () => void;
   onClose: () => void;
@@ -168,6 +169,7 @@ export class RequestInspector implements Component {
   private bodyEvidence = "";
   private lastViewport = 10;
   private sectionSelected = 0;
+  private systemTarget = 0;
   /** 运行中按了会改上下文的键:在预览区说一句,不开动作单。 */
   private busyNote: string | undefined;
   private recCache:
@@ -241,6 +243,15 @@ export class RequestInspector implements Component {
       }
     }
     this.messageSelected = Math.max(0, pick);
+  }
+
+  /** 命令可直接打开指定 system 事件的段列表。 */
+  showSections(target: number): void {
+    this.sessionIndex = 0;
+    this.showComposition(target);
+    this.mode = "sections";
+    this.systemTarget = target;
+    this.sectionSelected = 0;
   }
 
   composition(): ReturnType<typeof compositionRows> {
@@ -386,7 +397,6 @@ export class RequestInspector implements Component {
       rec.index,
       this.section === 3 ? "input" : "received",
     );
-    const start = events.find((e) => e.type === "session/start");
     this.bodyEvidence =
       this.section === 3
         ? saved?.input
@@ -422,7 +432,7 @@ export class RequestInspector implements Component {
       this.section === 3
         ? inputBlocks(
             saved?.input?.messages ?? requestMessages(events, rec.index),
-            start?.type === "session/start" ? start.sections : undefined,
+            systemAt(events, rec.request.body?.prefixEvents ?? rec.index),
             previous,
           )
         : receivedBlocks(rec, saved);
@@ -452,23 +462,35 @@ export class RequestInspector implements Component {
     );
   }
 
-  private contextActions(row: CompositionRow, total: number): ActionItem[] {
-    const items = actionsFor(this.events(), row, total);
-    // 渲染与按键执行共用筛选,菜单打开后运行状态改变也不能执行过期动作。
-    if (this.events() !== this.deps.events() || this.busy())
-      return items.filter((item) => item.action === "view");
-    if (this.deps.readOnlyReason?.())
-      return items.filter((item) => ["view", "compare", "fork"].includes(item.action));
-    return items;
+  private contextMenu(row: CompositionRow): {
+    view: ReturnType<typeof contextView>;
+    items: ActionItem[];
+  } {
+    const reason = this.contextReadOnlyReason();
+    const view = contextView(
+      this.events(),
+      { message: row.i - 1 },
+      {
+        running: this.busy(),
+        ...(reason && { readOnlyReason: reason }),
+      },
+    );
+    // 子会话和运行中的覆盖层只供查看;主会话的写入许可来自内核。
+    const interactive = this.events() === this.deps.events() && !this.busy();
+    const actions: ContextAction[] = [
+      "view",
+      ...(interactive ? view.actions : []),
+      ...(interactive ? ["fork" as const] : []),
+    ];
+    return { view, items: actions.map((action) => contextActionItem(action, row.event)) };
   }
 
-  /** 提示词段:切得回来就带开关;切不回来只列元数据。 */
-  private sections(): { states: SectionState[] | undefined; names: string[] } {
-    const events = this.events();
-    const states = sectionStates(events);
-    const start = events.find((e) => e.type === "session/start");
-    const names = start?.type === "session/start" ? (start.sections ?? []).map((s) => s.name) : [];
-    return { states, names };
+  private sections(): ReturnType<typeof contextView> {
+    const reason = this.contextReadOnlyReason();
+    return contextView(this.events(), this.systemTarget, {
+      running: this.busy(),
+      ...(reason && { readOnlyReason: reason }),
+    });
   }
 
   handleInput(data: string): void {
@@ -638,8 +660,7 @@ export class RequestInspector implements Component {
       case "actions": {
         const row = this.selectedRow();
         const r = row?.kind === "message" || row?.kind === "system" ? row.row : undefined;
-        const total = this.composition().rows.length;
-        const items = r ? this.contextActions(r, total) : [];
+        const items = r ? this.contextMenu(r).items : [];
         const previous = this.actionSelected;
         const selected = Math.max(
           0,
@@ -682,8 +703,8 @@ export class RequestInspector implements Component {
         break;
       }
       case "sections": {
-        const { states, names } = this.sections();
-        const n = states?.length ?? names.length;
+        const view = this.sections();
+        const n = view.fields.length;
         if (matchesKey(data, Key.escape)) this.mode = "composition";
         else if (matchesKey(data, Key.up))
           this.sectionSelected = clampSel(this.sectionSelected - 1, n);
@@ -696,11 +717,19 @@ export class RequestInspector implements Component {
         else if (matchesKey(data, Key.home)) this.sectionSelected = 0;
         else if (matchesKey(data, Key.end)) this.sectionSelected = Math.max(0, n - 1);
         else if (/^[1-9]$/.test(data) && Number(data) <= n) this.sectionSelected = Number(data) - 1;
-        else if (matchesKey(data, Key.enter) && states) {
-          const s = states[this.sectionSelected];
-          const reason = this.contextReadOnlyReason();
+        else if (data === "a") {
+          if (view.restrictions.edit) this.busyNote = view.restrictions.edit;
+          else this.deps.onSection?.(this.systemTarget, "custom", "add");
+        } else if (matchesKey(data, Key.enter) || data === "e") {
+          const section = view.fields[this.sectionSelected];
+          const reason = view.restrictions[data === "e" ? "edit" : "toggle-section"];
           if (reason) this.busyNote = reason;
-          else if (s) this.deps.onSection?.(s.name);
+          else if (section?.section)
+            this.deps.onSection?.(
+              this.systemTarget,
+              section.section,
+              data === "e" ? "edit" : "toggle",
+            );
         }
         break;
       }
@@ -792,6 +821,7 @@ export class RequestInspector implements Component {
           return;
         }
         this.mode = "sections";
+        this.systemTarget = row.row.event;
         this.sectionSelected = 0;
         this.busyNote = undefined;
         return;
@@ -847,11 +877,10 @@ export class RequestInspector implements Component {
       case 2:
         return decisionLines(rec);
       case 3: {
-        const start = events.find((e) => e.type === "session/start");
-        const sections = start?.type === "session/start" ? start.sections : undefined;
+        const prompt = systemAt(events, rec.request.body?.prefixEvents ?? rec.index);
         return [
           ...(recording?.error ? [c.zhu(recording.error)] : []),
-          ...sentLines(messages, false, sections, prior, Boolean(recording?.input)),
+          ...sentLines(messages, false, prompt, prior, Boolean(recording?.input)),
         ];
       }
       case 4:
@@ -1262,15 +1291,14 @@ export class RequestInspector implements Component {
         this.mode = "composition";
         return this.render(width);
       }
-      const crows = this.composition().rows;
-      const items = this.contextActions(r, crows.length);
+      const { view, items } = this.contextMenu(r);
       const sel = Math.max(
         0,
         items.findIndex((item) => item.action === this.actionSelected),
       );
       this.actionSelected = items[sel]?.action ?? "view";
       const m = r.message;
-      const edited = editState(events).edits.has(r.event);
+      const edited = view.fields.some((field) => field.edited);
       const title = `${c.bold(c.ink(`#${r.event} ${roleLabel(m)}`))}  ${c.soft(`≈${messageTokens(m)} tok${edited ? ` · ${c.jin("edited")}` : ""}${r.stages.includes("unknown-result") ? " · result unknown" : ""}`)}`;
       const head = rows < 12 ? [pad(title), pad(rule)] : [pad(title), focusLine, pad(rule)];
       const chosen = items[sel] as ActionItem;
@@ -1299,7 +1327,7 @@ export class RequestInspector implements Component {
       const reason = this.contextReadOnlyReason();
       const details = [
         ...(reason ? [c.jin(reason)] : []),
-        ...consequenceOf(chosen.action, r, crows, events, this.deps.currentProvider?.())
+        ...consequenceOf(chosen.action, r, view, this.deps.currentProvider?.())
           .split("\n")
           .map((line, i) => (i === 0 ? c.ink(line) : c.soft(line))),
         c.faint(chosen.hint),
@@ -1344,39 +1372,25 @@ export class RequestInspector implements Component {
     }
 
     if (this.mode === "sections") {
-      const { states, names } = this.sections();
-      const start = events.find((e) => e.type === "session/start");
-      const metas = start?.type === "session/start" ? (start.sections ?? []) : [];
-      const list =
-        states ?? names.map((name) => ({ name, on: true, text: "", chars: 0, source: undefined }));
-      const total = estimateTokens(currentSystem(events) ?? "");
-      const title = `${c.bold(c.ink("System prompt"))}  ${c.soft(`${list.length} ${states ? "sections" : "recorded sections"} · ≈${total} text tok`)}`;
+      const view = this.sections();
+      const list = view.fields;
+      const total = estimateTokens(systemText(systemAt(events)));
+      const title = `${c.bold(c.ink("System prompt"))}  ${c.soft(`${list.length} sections · ≈${total} text tok`)}`;
       const head = [pad(title), focusLine, pad(rule)];
       const foot = [
         pad(rule),
         ...controls(
-          states
-            ? "Enter toggle · Esc back · ↑↓ or 1–9 choose · PgUp/PgDn page"
-            : "Esc back · ↑↓ choose · PgUp/PgDn page",
+          `Enter toggle · e edit text · a ${list.some((section) => section.section === "custom") ? "edit" : "add"} custom · Esc back · ↑↓ or 1–9 choose · PgUp/PgDn page`,
         ),
       ];
       const reason = this.busyNote ?? this.contextReadOnlyReason();
-      const details = (
+      const details = wrapTextWithAnsi(
         reason
-          ? wrapTextWithAnsi(c.jin(reason), inner)
-          : states
-            ? wrapTextWithAnsi(
-                c.faint(
-                  "Changes this session's next input · /settings prompt.sections saves defaults",
-                ),
-                inner,
-              )
-            : wrapTextWithAnsi(
-                c.faint(
-                  "Read-only · Sections cannot be reconstructed. Use /edit 0 system for the full text, or /session to rebuild from current/defaults.",
-                ),
-                inner,
-              )
+          ? c.jin(reason)
+          : c.faint(
+              "Changes this session's next input · /edit N system <section-id> edits a section",
+            ),
+        inner,
       ).map(pad);
       const available = Math.max(1, rows - head.length - foot.length);
       const detailHeight = Math.min(details.length, Math.max(0, available - 1));
@@ -1384,28 +1398,28 @@ export class RequestInspector implements Component {
       this.lastViewport = viewport;
       const offset = windowStart(this.sectionSelected, list.length, viewport);
       const body: string[] = [];
-      list.slice(offset, offset + viewport).forEach((s, k) => {
+      list.slice(offset, offset + viewport).forEach((section, k) => {
         const i = offset + k;
-        const meta = metas[i];
-        const tok = Math.ceil((meta?.chars ?? s.chars) / 4);
+        const tok = estimateTokens(section.current);
         const first =
-          s.text
+          section.current
             .split("\n")
-            .find((l) => l.trim())
+            .find((line) => line.trim())
             ?.trim() ??
-          meta?.source ??
+          section.source ??
           "";
-        const state = states ? (s.on ? "on " : "off") : "   ";
-        const line = `${i + 1}  ${s.name.padEnd(22)} ${state}  ${`≈${tok}`.padStart(6)}   ${truncateToWidth(first, Math.max(10, inner - 44), "…")}`;
+        const state = section.enabled ? "on " : "off";
+        const label = `${section.name ?? section.section} [${section.section}]`;
+        const line = `${i + 1}  ${label.padEnd(28)} ${state}  ${`≈${tok}`.padStart(6)}   ${truncateToWidth(first, Math.max(10, inner - 50), "…")}`;
         body.push(
           pad(
             i === this.sectionSelected
               ? `  ${selectedText(`${G.cursor} ${line}`)}`
-              : `    ${s.on ? c.soft(line) : c.faint(line)}`,
+              : `    ${section.enabled ? c.soft(line) : c.faint(line)}`,
           ),
         );
       });
-      if (list.length === 0) body.push(pad(c.faint("no section metadata in this session")));
+      if (!list.length) body.push(pad(c.faint("No system sections in this session.")));
       return [...head, ...fill(body, viewport), ...details.slice(0, detailHeight), ...foot];
     }
 

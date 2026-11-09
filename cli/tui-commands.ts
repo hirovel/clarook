@@ -15,6 +15,7 @@ import { errorMessage } from "../src/providers/errors.js";
 import { unresolvedCalls } from "../src/recovery.js";
 import { SETTINGS, type SettingDef, settingDef } from "../src/settings.js";
 import { setupGuide } from "../src/setup.js";
+import { systemAt, systemParts, systemText } from "../src/system-prompt.js";
 import { expandFileRefs } from "./attachments.js";
 import { SESSIONS_DIR } from "./bootstrap.js";
 import { firstLine, thesisLines } from "./cards.js";
@@ -365,25 +366,28 @@ function renderFields(ctx: TuiContext): string {
   ].join("\n");
 }
 
-/** 系统提示词的段构成与位置。数据来自 session/start,与模型看到的同源。 */
+/** 当前系统提示词的明确段身份,与模型投影使用同一份事实。 */
 function renderPrompt(ctx: TuiContext): string {
   const { log } = ctx;
   const start = log.events.find((e) => e.type === "session/start");
   if (start?.type !== "session/start") return c.faint("no session yet");
-  const sections = start.sections ?? [];
-  const total = sections.reduce((n, s) => n + s.chars, 0);
+  const prompt = systemAt(log.events);
+  const sections = systemParts(prompt);
+  const total = sections
+    .filter((section) => section.enabled)
+    .reduce((n, section) => n + section.text.length, 0);
   const lines = [
-    `${c.soft("System prompt")}  ${c.ink(`${sections.length} sections · ≈${Math.ceil(start.system.length / 4)} tok`)}`,
+    `${c.soft("System prompt")}  ${c.ink(`${sections.length} sections · ≈${estimateTokens(systemText(prompt))} tok`)}`,
   ];
   for (const s of sections) {
     lines.push(
-      `  ${c.ink(s.name.padEnd(8))} ${c.soft(`${String(Math.ceil(s.chars / 4)).padStart(6)} tok · ${pct(total > 0 ? s.chars / total : 0).padStart(4)}`)}${s.source ? c.faint(`  ${s.source}`) : ""}`,
+      `  ${c.ink(`${s.name} [${s.id}]`.padEnd(16))} ${c.soft(`${s.enabled ? "on" : "off"} · ${String(estimateTokens(s.text)).padStart(6)} tok · ${pct(total > 0 && s.enabled ? s.text.length / total : 0).padStart(4)}`)}${s.source ? c.faint(`  ${s.source}`) : ""}`,
     );
   }
   const preamble = log.events[1];
   if (
     preamble?.type === "user/message" &&
-    start.sections?.every((s) => !/instruction|指令/i.test(s.name))
+    sections.every((section) => section.id !== "instructions")
   ) {
     lines.push(
       c.faint(
@@ -432,16 +436,17 @@ export function renderContext(ctx: TuiContext): string {
       `${c.faint(bar)} ${pct(p.share).padStart(4)}  ${c.soft(`${p.tokens} tok · ${p.count} · ${p.label}`)}`,
     );
   }
-  const start = log.events.find((e) => e.type === "session/start");
-  const sections = start?.type === "session/start" ? start.sections : undefined;
-  if (sections && sections.length > 0) {
-    const total = sections.reduce((n, s) => n + s.chars, 0);
+  const sections = systemParts(systemAt(log.events));
+  if (sections.length > 0) {
+    const total = sections
+      .filter((section) => section.enabled)
+      .reduce((n, section) => n + section.text.length, 0);
     lines.push(c.soft("System prompt sections"));
     for (const s of sections) {
-      const tok = Math.ceil(s.chars / 4);
+      const tok = estimateTokens(s.text);
       lines.push(
         c.faint(
-          `  ├ ${s.name.padEnd(8)} ${String(tok).padStart(6)} tok · ${pct(total > 0 ? s.chars / total : 0).padStart(4)}${s.source ? `  ${s.source}` : ""}`,
+          `  ├ ${s.name.padEnd(8)} ${s.enabled ? "on" : "off"} · ${String(tok).padStart(6)} tok · ${pct(total > 0 && s.enabled ? s.text.length / total : 0).padStart(4)}${s.source ? `  ${s.source}` : ""}`,
         ),
       );
     }

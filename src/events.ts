@@ -4,6 +4,7 @@
 import type { ImageInput } from "./images.js";
 import type { Message } from "./messages.js";
 import type { ToolDef } from "./provider.js";
+import type { SystemPrompt } from "./system-prompt.js";
 
 export type ToolCall = {
   id: string;
@@ -35,10 +36,8 @@ export type AgentEvent =
       type: "session/start";
       at: string;
       model: string;
-      /** 解析后的完整系统提示词。入日志的理由:模型可见即必须入日志。 */
-      system: string;
-      /** 系统提示词的分段构成(名称、来源、字符数),只给人看:检视器与 /context 据此按段拆分。 */
-      sections?: { name: string; source?: string; chars: number }[];
+      /** 自定义正文或完整段事实;模型全文只从这里渲染,不重复存字符数元数据。 */
+      system: SystemPrompt;
     }
   /** 明确绑定的会话执行根;环境说明在发生位置投影,最新目录不被摘要或上下文操作隐藏。 */
   | { type: "session/directory"; at: string; cwd: string; environment: string }
@@ -224,18 +223,16 @@ export type AgentEvent =
    * 被编辑的消息不再带私有回传物(签名或密文与改后的内容不再对应);Anthropic 还会丢弃之后所有消息的思考块。
    * reasoning 只在该消息 reasoningKind 为 full 时允许编辑(摘要改了模型也看不见)。
    */
-  | {
+  | ({
       type: "context/edit";
       at: string;
       /** 目标事件下标。 */
       target: number;
-      /** 改哪个字段:text / reasoning 对 assistant;content 对 tool/result 与 user/message;system 对 session/start。 */
-      field: "text" | "reasoning" | "content" | "system";
-      value: string;
       note?: string;
-      /** 重新组装 system 时携带分段元数据;普通文本编辑不需要。 */
-      sections?: { name: string; source?: string; chars: number }[];
-    }
+    } & (
+      | { field: "system"; value: SystemPrompt }
+      | { field: "text" | "reasoning" | "content"; value: string }
+    ))
   /** 丢弃一条消息:user/message,或 assistant/message 连同它的全部工具结果。投影跳过它们。 */
   | { type: "context/drop"; at: string; target: number; note?: string }
   | {

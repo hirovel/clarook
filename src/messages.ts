@@ -2,6 +2,7 @@ import type { AgentEvent, ToolCall } from "./events.js";
 import type { ImageInput } from "./images.js";
 import { unresolvedCalls } from "./recovery.js";
 import { directoryAt } from "./session-directory.js";
+import { type SystemPrompt, systemText } from "./system-prompt.js";
 import { applyToolOmissions, prepareReplay, toolReplay } from "./tool-replay.js";
 
 /**
@@ -35,58 +36,11 @@ export type Message = {
     }
 );
 
-export type EditField = Extract<AgentEvent, { type: "context/edit" }>["field"];
+type EditValues = { system: SystemPrompt; text: string; reasoning: string; content: string };
 
 /** 用户命令明确标来源;输出不是新的用户指令,也不是模型发起的工具调用。 */
 export function userShellText(event: Extract<AgentEvent, { type: "user/shell" }>): string {
   return `The user ran a shell command.\nWorking directory: ${event.cwd}\nCommand:\n${event.command}\nOutput:\n${event.content}`;
-}
-
-/** 上下文字段的事实:主字段在前;只读思考仍可比较原文,但不能作为编辑入口。 */
-export function contextFields(
-  event: AgentEvent | undefined,
-  edits: Partial<Record<EditField, string>> = {},
-): { field: EditField; original: string; current: string; readOnlyReason?: string }[] {
-  const field = (name: EditField, original: string, readOnlyReason?: string) => ({
-    field: name,
-    original,
-    current: edits[name] ?? original,
-    ...(readOnlyReason && { readOnlyReason }),
-  });
-  switch (event?.type) {
-    case "session/directory":
-      return [
-        {
-          field: "content",
-          original: event.environment,
-          current: event.environment,
-          readOnlyReason:
-            "Session directory is an execution fact; use /session directory to change it.",
-        },
-      ];
-    case "assistant/message":
-      return [
-        field("text", event.text),
-        field(
-          "reasoning",
-          event.reasoning ?? "",
-          event.reasoningKind === "full"
-            ? undefined
-            : `thinking is ${event.reasoningKind === "summary" ? "a summary" : "of unknown kind"}: the model reads the opaque block, so editing it changes nothing. To steer, append a message, or use a model that echoes full thinking (DeepSeek)`,
-        ),
-      ];
-    case "user/message":
-      return [field("content", event.text)];
-    case "user/shell":
-      return event.excludeFromContext ? [] : [field("content", userShellText(event))];
-    case "tool/result":
-    case "tool/unresolved":
-      return [field("content", event.content)];
-    case "session/start":
-      return [field("system", event.system)];
-    default:
-      return [];
-  }
 }
 
 /** 编辑状态:每个目标事件各字段的最新值,以及被丢弃的事件下标。 */
@@ -94,10 +48,10 @@ export function editState(
   events: readonly AgentEvent[],
   upTo = events.length,
 ): {
-  edits: Map<number, Partial<Record<EditField, string>>>;
+  edits: Map<number, Partial<EditValues>>;
   dropped: Set<number>;
 } {
-  const edits = new Map<number, Partial<Record<EditField, string>>>();
+  const edits = new Map<number, Partial<EditValues>>();
   const dropped = new Set<number>();
   for (let k = 0; k < upTo; k++) {
     const e = events[k];
@@ -105,7 +59,8 @@ export function editState(
     if (e.type === "context/edit") {
       if (events[e.target]?.type === "session/directory") continue;
       const cur = edits.get(e.target) ?? {};
-      cur[e.field] = e.value;
+      if (e.field === "system") cur.system = e.value;
+      else cur[e.field] = e.value;
       edits.set(e.target, cur);
     } else if (e.type === "context/drop") {
       if (events[e.target]?.type === "session/directory") continue;
@@ -322,8 +277,8 @@ function baseComposition(events: readonly AgentEvent[], upTo: number): Compositi
       case "session/start":
         push(
           edit?.system !== undefined
-            ? { role: "system", content: edit.system, edited: true }
-            : (verbatim.get(e) ?? remember(e, { role: "system", content: e.system })),
+            ? { role: "system", content: systemText(edit.system), edited: true }
+            : (verbatim.get(e) ?? remember(e, { role: "system", content: systemText(e.system) })),
           i,
           editedStages,
         );

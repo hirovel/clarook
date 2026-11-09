@@ -23,6 +23,7 @@ import { EventLog } from "../src/log.js";
 import { deriveMessages } from "../src/messages.js";
 import type { Provider } from "../src/provider.js";
 import { DEFAULT_SKILL_SOURCES } from "../src/settings.js";
+import { systemText } from "../src/system-prompt.js";
 import { defineTool } from "../src/tools.js";
 import { testDirectory } from "./helpers/setup.js";
 import { VirtualTerminal } from "./helpers/virtual-terminal.js";
@@ -239,11 +240,11 @@ describe("SKILL.md 解析与发现", () => {
       root: proj,
     });
     const without = systemPromptFor(args, proj, { home, root: proj });
-    expect(withList.sections.some((s) => s.name === "Skills")).toBe(true);
-    expect(without.sections.some((s) => s.name === "Skills")).toBe(false);
-    expect(systemPromptFor(parseCommonArgs([]), proj, { home, root: proj }).text).not.toContain(
-      "# Skills",
-    );
+    expect(withList.system.some((s) => s.id === "skills")).toBe(true);
+    expect(without.system.some((s) => s.id === "skills")).toBe(false);
+    expect(
+      systemText(systemPromptFor(parseCommonArgs([]), proj, { home, root: proj }).system),
+    ).not.toContain("# Skills");
     const path = join(proj, ".agents", "skills", "review", "SKILL.md");
     mkdirSync(join(proj, ".agents", "skills", "review"), { recursive: true });
     writeFileSync(path, "---\nname: review\ndescription: Review a patch\n---\nCheck the patch.");
@@ -273,7 +274,7 @@ describe("SKILL.md 解析与发现", () => {
     });
     const sourcePrompt = systemPromptFor(sourceArgs, proj, { home, root: proj });
     // secret 是 manual-only,源切换不能偷偷把它放进自动清单。
-    expect(sourcePrompt.sections.some((s) => s.name === "Skills")).toBe(false);
+    expect(sourcePrompt.system.some((s) => s.id === "skills")).toBe(false);
     expect(() =>
       applyPreset(parseCommonArgs([]), {
         ...base,
@@ -376,14 +377,17 @@ describe("界面里的技能", () => {
     await app.command("/deploy staging");
     expect(requests[0]?.system).toBe("My exact base instructions.");
     expect(requests[0]?.tools).not.toContain("skill");
+    const editedInstructions = "My edited base instructions.\nKeep the literal phrase # Skills.";
+    await app.command(`/edit 0 system custom ${editedInstructions}`);
     await app.command("/settings prompt.skills.mode auto");
     await app.command("/settings prompt.skills.include review");
     await app.submit("continue");
+    expect(requests.at(-1)?.system).toContain(editedInstructions);
     expect(requests.at(-1)?.system).toContain("- review:");
     expect(requests.at(-1)?.system).not.toContain("- deploy:");
     await app.command("/settings prompt.skills.load tool");
     await app.submit("continue");
-    expect(requests.at(-1)?.system).toBe("My exact base instructions.");
+    expect(requests.at(-1)?.system).toBe(editedInstructions);
     expect(requests.at(-1)?.tools).toContain("skill");
     expect(requests.at(-1)?.description).toContain("review");
     expect(requests.at(-1)?.description).not.toContain("deploy");
@@ -399,7 +403,7 @@ describe("界面里的技能", () => {
     await app.command("/settings prompt.skills.mode manual");
     await app.submit("continue");
     expect(requests.at(-1)?.tools).not.toContain("skill");
-    expect(requests.at(-1)?.system).toBe("My exact base instructions.");
+    expect(requests.at(-1)?.system).toBe(editedInstructions);
     expect(JSON.stringify(deriveMessages(log.events))).toContain("User request:\\nstaging");
     // 来源的增删开关验证实际发现、后续请求与历史,不对样式建立快照。
     await app.command("/settings prompt.skills.sources {}");
@@ -435,6 +439,7 @@ describe("界面里的技能", () => {
     await app.command("/settings prompt.skills.include all");
     await app.command("/settings prompt.skills.load read");
     await app.submit("continue with custom source");
+    expect(requests.at(-1)?.system).toContain(editedInstructions);
     expect(requests.at(-1)?.system).toContain("Custom review");
     expect(requests.at(-1)?.system).not.toContain("- deploy:");
     const sources = restoreSessionSetup(log.events, {}).setup.values.prompt?.skills?.sources;

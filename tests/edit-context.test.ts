@@ -1,12 +1,13 @@
 // 编辑上下文:投影层的编辑与丢弃、回传物丢弃、Anthropic 前缀绑定、界面命令与拒绝条件。
 import { describe, expect, it } from "vitest";
-import { actionsFor, compositionRows } from "../cli/inspector-composition.js";
 import { createTuiApp } from "../cli/tui-app.js";
+import { type ContextOperation, changeContext, contextView } from "../src/context-edit.js";
 import { EventLog } from "../src/log.js";
-import { composeContext, deriveMessages, editState, type Message } from "../src/messages.js";
+import { composeContext, deriveMessages, type Message } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { anthropic, toAnthropicWire } from "../src/providers/anthropic.js";
 import { openaiCompat } from "../src/providers/openai-chat.js";
+import { type SystemSection, systemAt } from "../src/system-prompt.js";
 import { VirtualTerminal } from "./helpers/virtual-terminal.js";
 
 const thinking = (model: string) => ({
@@ -57,16 +58,29 @@ function sample(): EventLog {
 describe("投影应用编辑", () => {
   it("edit 换字段、标 edited、丢该消息的回传物;最后一次编辑生效;原事件不变", () => {
     const log = sample();
-    log.append({
-      type: "context/edit",
-      at: "",
+    const before = contextView(log.events, 2);
+    expect(before.actions).toEqual(
+      expect.arrayContaining(["edit", "edit-reasoning", "drop", "rewind", "retry"]),
+    );
+    expect(before.actions).not.toContain("compare");
+    expect(
+      changeContext(log, { type: "edit", target: 2, field: "reasoning", value: "改过的想法" })
+        .opaqueDiscarded,
+    ).toBe(true);
+    const effect = changeContext(log, {
+      type: "edit",
       target: 2,
       field: "reasoning",
-      value: "改过的想法",
+      value: "再改一次",
     });
-    log.append({ type: "context/edit", at: "", target: 2, field: "reasoning", value: "再改一次" });
-    log.append({ type: "context/edit", at: "", target: 3, field: "content", value: "R1 改" });
-    log.append({ type: "context/edit", at: "", target: 0, field: "system", value: "S 改" });
+    expect(effect).toMatchObject({
+      target: 2,
+      fields: ["reasoning"],
+      opaqueDiscarded: false,
+      prefixFrom: 2,
+    });
+    changeContext(log, { type: "edit", target: 3, value: "R1 改" });
+    changeContext(log, { type: "edit", target: 0, section: "custom", value: "S 改" });
     const msgs = deriveMessages(log.events);
     expect(msgs[0]).toEqual({ role: "system", content: "S 改", edited: true });
     expect(msgs[2]).toMatchObject({
@@ -81,7 +95,17 @@ describe("投影应用编辑", () => {
     expect(msgs[4]).toHaveProperty("opaque");
     const e2 = log.events[2];
     expect(e2?.type === "assistant/message" && e2.reasoning).toBe("想法一");
-    expect(editState(log.events).edits.get(2)).toEqual({ reasoning: "再改一次" });
+    expect(contextView(log.events, 2).fields[1]).toMatchObject({
+      original: "想法一",
+      current: "再改一次",
+      edited: true,
+    });
+    expect(contextView(log.events, 3).actions).toEqual(
+      expect.arrayContaining(["compare", "restore"]),
+    );
+    expect(changeContext(log, { type: "restore", target: 2 }).fields).toEqual(["reasoning"]);
+    expect(contextView(log.events, 2).fields[1]?.current).toBe("想法一");
+    expect(deriveMessages(log.events)[2]).not.toHaveProperty("opaque");
   });
 
   it("drop 只移除目标与所属工具结果,Anthropic 仅丢后继思考块,Chat reasoning 与旧请求保持", () => {
@@ -142,7 +166,8 @@ describe("投影应用编辑", () => {
       const upTo = dropped.events.length;
       const original = structuredClone(composeContext(dropped.events));
       const originalWire = wire(original.messages);
-      dropped.append({ type: "context/drop", at: "", target });
+      const preview = contextView(dropped.events, target).effects.drop;
+      expect(changeContext(dropped, { type: "drop", target })).toEqual(preview);
       const current = composeContext(dropped.events);
       expect(current.messages.map((m) => m.content)).toEqual(contents);
       expect(assistantBlocks(current.messages)).toEqual(blocks);
@@ -160,12 +185,244 @@ describe("投影应用编辑", () => {
 
   it("Anthropic:前缀里有编辑过的消息,之后所有思考块都不再回传;编辑点之前的照常", () => {
     const log = sample();
-    log.append({ type: "context/edit", at: "", target: 3, field: "content", value: "R1 改" });
+    changeContext(log, { type: "edit", target: 3, value: "R1 改" });
     const wire = toAnthropicWire(deriveMessages(log.events), { model: "m" });
     const assistants = wire.messages.filter((m) => m.role === "assistant");
     // 第一条助手在编辑点之前,思考块仍在;第二条在编辑点之后,思考块没了。
     expect(assistants[0]?.content.some((b) => b.type === "thinking")).toBe(true);
     expect(assistants[1]?.content.some((b) => b.type === "thinking")).toBe(false);
+  });
+
+  it("按段身份编辑、开关与刷新Skills互不覆盖,整体恢复保留原始正文和启用状态", () => {
+    const log = new EventLog();
+    const original: [SystemSection, SystemSection] = [
+      { id: "instructions", name: "Instructions", text: "My instructions", enabled: true },
+      { id: "skills", name: "Skills", text: "Old catalog", enabled: false, source: "skills" },
+    ];
+    log.append({ type: "session/start", at: "", model: "m", system: original });
+    const before = contextView(log.events);
+    expect(contextView(log.events, 0).comparisons).toEqual([]);
+    const events = log.events.length;
+    for (const operation of [
+      {
+        type: "replace-section",
+        target: 0,
+        id: "skills",
+        section: { ...original[1], enabled: true },
+      },
+      { type: "set-system", target: 0, value: structuredClone(original) },
+    ] satisfies ContextOperation[]) {
+      expect(changeContext(log, operation)).toEqual({
+        target: 0,
+        fields: [],
+        dropped: [],
+        removed: [],
+        opaqueDiscarded: false,
+      });
+      expect(log.events).toHaveLength(events);
+      expect(contextView(log.events).composition).toEqual(before.composition);
+    }
+    expect(() =>
+      changeContext(log, { type: "edit", target: 0, value: "unowned full text" }),
+    ).toThrow(/Choose a system section/);
+    expect(log.events).toHaveLength(events);
+    changeContext(log, {
+      type: "edit",
+      target: 0,
+      section: "instructions",
+      value: "My instructions with Old catalog quoted",
+    });
+    changeContext(log, {
+      type: "replace-section",
+      target: 0,
+      id: "skills",
+      section: {
+        id: "skills",
+        name: "Skills",
+        text: "New catalog",
+        enabled: true,
+        source: "new-source",
+      },
+    });
+    expect(contextView(log.events, 0).fields).toEqual([
+      expect.objectContaining({
+        section: "instructions",
+        original: "My instructions",
+        current: "My instructions with Old catalog quoted",
+        enabled: true,
+      }),
+      expect.objectContaining({
+        section: "skills",
+        current: "New catalog",
+        enabled: false,
+        source: "new-source",
+      }),
+    ]);
+    expect(deriveMessages(log.events)[0]?.content).toBe("My instructions with Old catalog quoted");
+    expect(contextView(log.events, 0).actions).toContain("toggle-section");
+    changeContext(log, { type: "toggle-section", target: 0, section: "skills" });
+    expect(contextView(log.events, 0).comparisons).toEqual([
+      {
+        field: "system",
+        original,
+        current: [
+          { ...original[0], text: "My instructions with Old catalog quoted" },
+          { ...original[1], text: "New catalog", enabled: true, source: "new-source" },
+        ],
+      },
+    ]);
+    expect(deriveMessages(log.events)[0]?.content).toBe(
+      "My instructions with Old catalog quoted\n\nNew catalog",
+    );
+    expect(composeContext(log.events, 1)).toEqual(before.composition);
+    const count = log.events.length;
+    expect(changeContext(log, { type: "restore", target: 0 }).fields).toEqual(["system"]);
+    expect(log.events).toHaveLength(count + 1);
+    expect(systemAt(log.events)).toEqual(original);
+    expect(deriveMessages(log.events)[0]?.content).toBe("My instructions");
+    for (const value of [[{ ...original[0], id: "" }], [original[0], original[0]]])
+      expect(() => changeContext(log, { type: "set-system", target: 0, value })).toThrow(
+        /section id/,
+      );
+    expect(log.events).toHaveLength(count + 1);
+    changeContext(log, { type: "set-system", target: 0, value: "Native custom text" });
+    changeContext(log, { type: "replace-section", target: 0, id: "skills", section: original[1] });
+    expect(contextView(log.events, 0).fields.map((field) => field.section)).toEqual([
+      "custom",
+      "skills",
+    ]);
+    expect(contextView(log.events, 0).fields[0]?.current).toBe("Native custom text");
+    changeContext(log, { type: "replace-section", target: 0, id: "custom" });
+    expect(contextView(log.events, 0).comparisons).toEqual([
+      { field: "system", original, current: [original[1]] },
+    ]);
+    expect(contextView(log.events, 0).fields.map((field) => field.section)).toEqual(["skills"]);
+    changeContext(log, { type: "replace-section", target: 0, id: "skills" });
+    expect(contextView(log.events, 0).fields).toEqual([]);
+    expect(contextView(log.events, 0).comparisons).toEqual([
+      { field: "system", original, current: [] },
+    ]);
+    expect(contextView(log.events, 0).actions).toEqual(
+      expect.arrayContaining(["compare", "restore"]),
+    );
+    expect(deriveMessages(log.events)[0]?.content).toBe("");
+    changeContext(log, { type: "restore", target: 0 });
+    expect(systemAt(log.events)).toEqual(original);
+  });
+  it("保存重验覆盖、清除、排除与只读限制;预览只给出当前输入真正能执行的操作", () => {
+    const log = sample();
+    expect(contextView(log.events, 4).actions).not.toContain("edit-reasoning");
+    expect(() =>
+      changeContext(log, { type: "edit", target: 4, field: "reasoning", value: "x" }),
+    ).toThrow(/thinking is a summary/);
+    expect(contextView(log.events, 5).actions).not.toContain("rewind");
+    expect(() =>
+      changeContext(log, { type: "edit", target: 1, field: "reasoning", value: "x" }),
+    ).toThrow(/has no field reasoning/);
+    expect(() => changeContext(log, { type: "edit", target: 99, value: "x" })).toThrow(
+      /no event #99/,
+    );
+    changeContext(log, { type: "edit", target: 2, value: "edited a1" });
+    const before = log.events.length;
+    for (const access of [{ running: true }, { readOnlyReason: "Read-only session" }]) {
+      const view = contextView(log.events, 2, access);
+      expect(view.actions).toEqual(["compare"]);
+      for (const operation of [
+        { type: "edit", target: 2, value: "x" },
+        { type: "drop", target: 2 },
+        { type: "restore", target: 2 },
+        { type: "rewind", target: 2 },
+        { type: "retry" },
+      ] satisfies ContextOperation[])
+        expect(() => changeContext(log, operation, access)).toThrow();
+    }
+    expect(log.events).toHaveLength(before);
+    expect(contextView(log.events, 3).actions).toContain("edit");
+    log.append({ type: "compaction", at: "", cleared: [3] });
+    const cleared = contextView(log.events, 3);
+    expect(cleared.actions).not.toContain("edit");
+    expect(() => changeContext(log, { type: "edit", target: 3, value: "replacement" })).toThrow(
+      /cleared from current input/,
+    );
+    const drop = changeContext(log, { type: "drop", target: 2 });
+    expect(drop.removed.map((item) => item.event)).toEqual([2, 3]);
+    expect(contextView(log.events, 2).actions).toEqual(
+      expect.arrayContaining(["compare", "rewind", "retry"]),
+    );
+    expect(() => changeContext(log, { type: "restore", target: 2 })).toThrow(
+      /excluded from current input/,
+    );
+    expect(() => changeContext(log, { type: "drop", target: 2 })).toThrow(
+      /excluded from current input/,
+    );
+    log.append({
+      type: "compaction",
+      at: "",
+      summary: "Earlier work including a2",
+      coversFrom: 2,
+      coversUpTo: 5,
+    });
+    const comp = contextView(log.events).composition;
+    const summary = comp.provenance.findIndex((item) =>
+      item.stages.some((stage) => stage.startsWith("summary")),
+    );
+    expect(summary).toBeGreaterThanOrEqual(0);
+    expect(contextView(log.events, { message: summary }).actions).not.toContain("rewind");
+    const events = log.events.length;
+    const current = deriveMessages(log.events);
+    for (const operation of [
+      { type: "edit", target: 2, value: "new answer" },
+      { type: "drop", target: 2 },
+      { type: "restore", target: 2 },
+      { type: "rewind", target: 2 },
+      { type: "rewind", target: { message: summary } },
+      { type: "retry" },
+    ] satisfies ContextOperation[])
+      expect(() => changeContext(log, operation)).toThrow();
+    expect(contextView(log.events).actions).not.toContain("retry");
+    expect(log.events).toHaveLength(events);
+    expect(deriveMessages(log.events)).toEqual(current);
+    changeContext(log, { type: "edit", target: 5, value: "updated tail" });
+    expect(deriveMessages(log.events).at(-1)?.content).toBe("updated tail");
+  });
+
+  it("回退只排除当前消息与关联结果,保留目录事实并支持数字事件截止点", () => {
+    const log = sample();
+    log.append({
+      type: "session/directory",
+      at: "",
+      cwd: "/project",
+      environment: "Current directory",
+    });
+    changeContext(log, { type: "drop", target: 4 });
+    const preview = contextView(log.events, { message: 1 }).effects.rewind;
+    const effect = changeContext(log, { type: "rewind", target: 1 });
+    expect(effect).toEqual(preview);
+    expect(effect.dropped).toEqual([2, 5]);
+    expect(effect.removed.map((item) => item.event)).toEqual([2, 3, 5]);
+    expect(deriveMessages(log.events).map((item) => item.content)).toEqual([
+      "S",
+      "u1",
+      "Current directory",
+    ]);
+    expect(contextView(log.events, 1).actions).not.toContain("rewind");
+    const count = log.events.length;
+    expect(() => changeContext(log, { type: "drop", target: 6 })).toThrow(/only user or assistant/);
+    expect(() => changeContext(log, { type: "edit", target: 6, value: "wrong root" })).toThrow(
+      /execution fact/,
+    );
+    expect(log.events).toHaveLength(count);
+    const summaryLog = sample();
+    summaryLog.append({
+      type: "compaction",
+      at: "",
+      summary: "Earlier work",
+      coversFrom: 2,
+      coversUpTo: 5,
+    });
+    summaryLog.append({ type: "user/message", at: "", text: "after compaction" });
+    changeContext(summaryLog, { type: "rewind", target: 6 });
+    expect(deriveMessages(summaryLog.events).at(-1)?.content).toBe("u2");
   });
 });
 
@@ -197,67 +454,6 @@ describe("界面命令", () => {
       .lines(100)
       .map((l) => l.replace(ansi, ""))
       .join("\n");
-
-  it("摘要覆盖区不接受无效修改或跨区回退,可见区修改仍进入下一请求", async () => {
-    const log = sample();
-    log.append({ type: "context/edit", at: "", target: 2, field: "text", value: "edited a1" });
-    log.append({
-      type: "compaction",
-      at: "",
-      summary: "Earlier work including a2",
-      coversFrom: 2,
-      coversUpTo: 5,
-    });
-    log.append({ type: "user/message", at: "", text: "message after compaction" });
-    const sent: Message[][] = [];
-    const a = app(log, sent);
-    try {
-      const before = deriveMessages(log.events);
-      const events = log.events.length;
-      const rows = compositionRows(log.events).rows;
-      const summary = rows.find((row) => row.stages.some((stage) => stage.startsWith("summary")));
-      if (!summary) throw new Error("Missing summary row");
-      expect(actionsFor(log.events, summary, rows.length).map((item) => item.action)).not.toContain(
-        "rewind",
-      );
-      for (const operation of ["2 text new answer", "drop 2", "restore 2", "rewind 2"]) {
-        await a.command(`/edit ${operation}`);
-        expect(log.events).toHaveLength(events);
-        expect(deriveMessages(log.events)).toEqual(before);
-      }
-      expect(text(a)).toContain("compacted");
-      await a.command("/edit 5 content updated tail");
-      await a.submit("Confirm current input");
-      expect(sent[0]).toContainEqual(expect.objectContaining({ content: "updated tail" }));
-      expect(sent[0]).toContainEqual(
-        expect.objectContaining({ content: expect.stringContaining("Earlier work including a2") }),
-      );
-      await a.command(`/edit rewind ${summary.event}`);
-      const rewound = deriveMessages(log.events);
-      expect(rewound).toContainEqual(expect.objectContaining({ content: "updated tail" }));
-      expect(rewound).not.toContainEqual(
-        expect.objectContaining({ content: "message after compaction" }),
-      );
-    } finally {
-      a.stop();
-    }
-  });
-
-  it("已清除的工具结果拒绝无效编辑,保留模型实际看到的占位内容", async () => {
-    const log = sample();
-    log.append({ type: "compaction", at: "", cleared: [3] });
-    const a = app(log);
-    try {
-      const before = deriveMessages(log.events);
-      const events = log.events.length;
-      await a.command("/edit 3 content replacement result");
-      expect(log.events).toHaveLength(events);
-      expect(deriveMessages(log.events)).toEqual(before);
-      expect(text(a)).toContain("cleared from current input");
-    } finally {
-      a.stop();
-    }
-  });
 
   it("/edit 内联文本追加 context/edit 并打印后果;摘要思考拒绝编辑;/drop;/edits", async () => {
     const log = sample();

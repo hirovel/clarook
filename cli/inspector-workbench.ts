@@ -12,6 +12,7 @@ import {
 import type { AgentEvent } from "../src/events.js";
 import { compactionState, editState, type Message } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
+import { systemAt, systemParts } from "../src/system-prompt.js";
 import { firstLine, unchangedPrefix } from "./cards.js";
 import { compactionChanges, compactionSourceLines } from "./inspector-compactions.js";
 import { type CompositionRow, compositionRows } from "./inspector-composition.js";
@@ -72,9 +73,9 @@ export function workbench(input: WorkbenchInput): Workbench {
   const keep = input.lastSent ? unchangedPrefix(input.lastSent, messages) : undefined;
   const state = compactionState(events);
   const ed = editState(events);
-  const start = events.find((e) => e.type === "session/start");
-  const sections =
-    start?.type === "session/start" ? (start.sections ?? []).map((s) => shortSection(s.name)) : [];
+  const sections = systemParts(systemAt(events))
+    .filter((section) => section.enabled)
+    .map((section) => shortSection(section.name));
   const lastRequest = events.reduce((last, e, i) => (e.type === "request" ? i : last), -1);
   const droppedBy = new Map<number, number>();
   events.forEach((e, i) => {

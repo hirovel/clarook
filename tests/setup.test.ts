@@ -15,7 +15,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyPreset, parseCommonArgs, settingsFromArgs } from "../cli/args.js";
 import type { Bootstrap } from "../cli/bootstrap.js";
 import { bootstrap } from "../cli/bootstrap.js";
-import { currentSystem, sectionStates } from "../cli/prompt-sections.js";
 import * as registry from "../cli/registry.js";
 import { SessionInputs } from "../cli/session-inputs.js";
 import { readRequestRecording } from "../cli/session-records.js";
@@ -29,6 +28,7 @@ import { Recording } from "../src/recording.js";
 import { directoryAt } from "../src/session-directory.js";
 import { defaultPreset, getSetting, SETTINGS, setSetting } from "../src/settings.js";
 import { mergeSetup, SETUP_GUIDE, SETUP_SECTIONS, setupSnapshot } from "../src/setup.js";
+import { systemAt, systemParts, systemText } from "../src/system-prompt.js";
 import { testImage } from "./helpers/image.js";
 import { VirtualTerminal } from "./helpers/virtual-terminal.js";
 
@@ -951,13 +951,15 @@ describe("setup data and persistence", () => {
       expect(host.file()).toBe(legacyFile);
       expect(host.app().setup().values.planReminder).toBe(5);
       expect(host.app().setup().values.model).toBe("p/m");
-      expect(currentSystem(EventLog.load(legacyFile).events)).toBe("old instructions");
+      expect(systemText(systemAt(EventLog.load(legacyFile).events))).toBe("old instructions");
       expect(directoryAt(EventLog.load(legacyFile).events)?.cwd).toBe(dir);
       config.defaults = { ...config.defaults, prompt: { sections: ["env"] } };
       await host.switchSession({ kind: "resume", file: legacyFile, source: "defaults" });
       const changed = EventLog.load(legacyFile).events;
-      expect(currentSystem(changed)).not.toBe("old instructions");
-      expect(sectionStates(changed)?.map((s) => s.name)).toEqual(["Environment"]);
+      expect(systemText(systemAt(changed))).not.toBe("old instructions");
+      expect(systemParts(systemAt(changed)).map((section) => section.name)).toEqual([
+        "Environment",
+      ]);
       expect(changed[0]).toMatchObject({ system: "old instructions" });
       const reviewFile = join(dir, "review-only.jsonl");
       const reviewLog = new EventLog(reviewFile);

@@ -1243,10 +1243,9 @@ describe("命令的分支", () => {
       type: "session/start",
       at: "",
       model: "m",
-      system: "ROLE ENV",
-      sections: [
-        { name: "role", chars: 4 },
-        { name: "env", source: "cwd", chars: 3 },
+      system: [
+        { id: "role", name: "role", text: "ROLE", enabled: true },
+        { id: "env", name: "env", source: "cwd", text: "ENV", enabled: true },
       ],
     });
     log.append({ type: "user/message", at: "", text: "<instructions>x</instructions>" });

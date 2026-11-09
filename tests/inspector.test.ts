@@ -46,11 +46,7 @@ async function session(): Promise<{ log: EventLog; provider: Provider }> {
     type: "session/start",
     at: "2026-09-01T09:00:00.000Z",
     model: "fake",
-    system: "你是助手",
-    sections: [
-      { name: "角色与规则", chars: 4 },
-      { name: "环境", chars: 60 },
-    ],
+    system: [{ id: "role", name: "角色与规则", text: "你是助手", enabled: true }],
   });
   log.append({ type: "user/message", at: "2026-09-01T09:00:01.000Z", text: "读一下" });
   const provider = scripted([
@@ -204,7 +200,6 @@ describe("请求检视器", () => {
     expect(doc).not.toContain("├ 角色与规则");
     insp.handleInput("\r");
     expect(text()).toContain("├ 角色与规则");
-    expect(text()).toContain("├ 环境  15 tok · 94%");
     expect(text()).toContain("[−] 1. system");
     expect(text()).toContain("[+] 2. user");
     insp.handleInput("\x1b[B");
@@ -479,7 +474,7 @@ describe("请求检视器", () => {
     insp.handleInput("2");
     doc = text();
     expect(doc).toContain('"type": "session/start"');
-    expect(doc).toContain('"system": "你是助手"');
+    expect(doc).toContain('"text": "你是助手"');
     insp.handleInput("3");
     expect(text()).toContain("position");
     insp.handleInput("1");
@@ -497,10 +492,22 @@ describe("请求检视器", () => {
 
   it("压缩请求的发送分区显示真实发出的消息(前缀 + 摘要指示),线路 JSON 同源", () => {
     const events: AgentEvent[] = [
-      { type: "session/start", at: "t", model: "fake", system: "S" },
+      {
+        type: "session/start",
+        at: "t",
+        model: "fake",
+        system: [{ id: "original", name: "Original", text: "S", enabled: true }],
+      },
       { type: "user/message", at: "t", text: "U1" },
       { type: "assistant/message", at: "t", text: "A1", toolCalls: [], stopReason: "end" },
       { type: "user/message", at: "t", text: "U2" },
+      {
+        type: "context/edit",
+        at: "t",
+        target: 0,
+        field: "system",
+        value: [{ id: "later", name: "Later", text: "S", enabled: true }],
+      },
       { type: "tools/snapshot", at: "t", tools: defs },
       {
         type: "request",
@@ -524,6 +531,11 @@ describe("请求检视器", () => {
     const log = new EventLog();
     for (const e of events) log.append(e);
     const { insp, text } = build(log, scripted([]));
+    const first = insp.records()[0];
+    if (!first) throw new Error("missing request");
+    const historical = insp.sectionLines(first, 3).map(stripAnsi).join("\n");
+    expect(historical).toContain("Original [original]");
+    expect(historical).not.toContain("Later [later]");
     insp.handleInput("\r");
     insp.handleInput("3");
     const doc = text();

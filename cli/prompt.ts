@@ -1,6 +1,5 @@
-// 系统提示词组装。CLI 层的纯函数,内核不知道它:内核只收到最终字符串并存进 session/start。
-// 段列表是数据不是字符串拼接:哪几段、什么顺序、放 system 还是首条 user 消息,都由配置或预设决定,
-// 检视器与 /context 按段读取。
+// 系统指令资源发现与分段构造。来源由 CLI 读取,段身份与正文一起入日志,全文由内核统一渲染。
+// 哪几段、什么顺序、放 system 还是首条 user 消息,由配置或预设决定。
 // 调查共识直接采用:项目指令文件按目录层级根在前、cwd 在后拼接;向上搜索止于 git 根;总预算加降级;替换与追加并存。
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -9,6 +8,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { parse } from "yaml";
 import { clarookHome, type PromptSectionName, type SkillsConfig } from "../src/config.js";
 import { DEFAULT_SKILL_SOURCES, parseSkillSources } from "../src/settings.js";
+import type { SystemSection } from "../src/system-prompt.js";
 import { splitMemory } from "./tools/memory.js";
 
 export type PromptSection = {
@@ -224,14 +224,6 @@ export function expandSkill(skill: Skill, argText: string): string {
   return argText.trim() ? `${instructions}\n\nUser request:\n${argText}` : instructions;
 }
 
-/** 非空段以空行相接;段内文本原样。 */
-export function composeSystemPrompt(sections: PromptSection[]): string {
-  return sections
-    .map((s) => s.text.trim())
-    .filter(Boolean)
-    .join("\n\n");
-}
-
 /** 从 dir 向上找含 .git 的目录;找不到返回 undefined。 */
 export function findGitRoot(dir: string): string | undefined {
   let cur = resolve(dir);
@@ -418,24 +410,22 @@ export type BuildPromptOptions = {
 };
 
 export type BuiltPrompt = {
-  /** 系统提示词全文。 */
-  text: string;
-  /** 进了系统提示词的段。 */
-  sections: PromptSection[];
+  /** 段本身就是会话事实;全文由统一渲染函数派生。 */
+  sections: SystemSection[];
   /** 改放首条 user 消息的段(instructionsAs = user 时的项目指令与记忆)。 */
   preamble: PromptSection[];
   files: InstructionFile[];
 };
 
 export function buildSystemPrompt(opts: BuildPromptOptions): BuiltPrompt {
-  if (opts.replace !== undefined) {
-    const sections: PromptSection[] = [{ name: "Custom", text: opts.replace }];
-    if (opts.append) sections.push({ name: SECTION_LABELS.append, text: opts.append });
-    return { text: composeSystemPrompt(sections), sections, preamble: [], files: [] };
-  }
   const order = opts.sections ?? DEFAULT_SECTION_ORDER;
-  const project = discoverProjectInstructions(opts.cwd, opts.discover);
-  // 技能段只在被点名时才去扫目录,不点名连磁盘都不碰。
+  const part = (id: string, section: PromptSection): SystemSection => ({
+    id,
+    ...section,
+    text: section.text.trim(),
+    enabled: true,
+  });
+  // 自动技能目录有独立身份,自定义角色正文也不会夺走它的更新资格。
   const skills = order.includes("skills")
     ? skillsSection(
         discoverSkills(opts.cwd, {
@@ -447,6 +437,20 @@ export function buildSystemPrompt(opts: BuildPromptOptions): BuiltPrompt {
         opts.skills,
       )
     : undefined;
+  if (opts.replace !== undefined) {
+    return {
+      sections: [
+        part("custom", { name: "Custom", text: opts.replace }),
+        ...(skills ? [part("skills", skills)] : []),
+        ...(opts.append
+          ? [part("append", { name: SECTION_LABELS.append, text: opts.append })]
+          : []),
+      ],
+      preamble: [],
+      files: [],
+    };
+  }
+  const project = discoverProjectInstructions(opts.cwd, opts.discover);
   const available: Partial<Record<PromptSectionName, PromptSection>> = {
     role: { name: SECTION_LABELS.role, text: opts.base },
     env: environmentSection(opts.cwd, opts.env),
@@ -456,13 +460,13 @@ export function buildSystemPrompt(opts: BuildPromptOptions): BuiltPrompt {
     ...(opts.append && { append: { name: SECTION_LABELS.append, text: opts.append } }),
   };
   const toUser = opts.instructionsAs === "user";
-  const sections: PromptSection[] = [];
+  const sections: SystemSection[] = [];
   const preamble: PromptSection[] = [];
-  for (const name of order) {
+  for (const name of new Set(order)) {
     const s = available[name];
     if (!s) continue;
     if (toUser && (name === "instructions" || name === "memory")) preamble.push(s);
-    else sections.push(s);
+    else sections.push(part(name, s));
   }
-  return { text: composeSystemPrompt(sections), sections, preamble, files: project.files };
+  return { sections, preamble, files: project.files };
 }

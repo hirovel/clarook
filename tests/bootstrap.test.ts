@@ -16,6 +16,7 @@ import {
 import { createTuiApp } from "../cli/tui-app.js";
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
+import { systemText } from "../src/system-prompt.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
 let tmp: string | undefined;
@@ -242,12 +243,12 @@ describe("会话恢复", () => {
     ).resolves.toHaveProperty("strategy");
   });
 
-  it("新会话的系统提示词带分段构成(名称、来源、字符数)", () => {
+  it("新会话直接保存具名段正文和启用状态", () => {
     tmp = mkdtempSync(join(tmpdir(), "ak-prompt-"));
     const p = systemPromptFor({}, tmp);
-    expect(p.sections.map((s) => s.name)).toEqual(["Role and rules", "Environment"]);
-    expect(p.sections.every((s) => s.chars > 0)).toBe(true);
-    expect(p.text).toContain("working directory: ");
+    expect(p.system.map((s) => s.id)).toEqual(["role", "env"]);
+    expect(p.system.every((s) => s.enabled && s.text.length > 0)).toBe(true);
+    expect(systemText(p.system)).toContain("working directory: ");
   });
 });
 

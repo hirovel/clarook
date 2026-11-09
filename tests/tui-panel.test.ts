@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ClipboardInput } from "../cli/clipboard-input.js";
-import { actionsFor, compositionRows, consequenceOf } from "../cli/inspector-composition.js";
 import { createTuiApp, type TuiApp, type TuiAppDeps } from "../cli/tui-app.js";
-import { type AgentEvent, now } from "../src/events.js";
+import { changeContext } from "../src/context-edit.js";
+import { now } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { deriveMessages, type Message } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
@@ -100,79 +100,6 @@ function bootB(provider: Provider, over: Partial<TuiAppDeps> = {}, log = new Eve
 }
 
 describe("上下文面板的动作与后果", () => {
-  it("动作按消息类型与编辑状态增减;后果算出重算条数、缓存失效点、Anthropic 丢的思考块", () => {
-    const events: AgentEvent[] = [
-      { type: "session/start", at: now(), model: "m", system: "sys" },
-      { type: "user/message", at: now(), text: "q" },
-      {
-        type: "assistant/message",
-        at: now(),
-        text: "a",
-        toolCalls: [{ id: "c1", name: "read", args: {} }],
-        stopReason: "tool",
-        reasoning: "why",
-        reasoningKind: "full",
-        opaque: {
-          kind: "anthropic-thinking",
-          model: "m",
-          blocks: [{ type: "thinking", thinking: "read the file", signature: "sig" }],
-        },
-      },
-      {
-        type: "tool/result",
-        at: now(),
-        callId: "c1",
-        name: "read",
-        content: "file",
-        isError: false,
-      },
-      { type: "assistant/message", at: now(), text: "done", toolCalls: [], stopReason: "end" },
-      { type: "context/edit", at: now(), target: 3, field: "content", value: "file (edited)" },
-    ];
-    const { rows } = compositionRows(events);
-    const asst = rows.find((r) => r.event === 2) as (typeof rows)[number];
-    const tool = rows.find((r) => r.event === 3) as (typeof rows)[number];
-    const last = rows[rows.length - 1] as (typeof rows)[number];
-    expect(actionsFor(events, asst, rows.length).map((a) => a.action)).toEqual([
-      "view",
-      "edit",
-      "edit-reasoning",
-      "drop",
-      "rewind",
-      "retry",
-      "fork",
-    ]);
-    expect(actionsFor(events, tool, rows.length).map((a) => a.action)).toEqual([
-      "view",
-      "edit",
-      "compare",
-      "restore",
-      "rewind",
-      "retry",
-      "fork",
-    ]);
-    expect(actionsFor(events, last, rows.length).map((a) => a.action)).not.toContain("rewind");
-    const anthropic = {
-      model: "m",
-      fields: { protocol: "anthropic", sends: [], reads: [], ignores: [] },
-      complete: async () => ({}) as AssistantTurn,
-    } as unknown as Provider;
-    const edit = consequenceOf("edit", asst, rows, events, anthropic);
-    expect(edit).toContain("Later input: 2 messages");
-    expect(edit).toContain("input changes from #2; hit impact unknown");
-    expect(edit).toContain("Anthropic drops 1 thinking block");
-    expect(consequenceOf("drop", asst, rows, events)).toContain("with its 1 tool result");
-    expect(consequenceOf("rewind", tool, rows, events)).toContain("Input: keep through #3");
-    expect(consequenceOf("view", tool, rows, events)).toBe("read-only · nothing changes");
-    const initial = events.slice(0, 2);
-    const initialRows = compositionRows(initial).rows;
-    const initialUser = initialRows[1];
-    if (!initialUser) throw new Error("missing initial user message");
-    expect(actionsFor(initial, initialUser, initialRows.length).map((a) => a.action)).not.toContain(
-      "retry",
-    );
-  });
-
   it("打字形态:/edit compare、restore、rewind 落到事件;首屏随第一条消息撤掉", async () => {
     const provider: Provider = {
       model: "m",
@@ -451,6 +378,16 @@ describe("面板动作菜单", () => {
     await tick();
     expect(doc(app)).toContain("rewound to event #");
     expect(log.events.filter((e) => e.type === "context/drop").length).toBeGreaterThan(0);
+    // 编辑器打开后的投影变化仍须重新检查,不能把旧字段许可当作保存授权。
+    await app.command("/edit 1 content");
+    terminal.feed("stale editor value");
+    changeContext(log, { type: "drop", target: 1 });
+    const afterDrop = log.events.length;
+    terminal.feed("\t");
+    terminal.feed("\r");
+    expect(log.events).toHaveLength(afterDrop);
+    expect(plain(app.dialogLines().join("\n"))).toContain("excluded from current input");
+    terminal.feed("\x1b");
     app.stop();
   });
 });

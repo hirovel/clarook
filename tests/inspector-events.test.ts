@@ -20,8 +20,7 @@ function events(): AgentEvent[] {
       type: "session/start",
       at,
       model: "m",
-      system: "sys",
-      sections: [{ name: "Role", chars: 3 }],
+      system: [{ id: "role", name: "Role", text: "sys", enabled: true }],
     },
     { type: "user/message", at, text: "hello there" },
     {

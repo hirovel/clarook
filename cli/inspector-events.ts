@@ -14,6 +14,7 @@ import {
 } from "../src/messages.js";
 import type { Provider } from "../src/provider.js";
 import { directoryAt } from "../src/session-directory.js";
+import { systemParts, systemText } from "../src/system-prompt.js";
 import { compactionDecisionText } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
 import { clock, firstLine, fmtMs, fmtTok, indent, pctOf } from "./inspector-format.js";
@@ -121,7 +122,7 @@ export function eventSummary(
     case "session/start":
       return {
         sign: G.note,
-        text: `system prompt · ${e.model} · ${e.sections?.length ?? 0} sections`,
+        text: `system prompt · ${e.model} · ${systemParts(e.system).length} sections`,
         tok: eventTokens(e),
       };
     case "user/message":
@@ -238,11 +239,11 @@ export function eventSummary(
                 : t?.type === "tool/result"
                   ? estimateTokens(t.content)
                   : t?.type === "session/start"
-                    ? estimateTokens(t.system)
+                    ? estimateTokens(systemText(t.system))
                     : 0;
       return {
         sign: G.edited,
-        text: `#${e.target}.${e.field} · ${before} → ${estimateTokens(e.value)} tok${e.note ? ` · ${e.note}` : ""}`,
+        text: `#${e.target}.${e.field} · ${before} → ${estimateTokens(e.field === "system" ? systemText(e.value) : e.value)} tok${e.note ? ` · ${e.note}` : ""}`,
         tok: undefined,
       };
     }
@@ -369,9 +370,15 @@ export function eventViewLines(
       break;
     case "session/start":
       out.push(row("model", e.model));
-      for (const s of e.sections ?? [])
-        out.push(row(s.name, `≈${Math.ceil(s.chars / 4)} tok${s.source ? ` · ${s.source}` : ""}`));
-      out.push(...block("system prompt", e.system));
+      for (const section of systemParts(e.system)) {
+        out.push(
+          row(
+            "section",
+            `${section.name} [${section.id}] · ${section.enabled ? "on" : "off"}${section.source ? ` · ${section.source}` : ""}`,
+          ),
+        );
+        out.push(...block("system prompt", section.text));
+      }
       break;
     case "user/message":
       out.push(row("tokens", `≈${eventTokens(e)}`));
@@ -497,7 +504,15 @@ export function eventViewLines(
       out.push(row("target", `#${e.target} · ${events[e.target]?.type ?? "?"}`));
       out.push(row("field", e.field));
       if (e.note) out.push(row("note", e.note));
-      out.push(...block("new value", e.value));
+      if (e.field === "system") {
+        for (const section of systemParts(e.value))
+          out.push(
+            ...block(
+              `${section.name} [${section.id}] · ${section.enabled ? "on" : "off"}`,
+              section.text,
+            ),
+          );
+      } else out.push(...block("new value", e.value));
       break;
     case "context/drop":
       out.push(row("target", `#${e.target} · ${events[e.target]?.type ?? "?"}`));
@@ -649,7 +664,7 @@ export function projectionLines(
   for (const { x, k: k2 } of edits)
     if (x.type === "context/edit")
       out.push(
-        `${c.soft("edit".padEnd(12))} ${c.ink(`#${k2} · ${x.field} · ${estimateTokens(x.value)} tok${x.note ? ` · ${x.note}` : ""}`)}`,
+        `${c.soft("edit".padEnd(12))} ${c.ink(`#${k2} · ${x.field} · ${estimateTokens(x.field === "system" ? systemText(x.value) : x.value)} tok${x.note ? ` · ${x.note}` : ""}`)}`,
       );
   out.push("", c.faint("The event itself never changes; Ctrl+E shows the projection it feeds."));
   return out;

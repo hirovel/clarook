@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import type { Terminal } from "@earendil-works/pi-tui";
 import { DEFAULT_APPROVAL } from "../src/approval.js";
 import type { Preset } from "../src/config.js";
+import { changeContext } from "../src/context-edit.js";
 import { now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { deriveMessages } from "../src/messages.js";
@@ -443,13 +444,10 @@ export async function startTuiSession(options: {
             if (prompt) {
               const target = session.log.events.findIndex((e) => e.type === "session/start");
               if (target >= 0)
-                session.log.append({
-                  type: "context/edit",
-                  at: now(),
+                changeContext(session.log, {
+                  type: "set-system",
                   target,
-                  field: "system",
-                  value: prompt.text,
-                  sections: prompt.sections,
+                  value: prompt.system,
                   note: `Session setup: regenerate prompt from ${source}`,
                 });
               if (prompt.preamble.length)

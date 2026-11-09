@@ -9,17 +9,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { systemPromptFor } from "../cli/bootstrap.js";
 import { RequestInspector } from "../cli/inspector.js";
 import { coveredLines, workbench, workbenchLine } from "../cli/inspector-workbench.js";
-import {
-  currentSystem,
-  replaceSystemSection,
-  sectionStates,
-  systemWithSections,
-} from "../cli/prompt-sections.js";
 import { createTuiApp } from "../cli/tui-app.js";
+import { changeContext } from "../src/context-edit.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
-import { deriveMessages } from "../src/messages.js";
+import { deriveMessages, requestMessages } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
+import { systemAt, systemParts, systemText } from "../src/system-prompt.js";
 import { defineTool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
@@ -280,7 +276,7 @@ describe("工作台的界面", () => {
     };
     const log = new EventLog();
     const p = systemPromptFor({}, tmp, { home: tmp, root: tmp });
-    log.append({ type: "session/start", at, model: "m", system: p.text, sections: p.sections });
+    log.append({ type: "session/start", at, model: "m", system: p.system });
     const term = new VirtualTerminal(120, 40);
     const app = createTuiApp({
       terminal: term,
@@ -380,105 +376,176 @@ describe("工作台的界面", () => {
     app.stop();
   });
 
-  it("system 行 Enter 列段并翻:落成对 #0 的编辑,行标 ✎,缓存线说明从头重算;切不回段的日志只读", async () => {
-    const { app, log, ins } = boot();
+  it("system 段可切换与编辑,关闭段保留正文;命令按段id修改,长列表操作保持目标", async () => {
+    const { app, log, ins, term } = boot();
+    const initial = systemParts(systemAt(log.events));
+    const environment = initial.find((section) => section.id === "env");
+    if (!environment) throw new Error("missing environment section");
+    const compare = async () => {
+      await app.command("/edit compare 0");
+      const output = app.lines(120).map(stripAnsi).join("\n");
+      return output.slice(output.lastIndexOf("System document comparison"));
+    };
     await app.submit("hi");
+    app.setDraft("keep this draft");
     app.inspector.openComposition(0);
-    let s = ins();
-    expect(s).toMatch(/› ·\s+#0\s+system/);
     app.inspector.key("\r");
-    s = ins();
-    expect(s).toContain("System prompt");
-    expect(s).toContain("Changes this session's next input");
-    expect(s).toMatch(/1\s+Role and rules\s+on/);
-    expect(s).toMatch(/2\s+Environment\s+on/);
+    expect(ins()).toContain("Environment [env]");
     app.inspector.key("2");
     app.inspector.key("\r");
     await tick();
-    const edit = log.events.at(-1);
-    expect(edit).toMatchObject({
-      type: "context/edit",
-      target: 0,
-      field: "system",
-      note: "sections: Role and rules",
+    expect(systemParts(systemAt(log.events)).find((section) => section.id === "env")).toEqual({
+      ...environment,
+      enabled: false,
     });
-    s = ins();
-    expect(s).toMatch(/2\s+Environment\s+off/);
+    expect(log.events.at(-1)).toMatchObject({ type: "context/edit", target: 0, field: "system" });
     app.inspector.key("\x1b");
-    s = ins();
-    expect(s).toMatch(/✎\s+#0\s+system/);
-    expect(s).toContain("same prefix through nothing");
-    const states = sectionStates(log.events);
-    expect(states?.map((x) => x.on)).toEqual([true, false]);
-    expect(systemWithSections(states ?? [], "Environment")).toBe(
-      log.events[0]?.type === "session/start" ? log.events[0].system : "",
-    );
-    const skillsEdit = replaceSystemSection(log.events, "Skills", {
-      name: "Skills",
-      text: "# Skills\n- review",
+    expect(ins()).toMatch(/✎\s+#0\s+system/);
+    expect(ins()).toContain("same prefix through nothing");
+    const toggled = await compare();
+    expect(toggled).toContain("- State: on");
+    expect(toggled).toContain("+ State: off");
+    expect(toggled).toContain(environment.text.split("\n").at(-1));
+    expect(toggled).not.toContain("(identical)");
+
+    // 不带段id打开列表,编辑动作使用真实文本编辑器,不覆盖关闭段或输入草稿。
+    await app.command("/edit 0 system");
+    app.inspector.key("1");
+    app.inspector.key("e");
+    expect(app.inspector.isOpen()).toBe(false);
+    term.feed("\r");
+    term.feed("MANUAL_REQUIREMENT_KEEP");
+    term.feed("\t");
+    term.feed("\r");
+    expect(systemText(systemAt(log.events))).toContain("MANUAL_REQUIREMENT_KEEP");
+    expect(systemParts(systemAt(log.events)).find((section) => section.id === "env")).toEqual({
+      ...environment,
+      enabled: false,
     });
-    if (!skillsEdit) throw new Error("missing catalog edit");
-    log.append(skillsEdit);
-    const after = sectionStates(log.events);
-    expect(after?.find((s) => s.name === "Environment")?.on).toBe(false);
-    expect(systemWithSections(after ?? [], "Environment")).toContain(
-      states?.find((s) => s.name === "Environment")?.text,
-    );
-    const recoverable = currentSystem(log.events) ?? "";
-    const customized = `${recoverable}\n\nMANUAL_REQUIREMENT_KEEP`;
-    await app.command(`/edit 0 system ${customized}`);
-    expect(sectionStates(log.events)).toBeUndefined();
-    const count = log.events.length;
-    app.inspector.openComposition(0);
-    app.inspector.key("\r");
+    expect(app.draft()).toBe("keep this draft");
+    await app.command("/edit 0 system env Edited environment");
+    expect(systemText(systemAt(log.events))).not.toContain("Edited environment");
+    expect(await compare()).toContain("+   Edited environment");
+    await app.command("/edit 0 system");
     app.inspector.key("2");
     app.inspector.key("\r");
+    expect(systemText(systemAt(log.events))).toContain("Edited environment");
+    expect(systemText(systemAt(log.events))).toContain("MANUAL_REQUIREMENT_KEEP");
+    app.inspector.close();
+    const count = log.events.length;
+    await app.command("/edit 0 system MANUAL_OVERWRITE");
     expect(log.events).toHaveLength(count);
-    expect(currentSystem(log.events)).toBe(customized);
-    expect(ins()).toContain("Read-only");
-    await app.command(`/edit 0 system ${recoverable}`);
-    expect(sectionStates(log.events)?.map((s) => s.on)).toEqual(after?.map((s) => s.on));
-    await app.command(`/edit 0 system ${customized}`);
-    const replacement = replaceSystemSection(log.events, "Skills", {
-      name: "Skills",
-      text: "# Skills\n- audit",
-    });
-    if (!replacement) throw new Error("missing customized catalog edit");
-    log.append(replacement);
-    expect(currentSystem(log.events)).toContain("MANUAL_REQUIREMENT_KEEP");
-    expect(currentSystem(log.events)).not.toContain("- review");
-    expect(currentSystem(log.events)?.match(/# Skills/g)).toHaveLength(1);
-    expect(sectionStates(log.events)).toBeDefined();
-    // 旧日志:段长度对不上全文 → 只读
-    const old = new EventLog();
-    old.append({
+    await app.submit("continue");
+    const request = log.events.reduce(
+      (last, event, index) => (event.type === "request" ? index : last),
+      -1,
+    );
+    expect(requestMessages(log.events, request)[0]?.content).toContain("MANUAL_REQUIREMENT_KEEP");
+    expect(requestMessages(log.events, request)[0]?.content).toContain("Edited environment");
+    expect(log.events[0]).toMatchObject({ system: initial });
+
+    // 已删除段不在编辑页中,但比较仍显示原段身份、来源与正文的删除。
+    changeContext(log, { type: "replace-section", target: 0, id: "env" });
+    const removed = await compare();
+    expect(removed).toContain('- Section: "env"');
+    expect(removed).toContain('- Name: "Environment"');
+    expect(removed).toContain(
+      `- Source: ${environment.source === undefined ? "(none)" : JSON.stringify(environment.source)}`,
+    );
+    expect(removed).toContain(`-   ${environment.text.split("\n")[0]}`);
+    // 空文档仍能比较所有删除的原文,也能继续增加个人正文。
+    changeContext(log, { type: "set-system", target: 0, value: [] });
+    const emptied = await compare();
+    expect(emptied).toContain('- Section: "role"');
+    expect(emptied).toContain('- Section: "env"');
+    expect(emptied).toContain("+ (empty system document)");
+    expect(emptied).not.toContain("Usage:");
+    await app.command("/edit 0 system");
+    expect(app.inspector.isOpen()).toBe(true);
+    app.inspector.close();
+    await app.command("/edit 0");
+    expect(app.inspector.isOpen()).toBe(true);
+    app.inspector.key("a");
+    expect(app.inspector.isOpen()).toBe(false);
+    term.feed("Personal instructions");
+    term.feed("\t");
+    term.feed("\r");
+    expect(systemParts(systemAt(log.events))).toEqual([
+      { id: "custom", name: "Custom", text: "Personal instructions", enabled: true },
+    ]);
+    // 再按同一入口编辑已有Custom,不产生第二个同身份段。
+    await app.command("/edit 0 system");
+    app.inspector.key("a");
+    term.feed(" stay here");
+    term.feed("\t");
+    term.feed("\r");
+    expect(systemParts(systemAt(log.events))).toHaveLength(1);
+    await app.submit("check personal instructions");
+    const customRequest = log.events.reduce(
+      (last, event, index) => (event.type === "request" ? index : last),
+      -1,
+    );
+    expect(requestMessages(log.events, customRequest)[0]?.content).toBe(
+      "Personal instructions stay here",
+    );
+
+    // 原生Custom正文中的段标签不能伪装成真正的新段,实际输入不同必须能比较。
+    const custom = new EventLog();
+    custom.append({
       type: "session/start",
       at,
       model: "m",
-      system: "a b c",
-      sections: [{ name: "x", chars: 99 }],
+      system: 'A\n\nSection: "b"\nName: "B"\nState: on\nSource: (none)\nText:\nB',
     });
-    expect(sectionStates(old.events)).toBeUndefined();
-    // 自定义段很多时,选中的最后一段必须可见且操作目标不随滚动改变。
+    const customApp = createTuiApp({
+      terminal: new VirtualTerminal(120, 40),
+      log: custom,
+      provider: app.agent.provider,
+      tools: [],
+      compaction: { strategy: async () => null, window: 100000, reserveTokens: 1000 },
+      reserveTokens: 1000,
+      info: { model: "m", providerName: "p", sessionFile: "custom" },
+      onExit() {},
+    });
+    try {
+      customApp.inspector.openComposition(0);
+      customApp.inspector.key("\r");
+      expect(customApp.inspector.lines(120).map(stripAnsi).join("\n")).toContain("Custom [custom]");
+      customApp.inspector.close();
+      changeContext(custom, {
+        type: "set-system",
+        target: 0,
+        value: [
+          { id: "custom", name: "Custom", text: "A", enabled: true },
+          { id: "b", name: "B", text: "B", enabled: true },
+        ],
+      });
+      expect(deriveMessages(custom.events)[0]?.content).toBe("A\n\nB");
+      await customApp.command("/edit compare 0");
+      const output = customApp.lines(120).map(stripAnsi).join("\n");
+      const compared = output.slice(output.lastIndexOf("System document comparison"));
+      expect(compared).not.toContain("(identical)");
+      expect(compared).toContain('-   Section: "b"');
+      expect(compared).toContain('+ Section: "b"');
+    } finally {
+      customApp.stop();
+    }
+
     const sections = Array.from({ length: 18 }, (_, i) => ({
+      id: `section-${i + 1}`,
       name: `Section ${i + 1}`,
       text: `Body ${i + 1}`,
+      enabled: true,
     }));
     const long = new EventLog();
-    long.append({
-      type: "session/start",
-      at,
-      model: "m",
-      system: sections.map((s) => s.text).join("\n\n"),
-      sections: sections.map((s) => ({ name: s.name, chars: s.text.length })),
-    });
+    long.append({ type: "session/start", at, model: "m", system: sections });
     const toggles: string[] = [];
     const picker = new RequestInspector({
       events: () => long.events,
       providerFor: () => undefined,
       tools: () => [],
       rows: () => 12,
-      onSection: (name) => toggles.push(name),
+      onSection: (_target, section) => toggles.push(section),
       onClose() {},
       requestRender() {},
     });
@@ -489,7 +556,7 @@ describe("工作台的界面", () => {
     expect(view).toHaveLength(12);
     expect(view.map(stripAnsi).join("\n")).toMatch(/› 18\s+Section 18/);
     picker.handleInput("\r");
-    expect(toggles).toEqual(["Section 18"]);
+    expect(toggles).toEqual(["section-18"]);
     picker.handleInput("\x1b[H");
     picker.render(60);
     picker.handleInput("\x1b[6~");

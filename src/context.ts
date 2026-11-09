@@ -1,6 +1,7 @@
 import type { AgentEvent, Usage } from "./events.js";
 import { deriveMessages, type Message, userShellText } from "./messages.js";
 import type { ToolDef } from "./provider.js";
+import { systemText } from "./system-prompt.js";
 
 /**
  * 上下文构成投影:当前模型可见内容按类别的 token 分布。
@@ -69,7 +70,7 @@ export function estimateInput(
 export function eventTokens(e: AgentEvent): number {
   switch (e.type) {
     case "session/start":
-      return estimateTokens(e.system);
+      return estimateTokens(systemText(e.system));
     case "session/directory":
       return estimateTokens(e.environment);
     case "user/message":

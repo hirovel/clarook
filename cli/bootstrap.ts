@@ -25,16 +25,11 @@ import { planTool } from "../src/plan.js";
 import { recordSessionDirectory } from "../src/session-directory.js";
 import { defaultPreset, setSetting } from "../src/settings.js";
 import { replaceSetup } from "../src/setup.js";
+import type { SystemSection } from "../src/system-prompt.js";
 import type { Tool } from "../src/tools.js";
 import { applyPreset, type CommonArgs, parseCommonArgs } from "./args.js";
 import type { ModelChoice, ModelSettings } from "./model-settings.js";
-import {
-  buildSystemPrompt,
-  type DiscoverOptions,
-  findGitRoot,
-  type PromptSection,
-  type Skill,
-} from "./prompt.js";
+import { buildSystemPrompt, type DiscoverOptions, findGitRoot, type Skill } from "./prompt.js";
 import {
   capabilityNote,
   fetchRegistry,
@@ -309,22 +304,13 @@ type PromptArgs = Pick<
   | "skillsSources"
 >;
 
-// chars 是修剪后的长度:composeSystemPrompt 修剪每段再以空行相接,所以各段长度加空行正好等于全文,
-// 界面据此把系统提示词切回段(上下文面板的段开关)。
-const meta = (s: PromptSection) => ({
-  name: s.name,
-  ...(s.source && { source: s.source }),
-  chars: s.text.trim().length,
-});
-
 export function systemPromptFor(
   args: PromptArgs,
   cwd = process.cwd(),
   /** 发现目录的覆盖(测试用:临时的用户目录与仓库根)。 */
   discover?: DiscoverOptions,
 ): {
-  text: string;
-  sections: { name: string; source?: string; chars: number }[];
+  system: SystemSection[];
   /** 改放首条 user 消息的段(--instructions-as user)。 */
   preamble: { name: string; text: string }[];
 } {
@@ -350,8 +336,7 @@ export function systemPromptFor(
     },
   });
   return {
-    text: built.text,
-    sections: built.sections.map(meta),
+    system: built.sections,
     preamble: built.preamble.map((s) => ({ name: s.name, text: s.text })),
   };
 }
@@ -373,8 +358,7 @@ export function beginSession(
       type: "session/start",
       at: now(),
       model: choice.model,
-      system: p.text,
-      sections: p.sections,
+      system: p.system,
     });
     recordSessionDirectory(s.log, resolve(cwd));
     // instructionsAs = user:项目指令与记忆作为首条 user 消息进日志。

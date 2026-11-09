@@ -8,6 +8,7 @@
 import { contextBreakdown } from "../src/context.js";
 import { EventLog } from "../src/log.js";
 import { deriveMessages, requestMessages } from "../src/messages.js";
+import { systemAt } from "../src/system-prompt.js";
 import {
   COMPACTION_SECTIONS,
   collectCompactions,
@@ -26,8 +27,6 @@ if (!file) {
 
 const log = EventLog.load(file);
 const records = collectRequests(log.events);
-const start = log.events.find((e) => e.type === "session/start");
-const sections = start?.type === "session/start" ? start.sections : undefined;
 
 console.log(
   `\n${log.events.length} events · ${records.length} requests · ${deriveMessages(log.events).length} messages visible to the model`,
@@ -53,6 +52,7 @@ if (requestFlag >= 0) {
   console.log(`\n${"─".repeat(72)}\nrequest #${n} decisions:`);
   for (const l of decisionLines(rec)) console.log(l);
   const saved = readRequestRecording(file, log.events, rec.index);
+  const request = log.events[rec.index];
   if (saved?.error) console.error(saved.error);
   console.log(
     `\n${saved?.input ? "saved adapter input" : "input reconstructed from events"} for request #${n}:`,
@@ -60,7 +60,10 @@ if (requestFlag >= 0) {
   for (const l of sentLines(
     saved?.input?.messages ?? requestMessages(log.events, rec.index),
     false,
-    sections,
+    systemAt(
+      log.events,
+      request?.type === "request" ? (request.body?.prefixEvents ?? rec.index) : rec.index,
+    ),
     undefined,
     !!saved?.input,
   )) {
@@ -112,7 +115,8 @@ if (compactionFlag >= 0) {
 
 if (flags.includes("--messages")) {
   console.log(`\n${"─".repeat(72)}\ncurrent message projection (reconstructed from events):`);
-  for (const l of sentLines(deriveMessages(log.events), false, sections)) console.log(l);
+  for (const l of sentLines(deriveMessages(log.events), false, systemAt(log.events)))
+    console.log(l);
 }
 
 console.log(`\n${"─".repeat(72)}`);

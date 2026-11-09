@@ -5,6 +5,7 @@ import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { Agent } from "./agent.js";
 import { outsideCwd, ruleMatches } from "./approval.js";
+import { changeContext } from "./context-edit.js";
 import { type AgentEvent, now } from "./events.js";
 import { EventLog } from "./log.js";
 import {
@@ -14,10 +15,10 @@ import {
   maxSteps,
   type TurnDeps,
 } from "./loop.js";
-import { deriveMessages } from "./messages.js";
 import type { Provider } from "./provider.js";
 import { errorMessage } from "./providers/errors.js";
 import { recordUnresolvedCalls } from "./recovery.js";
+import { type SystemPrompt, systemAt } from "./system-prompt.js";
 import {
   composeDescription,
   type DescriptionParts,
@@ -30,7 +31,7 @@ import {
 
 export type ParentSnapshot = {
   events: readonly AgentEvent[];
-  system: string;
+  system: SystemPrompt;
   model: string;
 };
 
@@ -42,7 +43,7 @@ export type ScopeEntry = { scope: ContextScope; description: string };
 export type ScopeRegistry = Record<string, ScopeEntry>;
 
 /** 零继承:只有系统提示词。系统提示词缺省沿用父的。 */
-export function taskOnly(system?: string): ContextScope {
+export function taskOnly(system?: SystemPrompt): ContextScope {
   return (parent) => [
     { type: "session/start", at: now(), model: parent.model, system: system ?? parent.system },
   ];
@@ -510,8 +511,7 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
         if (!log) {
           const start = (entry as ScopeEntry).scope({
             events: opts.parent.events,
-            system:
-              deriveMessages(opts.parent.events).find((m) => m.role === "system")?.content ?? "",
+            system: systemAt(opts.parent.events) ?? "",
             model: provider.model,
           });
           log = new EventLog(pathFor(id));
@@ -527,11 +527,9 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
           }
           const systemTarget = start.findIndex((event) => event.type === "session/start");
           if (type?.system !== undefined && systemTarget >= 0)
-            log.append({
-              type: "context/edit",
-              at: now(),
+            changeContext(log, {
+              type: "set-system",
               target: systemTarget,
-              field: "system",
               value: type.system,
             });
         }

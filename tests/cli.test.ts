@@ -232,9 +232,9 @@ describe("真实入口(子进程)", () => {
     expect(sessions).toHaveLength(1);
     const sessionFile = join(project, "sessions", sessions[0] as string);
     const lines = readFileSync(sessionFile, "utf8").trim().split("\n");
-    const first = JSON.parse(lines[0] as string) as { type: string; sections?: unknown[] };
+    const first = JSON.parse(lines[0] as string) as { type: string; system?: unknown[] };
     expect(first.type).toBe("session/start");
-    expect(Array.isArray(first.sections)).toBe(true);
+    expect(Array.isArray(first.system)).toBe(true);
     expect(lines.some((l) => l.includes('"effort":"low"'))).toBe(true);
     const events = lines.map((line) => JSON.parse(line) as AgentEvent);
     const snapshotIndex = events.findIndex(

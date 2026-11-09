@@ -7,6 +7,7 @@ import { imageSummary } from "../src/images.js";
 import { composeContext, requestMessages } from "../src/messages.js";
 import { classifyError, type ErrorKind, hintFor } from "../src/providers/errors.js";
 import type { ChildInfo } from "../src/subagent.js";
+import { systemText } from "../src/system-prompt.js";
 import { sameReplayShape } from "../src/tool-replay.js";
 import {
   cacheNote,
@@ -603,8 +604,9 @@ export function render(ctx: TuiContext, e: AgentEvent, index: number, cwd?: stri
       break;
     case "context/edit":
       ctx.note(
-        c.soft(`· edited event #${e.target}.${e.field} (${e.value.length} chars)`) +
-          c.faint("\n  original kept · Ctrl+E current context"),
+        c.soft(
+          `· edited event #${e.target}.${e.field} (${(e.field === "system" ? systemText(e.value) : e.value).length} chars)`,
+        ) + c.faint("\n  original kept · Ctrl+E current context"),
       );
       break;
     case "context/drop": {

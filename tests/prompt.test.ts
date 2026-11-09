@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildSystemPrompt,
-  composeSystemPrompt,
   discoverProjectInstructions,
   environmentSection,
   findGitRoot,
 } from "../cli/prompt.js";
+import { systemText } from "../src/system-prompt.js";
 
 let tmp: string | undefined;
 afterEach(() => {
@@ -35,16 +35,6 @@ function tree(): { root: string; deep: string; home: string } {
 }
 
 describe("系统提示词组装", () => {
-  it("段列表以空行相接,空段跳过", () => {
-    expect(
-      composeSystemPrompt([
-        { name: "a", text: "A\n" },
-        { name: "b", text: "  " },
-        { name: "c", text: "C" },
-      ]),
-    ).toBe("A\n\nC");
-  });
-
   it("项目指令:全局 → git 根 → 中层 → cwd,每目录取一个,AGENTS.md 优先,不越过 git 根", () => {
     const { deep, home } = tree();
     const r = discoverProjectInstructions(deep, { home });
@@ -113,8 +103,8 @@ describe("系统提示词组装", () => {
       "Project instructions",
       "Appended",
     ]);
-    expect(full.text.startsWith("你是助手。")).toBe(true);
-    expect(full.text.endsWith("追加段")).toBe(true);
+    expect(systemText(full.sections).startsWith("你是助手。")).toBe(true);
+    expect(systemText(full.sections).endsWith("追加段")).toBe(true);
 
     const replaced = buildSystemPrompt({
       base: "x",
@@ -123,6 +113,6 @@ describe("系统提示词组装", () => {
       append: "追加段",
     });
     expect(replaced.sections.map((s) => s.name)).toEqual(["Custom", "Appended"]);
-    expect(replaced.text).toBe("完全自定义\n\n追加段");
+    expect(systemText(replaced.sections)).toBe("完全自定义\n\n追加段");
   });
 });

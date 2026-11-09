@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { type ContextAccess, changeContext } from "./context-edit.js";
 import { now } from "./events.js";
 import type { ImageInput } from "./images.js";
 import type { EventLog } from "./log.js";
 import { runTurn, type TurnDeps, type TurnOutcome } from "./loop.js";
-import { composeContext } from "./messages.js";
 import type { EffortLevel, Provider } from "./provider.js";
 import { RECORDING_FULL } from "./recording.js";
 import type { Tool } from "./tools.js";
@@ -248,20 +248,13 @@ export class Agent {
    * 重跑一步:丢掉最后一条(仍在投影里的)助手消息及其工具结果,不加新用户消息,
    * 从当前投影再发一次请求。编辑上下文之后立刻看效果的入口。丢弃以 context/drop 事件落盘,原文不动。
    */
-  async retry(): Promise<TurnOutcome> {
-    if (this.active) throw new Error("cannot retry while running; interrupt first");
+  async retry(access: ContextAccess = {}): Promise<TurnOutcome> {
     this.ensureStorage();
-    const events = this.opts.log.events;
-    const context = composeContext(events);
-    let target = -1;
-    for (let i = context.messages.length - 1; i >= 0; i--) {
-      if (context.messages[i]?.role === "assistant") {
-        target = context.provenance[i]?.event ?? -1;
-        break;
-      }
-    }
-    if (target < 0) throw new Error("no assistant message to retry in current context");
-    this.opts.log.append({ type: "context/drop", at: now(), target, note: "retry" });
+    changeContext(
+      this.opts.log,
+      { type: "retry" },
+      { ...access, running: this.running || access.running === true },
+    );
     return this.run();
   }
 

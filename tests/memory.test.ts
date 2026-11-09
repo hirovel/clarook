@@ -17,6 +17,7 @@ import {
 } from "../cli/tools/memory.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import { EventLog } from "../src/log.js";
+import { systemParts, systemText } from "../src/system-prompt.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
 let tmp: string | undefined;
@@ -131,7 +132,7 @@ describe("系统提示词段控制", () => {
       "Environment",
       "Project instructions",
     ]);
-    expect(off.text).not.toContain("别用 any");
+    expect(systemText(off.sections)).not.toContain("别用 any");
     const on = buildSystemPrompt({
       base: "B",
       cwd: root,
@@ -145,8 +146,8 @@ describe("系统提示词段控制", () => {
       "Project instructions",
       "Memory",
     ]);
-    expect(on.text).toContain("# Memory ");
-    expect(on.text).toContain("别用 any");
+    expect(systemText(on.sections)).toContain("# Memory ");
+    expect(systemText(on.sections)).toContain("别用 any");
   });
 
   it("段的选择与顺序、放到首条 user 消息", () => {
@@ -160,7 +161,7 @@ describe("系统提示词段控制", () => {
       sections: ["instructions", "role"],
     });
     expect(picked.sections.map((s) => s.name)).toEqual(["Project instructions", "Role and rules"]);
-    expect(picked.text.startsWith("# Project instructions")).toBe(true);
+    expect(systemText(picked.sections).startsWith("# Project instructions")).toBe(true);
 
     const asUser = buildSystemPrompt({
       base: "B",
@@ -172,7 +173,7 @@ describe("系统提示词段控制", () => {
     });
     expect(asUser.sections.map((s) => s.name)).toEqual(["Role and rules", "Environment"]);
     expect(asUser.preamble.map((s) => s.name)).toEqual(["Project instructions", "Memory"]);
-    expect(asUser.text).not.toContain("用 pnpm");
+    expect(systemText(asUser.sections)).not.toContain("用 pnpm");
   });
 
   it("beginSession:instructionsAs=user 的首条 user 消息", () => {
@@ -192,10 +193,9 @@ describe("系统提示词段控制", () => {
       expect(first?.type === "user/message" && first.text).toContain("用 pnpm");
       expect(first?.type === "user/message" && first.text).toContain("别用 any");
       const start = s.log.events[0];
-      expect(start?.type === "session/start" && start.sections?.map((x) => x.name)).toEqual([
-        "Role and rules",
-        "Environment",
-      ]);
+      expect(
+        start?.type === "session/start" && systemParts(start.system).map((x) => x.name),
+      ).toEqual(["Role and rules", "Environment"]);
     } finally {
       process.chdir(cwdBefore);
     }
