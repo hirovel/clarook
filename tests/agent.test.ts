@@ -240,6 +240,7 @@ describe("Agent", () => {
 
   it("interrupt:记 session/interrupt 事件并让 turn 以 aborted 收场", async () => {
     const log = newLog();
+    let rejectPending = false;
     const provider: Provider = {
       model: "fake",
       async complete(_msgs, _tools, opts) {
@@ -249,7 +250,16 @@ describe("Agent", () => {
         return { text: "半截", toolCalls: [], stopReason: "aborted" };
       },
     };
-    const agent = new Agent({ log, provider, tools: [] });
+    const agent = new Agent({
+      log,
+      provider,
+      tools: [],
+      onPendingChange() {
+        if (!rejectPending) return;
+        rejectPending = false;
+        throw new Error("pending observer failed");
+      },
+    });
 
     const running = agent.prompt("跑一个长任务");
     await tick();
@@ -260,15 +270,63 @@ describe("Agent", () => {
     expect(log.events.some((e) => e.type === "session/interrupt")).toBe(true);
     expect(log.events.at(-1)).toMatchObject({ type: "assistant/message", stopReason: "aborted" });
     expect(agent.running).toBe(false);
-    const failing = agent.prompt("日志写入失败时仍须取消");
-    await tick();
-    const append = vi.spyOn(log, "append").mockImplementationOnce(() => {
-      throw new Error("disk unavailable");
-    });
-    expect(() => agent.interrupt()).toThrow("disk unavailable");
-    append.mockRestore();
-    expect(await failing).toBe("aborted");
-    expect(agent.running).toBe(false);
+    for (const failure of ["recording", "pending"] as const) {
+      const failing = agent.prompt("通知或日志失败时仍须取消");
+      await tick();
+      const append =
+        failure === "recording"
+          ? vi.spyOn(log, "append").mockImplementationOnce(() => {
+              throw new Error("disk unavailable");
+            })
+          : undefined;
+      rejectPending = failure === "pending";
+      expect(() => agent.interrupt()).toThrow(
+        failure === "recording" ? "disk unavailable" : "pending observer failed",
+      );
+      append?.mockRestore();
+      expect(await failing).toBe("aborted");
+      expect(agent.running).toBe(false);
+    }
+
+    for (const observer of ["pending", "event"] as const) {
+      const reentrantLog = newLog();
+      let armed = false;
+      let reentered = false;
+      let observedStopping = false;
+      let queuedPaused = false;
+      let queued: Promise<unknown> | undefined;
+      const cancelAgain = () => {
+        if (!armed || reentered) return;
+        // 有限重入保留旧实现的确定失败,不让错误实现递归到测试进程崩溃。
+        reentered = true;
+        observedStopping = reentrant.stopping;
+        queued = reentrant.prompt("observer queued");
+        queuedPaused = reentrant.pending.at(-1)?.paused ?? false;
+        reentrant.interrupt();
+      };
+      const reentrant = new Agent({
+        log: reentrantLog,
+        provider,
+        tools: [],
+        ...(observer === "pending" && { onPendingChange: cancelAgain }),
+      });
+      if (observer === "event")
+        reentrantLog.subscribe((event) => {
+          if (event.type === "session/interrupt") cancelAgain();
+        });
+      const running = reentrant.prompt("cancel once");
+      await tick();
+      armed = true;
+      reentrant.interrupt();
+      armed = false;
+      expect(await running).toBe("aborted");
+      await queued;
+      expect(reentered).toBe(true);
+      expect(observedStopping).toBe(true);
+      expect(queuedPaused).toBe(true);
+      expect(reentrantLog.events.filter((e) => e.type === "session/interrupt")).toHaveLength(1);
+      expect(reentrant.pending).toMatchObject([{ text: "observer queued", paused: true }]);
+    }
 
     for (const boundary of ["message", "queue"] as const) {
       const startupLog = newLog();

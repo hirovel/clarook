@@ -367,12 +367,9 @@ export class Agent {
   interrupt(): void {
     if (!this.running || this.ac?.signal.aborted) return;
     for (const item of this.queue) item.paused = true;
-    try {
-      this.changed();
-      this.opts.log.append({ type: "session/interrupt", at: now() });
-    } finally {
-      // 保存或记录失败仍须投递取消,不能让 I/O 错误继续驱动正在执行的任务。
-      this.ac?.abort();
-    }
+    // 先提交取消状态,回调重入直接返回;通知或记录失败也不能撤销取消。
+    this.ac?.abort();
+    this.changed();
+    this.opts.log.append({ type: "session/interrupt", at: now() });
   }
 }
