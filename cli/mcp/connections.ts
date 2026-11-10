@@ -259,8 +259,12 @@ export class McpConnections {
         clientVersion: opts.clientVersion,
       }),
     );
+    // 归零对象仍由池持有以便重试清理,但不能再次借出。
     const existing =
-      !reconnect && [...this.entries].find((c) => c.key === key && c.status.phase === "ready");
+      !reconnect &&
+      [...this.entries].find(
+        (c) => c.key === key && c.references > 0 && c.status.phase === "ready",
+      );
     if (existing) {
       existing.references++;
       return { connection: existing, reused: true };

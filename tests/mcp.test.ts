@@ -74,28 +74,86 @@ function stdioServer(
 const find = (tools: Tool[], name: string) => tools.find((t) => t.name === name) as Tool;
 
 describe("stdio · modern", () => {
-  it("关闭失败的连接仍留在池中,退出时可以重试清理", async () => {
-    let attempts = 0;
-    const fake = {
-      async connect() {
-        return { era: "modern", protocolVersion: "2026-07-28" };
-      },
-      async listTools() {
-        return [];
-      },
-      async close() {
-        attempts++;
-        if (attempts === 1) throw new Error("first close failed");
-      },
-    } as unknown as McpClient;
-    const pool = new McpConnections();
-    const { connection } = await pool.acquire(stdioServer("cleanup", []), {
-      log: new EventLog(),
-      createClient: () => fake,
-    });
-    await expect(pool.release(connection)).rejects.toThrow("first close failed");
-    await expect(pool.close()).resolves.toBeUndefined();
-    expect(attempts).toBe(2);
+  it("最后引用释放后不再复用,关闭失败的连接仍可重试清理", async () => {
+    for (const failClose of [false, true]) {
+      let finishClose!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        finishClose = resolve;
+      });
+      const clients: { closed: boolean; closes: number }[] = [];
+      const createClient = () => {
+        const state = { closed: false, closes: 0 };
+        clients.push(state);
+        const id = clients.length;
+        return {
+          async connect() {
+            return { era: "modern", protocolVersion: "2026-07-28" };
+          },
+          async listTools() {
+            return [{ name: "echo", inputSchema: { type: "object" } }];
+          },
+          async callTool() {
+            if (state.closed) throw new Error("client is closed");
+            return { content: [{ type: "text", text: `client ${id}` }] };
+          },
+          async close() {
+            state.closed = true;
+            state.closes++;
+            if (id === 1 && state.closes === 1) {
+              await gate;
+              if (failClose) throw new Error("first close failed");
+            }
+          },
+        } as unknown as McpClient;
+      };
+      const pool = new McpConnections();
+      const bridges: Awaited<ReturnType<typeof connectMcpServers>>[] = [];
+      const servers = [stdioServer("cleanup", [])];
+      const connect = async (tools: Tool[]) => {
+        const bridge = await connectMcpServers(servers, {
+          log: new EventLog(),
+          tools,
+          connections: pool,
+          createClient,
+        });
+        bridges.push(bridge);
+        return bridge;
+      };
+      try {
+        const first = await connect([]);
+        const closing = first.close().then(
+          () => undefined,
+          (error: Error) => error,
+        );
+        const nextTools: Tool[] = [];
+        const next = await connect(nextTools);
+        expect(next.statuses()[0]?.connection).toBe("new");
+        expect(await find(nextTools, "mcp__cleanup__echo").execute({}, ctx)).toBe("client 2");
+        finishClose();
+        const closeError = await closing;
+        if (failClose) {
+          expect(closeError).toBeInstanceOf(AggregateError);
+          expect((closeError as AggregateError).errors).toMatchObject([
+            { message: "first close failed" },
+          ]);
+        } else expect(closeError).toBeUndefined();
+        expect(next.statuses()[0]?.phase).toBe("ready");
+        expect(await find(nextTools, "mcp__cleanup__echo").execute({}, ctx)).toBe("client 2");
+
+        const sharedTools: Tool[] = [];
+        const shared = await connect(sharedTools);
+        expect(shared.statuses()[0]?.connection).toBe("reused");
+        await next.close();
+        expect(await find(sharedTools, "mcp__cleanup__echo").execute({}, ctx)).toBe("client 2");
+        await shared.close();
+        await expect(pool.close()).resolves.toBeUndefined();
+        expect(clients.map((client) => client.closes)).toEqual([failClose ? 2 : 1, 1]);
+      } finally {
+        finishClose();
+        await Promise.allSettled(bridges.map((bridge) => bridge.close()));
+        await pool.close();
+      }
+    }
 
     let startupStops = 0;
     const failedStartup = {
