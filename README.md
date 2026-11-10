@@ -132,6 +132,8 @@ A text-only response that reaches its output or context limit is kept as incompl
 
 Tool approval checks the argument values that execution will use, after any local validation and supported scalar conversion. Arguments rejected by local validation return a tool error without prompting for approval; the original model arguments remain in history. OpenAI-compatible streams finish at `[DONE]` without waiting for the HTTP connection to close, preserving preceding usage information. The adapter still requires a valid completion reason before executing tool calls.
 
+Path approval rules match the resolved target using normalized project-relative or absolute patterns with `/` separators. For example, `src/../private.txt` is checked as `private.txt`, while `..cache/file.txt` remains inside the project. Use `edit:src/**` rather than patterns containing `./` or unresolved parent segments; raw input spelling does not grant additional access or cause an extra denial.
+
 While a model generates tool calls, the TUI shows each tool's name and received argument bytes. Retry, cancellation and failure clear unfinished tool previews. Execution uses the complete response after validation and approval. Provider and Agent integrations receive text, reasoning, tool argument updates and attempt lifecycle through the single `onStream` callback; the former `onDelta` and `onReasoning` callbacks have been removed. Partial updates are temporary display data, not saved conversation facts.
 
 Extensions can record side events without changing which request owns its captured input and HTTP bodies. Live and reopened transcript views follow the committed event order, including events appended by synchronous observers.

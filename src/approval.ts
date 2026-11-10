@@ -66,12 +66,6 @@ function wildcard(pattern: string): RegExp {
   return new RegExp(`^${re}$`, "s");
 }
 
-function normalizePath(p: string, cwd: string): string {
-  const abs = resolve(cwd, p);
-  const rel = relative(cwd, abs);
-  return (rel === "" ? "." : rel).split(sep).join("/");
-}
-
 export function ruleMatches(rule: string, call: ToolCall, cwd: string): boolean {
   const i = rule.indexOf(":");
   const name = i < 0 ? rule : rule.slice(0, i);
@@ -81,16 +75,14 @@ export function ruleMatches(rule: string, call: ToolCall, cwd: string): boolean 
   const pattern = rule.slice(i + 1);
   const subject = subjectOf(call);
   if (subject === undefined) return false;
-  // 路径规则同时试相对路径与原样写法:用户写 `edit:src/**` 或 `read:C:/x/**` 都能对上。
+  const matches = wildcard(pattern);
+  // 只授权实际解析后的目标;原始 src/../x 不能借 src/** 的文字前缀获准。
   if (PATH_TOOLS.has(call.name)) {
-    const rel = normalizePath(subject, cwd);
-    return (
-      wildcard(pattern).test(rel) ||
-      wildcard(pattern).test(subject.split("\\").join("/")) ||
-      wildcard(pattern).test(resolve(cwd, subject).split("\\").join("/"))
-    );
+    const abs = resolve(cwd, subject);
+    const rel = relative(cwd, abs) || ".";
+    return matches.test(rel.split(sep).join("/")) || matches.test(abs.split(sep).join("/"));
   }
-  return wildcard(pattern).test(subject);
+  return matches.test(subject);
 }
 
 /** 路径类工具的目标是否落在 cwd 之外。 */
@@ -100,7 +92,7 @@ export function outsideCwd(call: ToolCall, cwd: string): boolean {
   if (subject === undefined) return false;
   const abs = resolve(cwd, subject);
   const rel = relative(cwd, abs);
-  return rel.startsWith("..") || isAbsolute(rel);
+  return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
 }
 
 /** 裁决顺序:deny 规则 → cwd 之外 → allow 规则 → 缺省。理由说的是命中了哪条。 */

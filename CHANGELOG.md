@@ -30,6 +30,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Match path approval rules against the resolved target instead of raw input spelling, so `src/../private.txt` cannot borrow a `src/**` allow rule or trigger its deny rule. Recognize ordinary `..`-prefixed names such as `..cache` as internal paths while preserving actual parent-directory checks for main and child approval.
 - Commit accepted events before synchronous save-status observers run, and return their fixed event positions. Preserve buffered writes on I/O failure and reject appends to closed recordings without changing history.
 - Bind ordinary and summary request recordings and setup-message edits to their original event positions. Render live history from the committed sequence so extension-appended events match replay.
 - Approve the argument values that tools actually execute, closing mismatches caused by local scalar conversion while preserving raw history. Return locally rejected arguments as tool errors without prompting for approval.

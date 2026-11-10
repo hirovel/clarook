@@ -2,7 +2,7 @@
 import { spawnSync } from "node:child_process";
 import { ftruncateSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it, vi } from "vitest";
 import { createReadTool } from "../cli/tools/fs.js";
@@ -46,6 +46,22 @@ describe("规则裁决", () => {
     expect(decide(call("bash", { command: "rm -rf /" }), cfg, cwd).verdict).toBe("deny");
     expect(decide(call("edit", { path: "src/a/b.ts" }), cfg, cwd).verdict).toBe("allow");
     expect(decide(call("edit", { path: "tests/a.ts" }), cfg, cwd).verdict).toBe("ask");
+    expect(decide(call("edit", { path: "src/../tests/a.ts" }), cfg, cwd).verdict).toBe("ask");
+    expect(decide(call("edit", { path: "src/nested/../a.ts" }), cfg, cwd).verdict).toBe("allow");
+    expect(
+      decide(
+        call("read", { path: "src/../README.md" }),
+        { allow: ["read"], deny: ["read:src/**"] },
+        cwd,
+      ).verdict,
+    ).toBe("allow");
+    expect(
+      decide(
+        call("edit", { path: "src/a.ts" }),
+        { allow: [`edit:${resolve(cwd, "src/**").split("\\").join("/")}`] },
+        cwd,
+      ).verdict,
+    ).toBe("allow");
     expect(decide(call("write", { path: "x" }), { default: "allow" }, cwd).verdict).toBe("allow");
   });
 
@@ -62,6 +78,9 @@ describe("规则裁决", () => {
     expect(
       decide(call("read", { path: "C:/work/repo/src/a.ts" }), DEFAULT_APPROVAL, cwd).verdict,
     ).toBe("allow");
+    const confined = { ...DEFAULT_APPROVAL, outsideCwd: "deny" as const };
+    expect(decide(call("read", { path: "..cache/file.txt" }), confined, cwd).verdict).toBe("allow");
+    expect(decide(call("read", { path: ".." }), confined, cwd).verdict).toBe("deny");
     expect(describeApproval(DEFAULT_APPROVAL)).toContain("default ask");
   });
 
