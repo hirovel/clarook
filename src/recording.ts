@@ -74,6 +74,7 @@ export class Recording {
   }
 
   // EventLog 交付单个已序列化快照;分隔、修复和字节操作只属于此模块。
+  // 同步拒收发生在入队前;接纳后的 I/O 故障由 flush 记状态,不抛给事实提交方。
   appendEvent(json: string): void {
     this.append(this.journal, `${json}\n`);
   }

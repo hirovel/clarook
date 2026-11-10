@@ -387,8 +387,7 @@ export function beginSession(
     recordSessionDirectory(s.log, resolve(cwd));
     let preambleTarget: number | undefined;
     if (p.preamble.length) {
-      preambleTarget = s.log.events.length;
-      s.log.append({
+      preambleTarget = s.log.append({
         type: "user/message",
         at: now(),
         text: p.preamble.map((part) => part.text).join("\n\n"),

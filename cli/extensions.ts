@@ -10,7 +10,7 @@ import type { Tool } from "../src/tools.js";
 export type Extension = {
   tools?: Tool[];
   slots?: TurnDeps["slots"];
-  onEvent?: (e: AgentEvent) => void;
+  onEvent?: (e: AgentEvent, index: number) => void;
   /** 释放此工厂实例持有的资源;共享资源由扩展自己管理其引用。 */
   dispose?: () => void | Promise<void>;
 };

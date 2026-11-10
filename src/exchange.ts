@@ -7,15 +7,15 @@ import { classifyError, errorMessage, ProviderError, providerMessage } from "./p
 import type { HttpRecorder } from "./providers/http.js";
 import type { ContentRef } from "./recording.js";
 
-/** 调用者已追加请求事实;这里负责实际请求与记录,不决定循环或响应的用途。 */
+/** 调用者交付已追加请求的固定下标;这里负责请求与记录,不从后续可变尾部推断身份。 */
 export async function completeRecorded(
   log: EventLog,
+  request: number,
   provider: Provider,
   messages: Message[],
   tools: ToolDef[],
   opts: CompleteOptions = {},
 ): Promise<AssistantTurn> {
-  const request = log.events.length - 1;
   try {
     if (log.recording) {
       const input = log.recording.open("Adapter input: messages and tools");

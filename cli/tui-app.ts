@@ -674,21 +674,26 @@ export function createTuiApp(
 
     // ---------- 历史回放与订阅:屏幕即历史,历史与新事件长得一样 ----------
     let directory: string | undefined;
-    const draw = (e: AgentEvent, index = log.events.length - 1) => {
-      if (e.type === "session/directory") directory = e.cwd;
-      status.observe(e);
-      render(ctx, e, index, directory);
+    let nextDraw = 0;
+    const draw = (through: number) => {
+      while (nextDraw <= through) {
+        // 渲染末尾会保存设置并同步追加;先推进位置,重入时不再画同一事实。
+        const index = nextDraw++;
+        const e = log.events[index] as AgentEvent;
+        if (e.type === "session/directory") directory = e.cwd;
+        status.observe(e);
+        render(ctx, e, index, directory);
+      }
     };
+    unsubscribeLog = log.subscribe((_event, index) => draw(index));
     if (log.events.length > 0) {
-      for (const [index, e] of log.events.entries()) draw(e, index);
-      unsubscribeLog = log.subscribe(draw);
+      draw(log.events.length - 1);
       if (deps.info.resumed) {
         ctx.note(
           c.soft(`· resumed: ${log.events.length} events, appending to ${deps.info.sessionFile}`),
         );
       }
     } else {
-      unsubscribeLog = log.subscribe(draw);
       log.append({
         type: "session/start",
         at: now(),

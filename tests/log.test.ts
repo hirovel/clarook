@@ -123,13 +123,30 @@ describe("EventLog", () => {
     let executions = 0;
     log.append(START);
     store.flush();
+    log.subscribe((event) => {
+      if (event.type === "request")
+        log.append({
+          type: "ext/event",
+          at: "t",
+          source: "fixture",
+          kind: "request-observed",
+          payload: {},
+        });
+    });
     writeFileSync(store.directory, "blocked");
+    const bodies: string[] = [];
     const agent = new Agent({
       log,
       provider: {
         model: "m",
-        async complete() {
+        async complete(messages, tools, opts) {
           requests++;
+          const body = JSON.stringify({ messages, tools });
+          bodies.push(body);
+          const record = await opts?.record?.(body);
+          record?.response(200, "application/json");
+          await record?.chunk(Buffer.from(JSON.stringify({ request: requests })));
+          await record?.end("complete");
           return requests === 1
             ? { text: "", toolCalls: [{ id: "one", name: "act", args: {} }], stopReason: "tool" }
             : { text: "done", toolCalls: [], stopReason: "end" };
@@ -183,6 +200,8 @@ describe("EventLog", () => {
       const loaded = EventLog.load(file);
       const index = loaded.events.findIndex((e) => e.type === "request");
       const saved = readRequestRecording(file, loaded.events, index);
+      expect(saved?.bodies).toEqual([bodies[0]]);
+      expect(saved?.attempts?.[0]?.response).toBe('{"request":1}');
       expect(saved?.outputs?.[0]).toMatchObject({
         original: "original text that the model does not receive",
       });
@@ -425,6 +444,39 @@ describe("EventLog", () => {
       expect(loaded.events).toEqual(log.events);
       expect(deriveMessages(loaded.events)).toEqual(deriveMessages(log.events));
       expect(Reflect.set(loaded.events, "1", START)).toBe(false);
+
+      // 保存状态观察者追加事实时,接纳顺序、事件身份与恢复后的顺序必须一致。
+      const store = log.recording;
+      if (!store) throw new Error("missing recording");
+      const backup = join(dir, "backup");
+      const beforeNested = log.events.length;
+      let nestedIndex: number | undefined;
+      let nested = false;
+      const observed: { event: AgentEvent; index: number }[] = [];
+      const stopEvents = log.subscribe((event, index) => observed.push({ event, index }));
+      const stopSaving = store.subscribe(() => {
+        if (!store.error || nested) return;
+        nested = true;
+        nestedIndex = log.append({ type: "user/message", at: "t", text: "B" });
+      });
+      renameSync(file, backup);
+      mkdirSync(file);
+      const outerIndex = log.append({ type: "user/message", at: "t", text: "A" });
+      stopSaving();
+      stopEvents();
+      expect(nested).toBe(true);
+      expect(outerIndex).toBe(beforeNested);
+      expect(nestedIndex).toBe(beforeNested + 1);
+      expect(log.events.slice(beforeNested)).toMatchObject([{ text: "A" }, { text: "B" }]);
+      for (const item of observed) expect(log.events[item.index]).toBe(item.event);
+      rmSync(file, { recursive: true });
+      renameSync(backup, file);
+      store.flush();
+      expect(EventLog.load(file).events).toEqual(log.events);
+      store.dispose();
+      const closed = log.events;
+      expect(() => log.append(ASK)).toThrow("Recording is closed");
+      expect(log.events).toBe(closed);
     } finally {
       log.recording?.dispose();
       rmSync(dir, { recursive: true, force: true });

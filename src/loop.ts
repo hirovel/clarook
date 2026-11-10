@@ -171,7 +171,7 @@ export function recordingProvider(
     model: provider.model,
     ...(provider.wire && { wire: provider.wire.bind(provider) }),
     async complete(messages, tools, callOpts = {}) {
-      log.append({
+      const request = log.append({
         type: "request",
         at: now(),
         model: provider.model,
@@ -183,7 +183,7 @@ export function recordingProvider(
         ...(callOpts.maxTokens !== undefined && { maxTokens: callOpts.maxTokens }),
         body: describeRequestBody(log.events, messages),
       });
-      return completeRecorded(log, provider, messages, tools, {
+      return completeRecorded(log, request, provider, messages, tools, {
         ...callOpts,
         ...(opts.onRaw && { onRaw: opts.onRaw }),
         ...(opts.onRequest && { onRequest: opts.onRequest }),
@@ -326,7 +326,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
         : undefined;
     const cfg = deps.compaction;
     const effort = typeof deps.effort === "function" ? deps.effort() : deps.effort;
-    log.append({
+    const request = log.append({
       type: "request",
       at: now(),
       model: provider.model,
@@ -343,7 +343,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
 
     let turn: AssistantTurn;
     try {
-      turn = await completeRecorded(log, provider, messages, defs, {
+      turn = await completeRecorded(log, request, provider, messages, defs, {
         ...(onDelta && { onDelta }),
         ...(onReasoning && { onReasoning }),
         ...(signal && { signal }),

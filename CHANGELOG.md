@@ -29,6 +29,8 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Commit accepted events before synchronous save-status observers run, and return their fixed event positions. Preserve buffered writes on I/O failure and reject appends to closed recordings without changing history.
+- Bind ordinary and summary request recordings and setup-message edits to their original event positions. Render live history from the committed sequence so extension-appended events match replay.
 - Approve the argument values that tools actually execute, closing mismatches caused by local scalar conversion while preserving raw history. Return locally rejected arguments as tool errors without prompting for approval.
 - End OpenAI-compatible SSE consumption at `[DONE]` instead of waiting for physical response EOF. Preserve preceding usage, release the reader and keep incomplete completion reasons on the error path.
 - Preserve reported array type errors in built-in tool arguments instead of converting single objects into arrays. Keep existing scalar conversion and raw argument history.

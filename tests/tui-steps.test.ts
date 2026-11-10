@@ -117,6 +117,63 @@ describe("账簿折叠", () => {
     expect(replay.doc()).toMatch(open(5));
     replay.app.stop();
 
+    // 前置观察者与保存回调都可同步追加;实时摘要的输入规模和旁支顺序必须与重放一致。
+    const observedLog = new EventLog();
+    const off = observedLog.subscribe((event) => {
+      if (event.type === "request")
+        observedLog.append({
+          type: "ext/event",
+          at: "t",
+          source: "fixture",
+          kind: "request-observed",
+          payload: {},
+        });
+    });
+    let persistDuringDraw = false;
+    const observed = boot({
+      log: observedLog,
+      onSetupChange: () => {
+        if (!persistDuringDraw) return;
+        persistDuringDraw = false;
+        observedLog.append({
+          type: "ext/event",
+          at: "t",
+          source: "fixture",
+          kind: "setup-observed",
+          payload: {},
+        });
+      },
+    });
+    let observedReplay: ReturnType<typeof boot> | undefined;
+    try {
+      observedLog.append({ type: "user/message", at: "t", text: "summarize this" });
+      persistDuringDraw = true;
+      observedLog.append({
+        type: "request",
+        at: "t",
+        model: "m",
+        messages: 2,
+        tools: [],
+        estimatedTokens: 10,
+        reason: "compaction",
+      });
+      const facts = (text: string) =>
+        text.match(/summary request · \d+ messages|fixture\/(?:request|setup)-observed/g);
+      const liveFacts = facts(observed.doc());
+      expect(liveFacts).toEqual([
+        "summary request · 2 messages",
+        "fixture/request-observed",
+        "fixture/setup-observed",
+      ]);
+      off();
+      observedReplay = boot({ log: observedLog });
+      expect(facts(observedReplay.doc())).toEqual(liveFacts);
+    } finally {
+      off();
+      observedReplay?.app.stop();
+      observed.app.stop();
+    }
+
     // 正在运行的请求折起后,流式正文和完成回复仍写入原容器,展开不能被旧节点快照覆盖。
     let enter!: () => void;
     let resume!: () => void;

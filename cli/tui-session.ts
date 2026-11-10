@@ -489,8 +489,8 @@ export async function startTuiSession(options: {
                     value: text,
                   });
               } else if (text) {
-                if (target.kind === "new") initialPreambleTarget = session.log.events.length;
-                session.log.append({ type: "user/message", at: now(), text });
+                const index = session.log.append({ type: "user/message", at: now(), text });
+                if (target.kind === "new") initialPreambleTarget = index;
               }
             }
           } catch (error) {

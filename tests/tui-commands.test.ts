@@ -959,6 +959,7 @@ describe("提交", () => {
       {
         cwd: tmp,
         inputs,
+        facts: { date: false },
         readClipboard: async () => ({ image: testImage }),
         templates: [
           {

@@ -726,10 +726,20 @@ describe("wire 层与实际发送一致", () => {
         retry: { maxRetries: 1, sleep: async () => {} },
       });
       const dir = mkdtempSync(join(tmpdir(), "clarook-http-record-"));
+      const file = join(dir, "s.jsonl");
+      const log = new EventLog(file);
       try {
-        const file = join(dir, "s.jsonl");
-        const log = new EventLog(file);
         log.append({ type: "tools/snapshot", at: "t", tools });
+        log.subscribe((event) => {
+          if (event.type === "request")
+            log.append({
+              type: "ext/event",
+              at: "t",
+              source: "fixture",
+              kind: "summary-request-observed",
+              payload: {},
+            });
+        });
         const retries: number[] = [];
         await recordingProvider(log, provider).complete(messages, tools, {
           maxTokens: 321,
@@ -839,6 +849,7 @@ describe("wire 层与实际发送一致", () => {
           expect(unavailableWire).not.toContain("current description");
         }
       } finally {
+        log.recording?.dispose();
         rmSync(dir, { recursive: true, force: true });
       }
       expect(captures).toEqual(sent);
