@@ -340,7 +340,9 @@ describe("request/error 事件与错误卡", () => {
           provider: anthropic({ baseUrl: `http://127.0.0.1:${port}`, apiKey: "bad", model: "m" }),
           tools: [],
           signal: cancel.signal,
-          onDelta: () => cancel.abort(),
+          onStream: (update) => {
+            if (update.type === "text/delta") cancel.abort();
+          },
         }),
       ).toBe("aborted");
       expect(cancelledLog.events.find((e) => e.type === "assistant/message")).toMatchObject({

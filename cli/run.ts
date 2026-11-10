@@ -149,7 +149,12 @@ agent = new Agent({
     }),
   },
   ...(args.effort && { effort: args.effort }),
-  ...(!args.json && !args.events && { onDelta: (d: string) => process.stdout.write(d) }),
+  ...(!args.json &&
+    !args.events && {
+      onStream: (update) => {
+        if (update.type === "text/delta") process.stdout.write(update.delta);
+      },
+    }),
 });
 
 const startIndex = log.events.length;

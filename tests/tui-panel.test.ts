@@ -65,7 +65,8 @@ function scriptedB(turns: AssistantTurn[], extra: Partial<Provider> = {}): Provi
     model: "m",
     async complete(_m, _t, opts) {
       const t = turns[i++] ?? { text: "done", toolCalls: [], stopReason: "end" };
-      if (t.reasoning && opts?.onReasoning) opts.onReasoning(t.reasoning.slice(0, 2));
+      if (t.reasoning)
+        opts?.onStream?.({ type: "reasoning/delta", delta: t.reasoning.slice(0, 2) });
       return t;
     },
     ...extra,

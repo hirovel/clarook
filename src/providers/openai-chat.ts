@@ -4,6 +4,7 @@ import { imageDataUrl } from "../images.js";
 import type { Message } from "../messages.js";
 import {
   type AssistantTurn,
+  type CompleteOptions,
   clampEffort,
   type EffortLevel,
   type FieldTable,
@@ -15,6 +16,7 @@ import { ProviderError, parseRetryAfter } from "./errors.js";
 import { fetchModelIds, linkedAbort, recordedFetch } from "./http.js";
 import { mergeRetry, type RetryOptions, withRetry } from "./retry.js";
 import { sseEvents, streamError } from "./sse.js";
+import { withStreamAttempt } from "./stream.js";
 
 // ---------- OpenAI-compatible 适配器(先接一家,DeepSeek 走此协议) ----------
 
@@ -83,7 +85,11 @@ export function newAcc(): StreamAcc {
 }
 
 /** 喂入一个已解析的 SSE chunk(data: 后面的 JSON 对象)。返回本 chunk 的文本增量。 */
-export function feedChunk(acc: StreamAcc, chunk: SseChunk): string {
+export function feedChunk(
+  acc: StreamAcc,
+  chunk: SseChunk,
+  onStream?: CompleteOptions["onStream"],
+): string {
   const choice = chunk.choices?.[0];
   let delta = "";
   // 元数据每个 chunk 都带,记一次即可;finish_reason 原文另存,内核归一后的 stopReason 是另一回事。
@@ -94,7 +100,11 @@ export function feedChunk(acc: StreamAcc, chunk: SseChunk): string {
   if (choice?.finish_reason) acc.extras.finish_reason = choice.finish_reason;
   delta = (choice?.delta?.content ?? "") + (choice?.delta?.refusal ?? "");
   acc.text += delta;
-  if (choice?.delta?.reasoning_content) acc.reasoning += choice.delta.reasoning_content;
+  if (delta) onStream?.({ type: "text/delta", delta });
+  if (choice?.delta?.reasoning_content) {
+    acc.reasoning += choice.delta.reasoning_content;
+    onStream?.({ type: "reasoning/delta", delta: choice.delta.reasoning_content });
+  }
   for (const tc of choice?.delta?.tool_calls ?? []) {
     // 有些中转站不带 index(整段一次发完):带 id 的当新调用,不带的续写最后一个。
     const index =
@@ -103,11 +113,19 @@ export function feedChunk(acc: StreamAcc, chunk: SseChunk): string {
         : tc.id
           ? acc.toolCalls.length
           : Math.max(0, acc.toolCalls.length - 1);
+    const existing = acc.toolCalls[index];
     acc.toolCalls[index] ??= { id: "", name: "", argsJson: "" };
     const slot = acc.toolCalls[index] as StreamAcc["toolCalls"][number];
+    const previousId = slot.id;
+    const previousName = slot.name;
     if (tc.id) slot.id = tc.id;
     if (tc.function?.name) slot.name += tc.function.name;
-    if (tc.function?.arguments) slot.argsJson += tc.function.arguments;
+    const input = tc.function?.arguments ?? "";
+    slot.argsJson += input;
+    if (!existing) onStream?.({ type: "tool/start", index, id: slot.id, name: slot.name });
+    if (input || (existing && (slot.id !== previousId || slot.name !== previousName))) {
+      onStream?.({ type: "tool/delta", index, id: slot.id, name: slot.name, delta: input });
+    }
   }
   if (choice?.finish_reason) acc.finishReason = choice.finish_reason;
   if (chunk.usage) {
@@ -306,7 +324,7 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
     async complete(
       messages,
       tools,
-      { onDelta, onReasoning, signal, onRetry, onRaw, onRequest, record, effort, maxTokens } = {},
+      { onStream, signal, onRetry, onRaw, onRequest, record, effort, maxTokens } = {},
     ) {
       const body = JSON.stringify(
         wire(messages, tools, {
@@ -316,56 +334,68 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
       );
 
       return withRetry(
-        async () => {
-          const acc = newAcc();
-          const ac = linkedAbort(signal);
-          let saved: Promise<void> | undefined;
-          try {
-            onRequest?.(body);
-            const captured = await recordedFetch(
-              `${baseUrl}/chat/completions`,
-              {
-                method: "POST",
-                headers,
-                body,
-                signal: ac.signal,
-              },
-              record,
-            );
-            const res = captured.response;
-            saved = captured.saved;
-            if (!res.ok || !res.body) {
-              const text = await res.text();
-              const retryAfterMs = parseRetryAfter(res.headers);
-              throw new ProviderError(`provider ${res.status}: ${text}`, {
-                status: res.status,
-                body: text,
-                ...(retryAfterMs !== undefined && { retryAfterMs }),
-              });
-            }
+        () =>
+          withStreamAttempt(onStream, signal, async (emit) => {
+            const acc = newAcc();
+            const ac = linkedAbort(signal);
+            let saved: Promise<void> | undefined;
+            let turn: AssistantTurn;
+            try {
+              onRequest?.(body);
+              const captured = await recordedFetch(
+                `${baseUrl}/chat/completions`,
+                {
+                  method: "POST",
+                  headers,
+                  body,
+                  signal: ac.signal,
+                },
+                record,
+              );
+              const res = captured.response;
+              saved = captured.saved;
+              if (!res.ok || !res.body) {
+                const text = await res.text();
+                const retryAfterMs = parseRetryAfter(res.headers);
+                throw new ProviderError(`provider ${res.status}: ${text}`, {
+                  status: res.status,
+                  body: text,
+                  ...(retryAfterMs !== undefined && { retryAfterMs }),
+                });
+              }
 
-            const events = sseEvents(res.body as AsyncIterable<Uint8Array>, {
-              ...(onRaw && { onRaw }),
-              ...(opts.stallTimeoutMs !== undefined && { stallTimeoutMs: opts.stallTimeoutMs }),
-              onStall: () => ac.abort(),
-            });
-            for await (const chunk of events) {
-              const before = acc.reasoning.length;
-              const delta = feedChunk(acc, chunk as SseChunk);
-              if (delta && onDelta) onDelta(delta);
-              if (onReasoning && acc.reasoning.length > before) {
-                onReasoning(acc.reasoning.slice(before));
+              const events = sseEvents(res.body as AsyncIterable<Uint8Array>, {
+                ...(onRaw && { onRaw }),
+                ...(opts.stallTimeoutMs !== undefined && { stallTimeoutMs: opts.stallTimeoutMs }),
+                onStall: () => ac.abort(),
+              });
+              for await (const chunk of events) {
+                feedChunk(acc, chunk as SseChunk, emit);
+              }
+              turn = finishAcc(acc, Boolean(signal?.aborted));
+            } catch (err) {
+              // 打断:已流出的部分作为 aborted turn 返回,由循环记入日志,不丢真相。
+              if (signal?.aborted) turn = finishAcc(acc, true);
+              else throw streamError(err, Boolean(acc.text || acc.reasoning));
+            } finally {
+              await saved;
+            }
+            if (turn.stopReason !== "aborted") {
+              for (const [index, slot] of acc.toolCalls.entries()) {
+                if (slot)
+                  emit?.({
+                    type: "tool/end",
+                    index,
+                    id: slot.id,
+                    name: slot.name,
+                    input: slot.argsJson,
+                  });
               }
             }
-            return finishAcc(acc, false);
-          } catch (err) {
-            // 打断:已流出的部分作为 aborted turn 返回,由循环记入日志,不丢真相。
-            if (signal?.aborted) return finishAcc(acc, true);
-            throw streamError(err, Boolean(acc.text || acc.reasoning));
-          } finally {
-            await saved;
-          }
-        },
+            // 录制和最后一次展示回调都可能取消;交付前再判定,正常完成不重复解析。
+            if (signal?.aborted && turn.stopReason !== "aborted") turn = finishAcc(acc, true);
+            return turn;
+          }),
         mergeRetry(opts.retry, { ...(signal && { signal }), ...(onRetry && { onRetry }) }),
       );
     },

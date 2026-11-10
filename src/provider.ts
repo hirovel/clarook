@@ -58,12 +58,26 @@ export function clampEffort(level: EffortLevel, supported?: readonly EffortLevel
 
 export type WireOptions = { effort?: EffortLevel; maxTokens?: number };
 
+/**
+ * 一次请求尝试的临时生成流,不进入会话事实。start/end 包住每次尝试,重试重新 start。
+ * index 只在本次尝试内标识工具槽;id/name 可先为空,后续给出当前完整值。
+ * 参数 delta 是原始 JSON 片段,end.input 是服务器最终全文,不是可执行调用。
+ * 回调同步执行;异常沿请求错误路径传播,不保证向抛错观察者继续交付生命周期。
+ * 最终结果只由 complete 的返回值交付;complete 终态也可能是 length,不授予执行资格。
+ */
+export type GenerationUpdate =
+  | { type: "attempt/start" }
+  | { type: "attempt/end"; state: "complete" | "aborted" | "error" }
+  | { type: "text/delta" | "reasoning/delta"; delta: string }
+  | { type: "tool/start"; index: number; id: string; name: string }
+  | { type: "tool/delta"; index: number; id: string; name: string; delta: string }
+  | { type: "tool/end"; index: number; id: string; name: string; input: string };
+
 export type CompleteOptions = {
   /** 宿主提供的会话记录,独立于 UI 与调试观察回调。 */
   record?: HttpRecorder;
-  /** 流式增量只进 UI 不进日志:增量拼完即最终消息,日志只记完整事件。 */
-  onDelta?: (textDelta: string) => void;
-  onReasoning?: (reasoningDelta: string) => void;
+  /** 同一入口接收尝试生命周期及文本、思考、工具参数增量;日志只记最终事实。 */
+  onStream?: (update: GenerationUpdate) => void;
   signal?: AbortSignal;
   /** 每次重试前回调(循环据此记 retry 事件)。 */
   onRetry?: (info: { attempt: number; delayMs: number; error: Error }) => void;

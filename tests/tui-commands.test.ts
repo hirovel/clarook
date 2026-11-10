@@ -33,7 +33,7 @@ function scripted(turns: AssistantTurn[]): Provider {
     async complete(_m, _t, opts) {
       const t = turns[i++];
       if (!t) throw new Error("脚本越界");
-      if (t.text && opts?.onDelta) opts.onDelta(t.text); // 模拟流式:整段作为一次增量
+      if (t.text) opts?.onStream?.({ type: "text/delta", delta: t.text }); // 模拟流式:整段作为一次增量
       return t;
     },
   };
@@ -81,7 +81,8 @@ function scriptedB(turns: AssistantTurn[], extra: Partial<Provider> = {}): Provi
     model: "m",
     async complete(_m, _t, opts) {
       const t = turns[i++] ?? { text: "done", toolCalls: [], stopReason: "end" };
-      if (t.reasoning && opts?.onReasoning) opts.onReasoning(t.reasoning.slice(0, 2));
+      if (t.reasoning)
+        opts?.onStream?.({ type: "reasoning/delta", delta: t.reasoning.slice(0, 2) });
       return t;
     },
     ...extra,

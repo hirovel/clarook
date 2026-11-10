@@ -79,8 +79,7 @@ import {
   attachChild,
   render,
   resultText,
-  streamDelta,
-  streamReasoning,
+  streamUpdate,
   toggleFold,
   toggleReasoning,
 } from "./tui-render.js";
@@ -320,7 +319,7 @@ export function createTuiApp(
     tui.addChild(live);
     tui.addChild(bottom);
   }
-  // ---------- Agent:界面是它的事件订阅者;流式增量走两个回调 ----------
+  // ---------- Agent:事实走订阅,临时生成状态走统一流入口 ----------
   const approval = initialApproval(deps.approve);
   // 关掉的工具(配置 tools.disable、/tools)不随请求发出;全表仍在 ctx.tools 里,开关随时可翻。
   const disabledTools = new Set(deps.disabledTools ?? []);
@@ -338,11 +337,8 @@ export function createTuiApp(
     ...(deps.facts && { facts: deps.facts }),
     ...(deps.planReminder !== undefined && { planReminder: deps.planReminder }),
     slots: { ...deps.slots },
-    onDelta: (d) => {
-      if (!stopped) streamDelta(ctx, d);
-    },
-    onReasoning: (d) => {
-      if (!stopped) streamReasoning(ctx, d);
+    onStream: (update) => {
+      if (!stopped) streamUpdate(ctx, update);
     },
   });
 
@@ -445,6 +441,7 @@ export function createTuiApp(
       firstRun: undefined,
       streaming: undefined,
       streamBuffer: "",
+      toolStreams: new Map(),
       streamTimer: undefined,
       focused: true,
       turnStartedAt: undefined,

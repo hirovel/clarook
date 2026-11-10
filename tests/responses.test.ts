@@ -10,6 +10,7 @@ import { createProvider, loadConfig } from "../src/config.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
 import { deriveMessages } from "../src/messages.js";
+import type { GenerationUpdate } from "../src/provider.js";
 import {
   ANTHROPIC_FIELDS,
   feedAnthropicEvent,
@@ -37,6 +38,9 @@ import { testDirectory } from "./helpers/setup.js";
 describe("Responses 流式累积", () => {
   it("推理项摘要 + 密文、文本与拒绝、函数调用按 output_index 归位;done 项全量覆盖增量", () => {
     const acc = newResponsesAcc();
+    const updates: GenerationUpdate[] = [];
+    const feed = (event: ResponsesEvent) =>
+      feedResponsesEvent(acc, event, (update) => updates.push(update));
     const message = {
       type: "message",
       id: "msg_1",
@@ -46,17 +50,17 @@ describe("Responses 流式累积", () => {
         { type: "output_text", text: " I can explain safer alternatives." },
       ],
     };
-    feedResponsesEvent(acc, {
+    feed({
       type: "response.output_item.added",
       output_index: 0,
       item: { type: "reasoning", id: "rs_1" },
     });
-    feedResponsesEvent(acc, {
+    feed({
       type: "response.reasoning_summary_text.delta",
       output_index: 0,
       delta: "先看目录",
     });
-    feedResponsesEvent(acc, {
+    feed({
       type: "response.output_item.done",
       output_index: 0,
       item: {
@@ -66,16 +70,14 @@ describe("Responses 流式累积", () => {
         encrypted_content: "ENC",
       },
     });
-    feedResponsesEvent(acc, {
+    feed({
       type: "response.output_item.added",
       output_index: 1,
       item: { type: "message", id: "msg_1" },
     });
+    expect(feed({ type: "response.output_text.delta", output_index: 1, delta: "好" })).toBe("好");
     expect(
-      feedResponsesEvent(acc, { type: "response.output_text.delta", output_index: 1, delta: "好" }),
-    ).toBe("好");
-    expect(
-      feedResponsesEvent(acc, {
+      feed({
         type: "response.output_text.done",
         output_index: 1,
         content_index: 0,
@@ -83,7 +85,7 @@ describe("Responses 流式累积", () => {
       }),
     ).toBe("");
     expect(
-      feedResponsesEvent(acc, {
+      feed({
         type: "response.refusal.delta",
         output_index: 1,
         content_index: 1,
@@ -91,7 +93,7 @@ describe("Responses 流式累积", () => {
       }),
     ).toBe("I cannot ");
     expect(
-      feedResponsesEvent(acc, {
+      feed({
         type: "response.refusal.done",
         output_index: 1,
         content_index: 1,
@@ -99,23 +101,23 @@ describe("Responses 流式累积", () => {
       }),
     ).toBe("help with that request.");
     expect(
-      feedResponsesEvent(acc, {
+      feed({
         type: "response.output_item.done",
         output_index: 1,
         item: message,
       }),
     ).toBe(" I can explain safer alternatives.");
-    feedResponsesEvent(acc, {
+    feed({
       type: "response.output_item.added",
       output_index: 2,
       item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "ls" },
     });
-    feedResponsesEvent(acc, {
+    feed({
       type: "response.function_call_arguments.delta",
       output_index: 2,
       delta: '{"path":',
     });
-    feedResponsesEvent(acc, {
+    feed({
       type: "response.output_item.done",
       output_index: 2,
       item: {
@@ -127,7 +129,7 @@ describe("Responses 流式累积", () => {
       },
     });
     expect(
-      feedResponsesEvent(acc, {
+      feed({
         type: "response.completed",
         response: {
           status: "completed",
@@ -145,6 +147,20 @@ describe("Responses 流式累积", () => {
         },
       }),
     ).toBe("");
+    expect(updates.filter((update) => update.type === "tool/start")).toEqual([
+      { type: "tool/start", index: 2, id: "call_1", name: "ls" },
+    ]);
+    expect(
+      updates
+        .filter((update) => update.type === "tool/delta")
+        .map((update) => update.delta)
+        .join(""),
+    ).toBe('{"path":');
+    expect(
+      updates
+        .flatMap((update) => (update.type === "reasoning/delta" ? [update.delta] : []))
+        .join(""),
+    ).toBe("先看目录,再读文件");
     const turn = finishResponsesAcc(acc, false, "gpt-5.5");
     expect(turn).toMatchObject({
       text: "好I cannot help with that request. I can explain safer alternatives.",
@@ -505,8 +521,8 @@ describe("Responses 假服务器全链路", () => {
           log,
           provider,
           tools: [echo],
-          onDelta: (delta) => {
-            visible += delta;
+          onStream: (update) => {
+            if (update.type === "text/delta") visible += update.delta;
           },
         }),
       ).toBe("idle");

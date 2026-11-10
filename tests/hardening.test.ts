@@ -1,6 +1,7 @@
 import { getEventListeners } from "node:events";
 import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
+import type { GenerationUpdate } from "../src/provider.js";
 import {
   anthropic,
   feedAnthropicEvent,
@@ -69,6 +70,213 @@ it("请求取消不累积整轮监听器;本地超时不取消兄弟请求,整�
       controller.abort();
       await interrupted;
       await disconnected;
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+it("原生生成流隔离尝试、分片工具与最终权威参数;取消不交付完整调用", async () => {
+  let protocol: "chat" | "anthropic" | "responses" = "chat";
+  let attempt = 0;
+  let cancelling = false;
+  const input = '{"text":"你好"}';
+  const server = createServer((_req, res) => {
+    const first = ++attempt === 1 && !cancelling;
+    if (protocol === "responses" && first) {
+      res.writeHead(503);
+      res.end("retry");
+      return;
+    }
+    let events: unknown[];
+    if (protocol === "chat") {
+      events = [
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  { index: 0, function: { arguments: first ? '{"discarded":' : '{"text":' } },
+                ],
+              },
+            },
+          ],
+        },
+        ...(!first
+          ? [
+              {
+                choices: [
+                  {
+                    delta: {
+                      tool_calls: [
+                        { index: 0, id: "c1", function: { name: "echo", arguments: '"你好"}' } },
+                      ],
+                    },
+                  },
+                ],
+              },
+              { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+            ]
+          : []),
+      ];
+    } else if (protocol === "anthropic") {
+      events = [
+        {
+          type: "content_block_start",
+          index: 2,
+          content_block: { type: "tool_use", id: "c1", name: "echo" },
+        },
+        {
+          type: "content_block_delta",
+          index: 2,
+          delta: { type: "input_json_delta", partial_json: first ? '{"discarded":' : input },
+        },
+        first
+          ? { type: "error", error: { type: "overloaded_error", message: "retry" } }
+          : { type: "message_delta", delta: { stop_reason: "tool_use" } },
+      ];
+    } else {
+      events = [
+        {
+          type: "response.function_call_arguments.delta",
+          output_index: 1,
+          delta: '{"text":"draft"}',
+        },
+        {
+          type: "response.output_item.done",
+          output_index: 1,
+          item: {
+            type: "function_call",
+            id: "item",
+            call_id: "c1",
+            name: "echo",
+            arguments: input,
+          },
+        },
+        { type: "response.completed", response: { status: "completed" } },
+      ];
+    }
+    if (cancelling) {
+      const tail =
+        protocol === "chat"
+          ? [
+              {
+                choices: [
+                  {
+                    delta: {
+                      content: "late text",
+                      reasoning_content: "late thinking",
+                      tool_calls: [
+                        { index: 3, id: "late", function: { name: "echo", arguments: "{}" } },
+                      ],
+                    },
+                  },
+                ],
+              },
+            ]
+          : protocol === "anthropic"
+            ? [
+                {
+                  type: "content_block_delta",
+                  index: 0,
+                  delta: { type: "text_delta", text: "late text" },
+                },
+                { type: "content_block_start", index: 1, content_block: { type: "thinking" } },
+                {
+                  type: "content_block_delta",
+                  index: 1,
+                  delta: { type: "thinking_delta", thinking: "late thinking" },
+                },
+                {
+                  type: "content_block_start",
+                  index: 3,
+                  content_block: { type: "tool_use", id: "late", name: "echo" },
+                },
+                {
+                  type: "content_block_delta",
+                  index: 3,
+                  delta: { type: "input_json_delta", partial_json: "{}" },
+                },
+              ]
+            : [
+                { type: "response.output_text.delta", output_index: 0, delta: "late text" },
+                {
+                  type: "response.reasoning_summary_text.delta",
+                  output_index: 2,
+                  delta: "late thinking",
+                },
+                {
+                  type: "response.output_item.added",
+                  output_index: 3,
+                  item: { type: "function_call", id: "late-item", call_id: "late", name: "echo" },
+                },
+                { type: "response.function_call_arguments.delta", output_index: 3, delta: "{}" },
+              ];
+      // 同一 write 中的后续帧已经可读;abort 不能只依赖 fetch 停止下一次网络读取。
+      events.splice(events.length - 1, 0, ...tail);
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as { port: number };
+  const options = {
+    baseUrl: `http://127.0.0.1:${port}`,
+    apiKey: "local-fixture",
+    model: "fixture-model",
+    retry: { sleep: async () => {} },
+  };
+  try {
+    for (const [name, provider] of [
+      ["chat", openaiCompat(options)],
+      ["anthropic", anthropic(options)],
+      ["responses", openaiResponses(options)],
+    ] as const) {
+      protocol = name;
+      attempt = 0;
+      cancelling = false;
+      const updates: GenerationUpdate[] = [];
+      const turn = await provider.complete([], [], { onStream: (update) => updates.push(update) });
+      expect(turn.toolCalls).toEqual([{ id: "c1", name: "echo", args: { text: "你好" } }]);
+      expect(attempt).toBe(2);
+      expect(updates.filter((update) => update.type === "attempt/start")).toHaveLength(2);
+      expect(
+        updates.filter((update) => update.type === "attempt/end").map((update) => update.state),
+      ).toEqual(["error", "complete"]);
+      expect(updates.filter((update) => update.type === "tool/end")).toEqual([
+        {
+          type: "tool/end",
+          index: name === "chat" ? 0 : name === "anthropic" ? 2 : 1,
+          id: "c1",
+          name: "echo",
+          input,
+        },
+      ]);
+      expect(updates.at(-1)).toEqual({ type: "attempt/end", state: "complete" });
+      for (const cancelAt of ["tool/delta", "tool/end"] as const) {
+        const controller = new AbortController();
+        const cancelled: GenerationUpdate[] = [];
+        attempt = 0;
+        cancelling = true;
+        const stopped = await provider.complete([], [], {
+          signal: controller.signal,
+          onStream(update) {
+            cancelled.push(update);
+            if (update.type === cancelAt) controller.abort();
+          },
+        });
+        expect(stopped.stopReason).toBe("aborted");
+        expect(stopped.toolCalls).toEqual([]);
+        if (cancelAt === "tool/delta")
+          expect(cancelled.some((update) => update.type === "tool/end")).toBe(false);
+        const cancelledAt = cancelled.findIndex((update) => update.type === cancelAt);
+        expect(cancelledAt).toBeGreaterThanOrEqual(0);
+        expect(
+          cancelled.slice(cancelledAt + 1).filter((update) => update.type !== "attempt/end"),
+        ).toEqual([]);
+        expect(cancelled.at(-1)).toEqual({ type: "attempt/end", state: "aborted" });
+      }
     }
   } finally {
     server.closeAllConnections();

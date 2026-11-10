@@ -8,7 +8,7 @@ import {
 } from "../src/config.js";
 import type { AgentEvent } from "../src/events.js";
 import { deriveMessages, type Message } from "../src/messages.js";
-import { clampEffort, parseEffort } from "../src/provider.js";
+import { clampEffort, type GenerationUpdate, parseEffort } from "../src/provider.js";
 import {
   type AnthropicEvent,
   anthropic,
@@ -24,6 +24,7 @@ import { openaiCompat, openaiEffortParams } from "../src/providers/openai-chat.j
 describe("Anthropic 流式累积", () => {
   it("文本 + 工具调用分块累积,usage 来自 message_start 与 message_delta", () => {
     const acc = newAnthropicAcc();
+    const updates: GenerationUpdate[] = [];
     const events: AnthropicEvent[] = [
       { type: "message_start", message: { usage: { input_tokens: 120, output_tokens: 7 } } },
       { type: "content_block_start", index: 0, content_block: { type: "text" } },
@@ -49,8 +50,22 @@ describe("Anthropic 流式累积", () => {
       { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 30 } },
       { type: "message_stop" },
     ];
-    const deltas = events.map((e) => feedAnthropicEvent(acc, e)).filter(Boolean);
+    const deltas = events
+      .map((e) => feedAnthropicEvent(acc, e, (update) => updates.push(update)))
+      .filter(Boolean);
     expect(deltas).toEqual(["先看", "文件"]);
+    expect(
+      updates.flatMap((update) => (update.type === "text/delta" ? [update.delta] : [])).join(""),
+    ).toBe("先看文件");
+    expect(updates.filter((update) => update.type === "tool/start")).toEqual([
+      { type: "tool/start", index: 1, id: "tu_1", name: "read" },
+    ]);
+    expect(
+      updates
+        .filter((update) => update.type === "tool/delta")
+        .map((update) => update.delta)
+        .join(""),
+    ).toBe('{"path":"a.ts"}');
 
     const turn = finishAnthropicAcc(acc, false);
     expect(turn).toEqual({

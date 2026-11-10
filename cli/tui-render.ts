@@ -5,6 +5,7 @@ import { type Component, Container, Markdown, Spacer } from "@earendil-works/pi-
 import type { AgentEvent } from "../src/events.js";
 import { imageSummary } from "../src/images.js";
 import { composeContext, requestMessages } from "../src/messages.js";
+import type { GenerationUpdate } from "../src/provider.js";
 import { classifyError, type ErrorKind, hintFor } from "../src/providers/errors.js";
 import type { ChildInfo } from "../src/subagent.js";
 import { systemText } from "../src/system-prompt.js";
@@ -112,11 +113,63 @@ function flushStream(ctx: TuiContext): void {
   v.streamTimer = undefined;
   if (v.streaming) v.streaming.setText(v.streamBuffer);
   if (v.reasoningView) v.reasoningView.setText(ctx.renderReasoning(v.reasoningBuffer));
+  for (const tool of v.toolStreams.values()) {
+    tool.node.setText(
+      c.faint(
+        `· generating ${plainDisplayText(tool.name || "tool")} · ${tool.bytes} bytes received`,
+      ),
+    );
+  }
   ctx.tui.requestRender();
 }
 
+function clearToolStreams(ctx: TuiContext): void {
+  for (const { node } of ctx.view.toolStreams.values()) ctx.transcript.removeChild(node);
+  ctx.view.toolStreams.clear();
+}
+
+/** 统一消费临时生成流;正式参数与执行资格仍只来自最终助手事实。 */
+export function streamUpdate(ctx: TuiContext, update: GenerationUpdate): void {
+  const v = ctx.view;
+  switch (update.type) {
+    case "attempt/start":
+      finishStream(ctx, { text: "", reasoning: "" });
+      ctx.tui.requestRender();
+      return;
+    case "attempt/end":
+      clearToolStreams(ctx);
+      flushStream(ctx);
+      return;
+    case "text/delta":
+      streamDelta(ctx, update.delta);
+      return;
+    case "reasoning/delta":
+      streamReasoning(ctx, update.delta);
+      return;
+    case "tool/start": {
+      const node = new Block("");
+      v.toolStreams.set(update.index, { node, name: update.name, bytes: 0 });
+      ctx.transcript.addChild(node);
+      flushStream(ctx);
+      return;
+    }
+    case "tool/delta":
+    case "tool/end": {
+      const tool = v.toolStreams.get(update.index);
+      if (!tool) return;
+      tool.name = update.name;
+      tool.bytes =
+        update.type === "tool/end"
+          ? Buffer.byteLength(update.input)
+          : tool.bytes + Buffer.byteLength(update.delta);
+      if (!v.streamTimer) v.streamTimer = setTimeout(() => flushStream(ctx), STREAM_FRAME_MS);
+      return;
+    }
+  }
+}
+
 /** 流式回复正文:直接印,Markdown 照常渲染。增量按帧合并。 */
-export function streamDelta(ctx: TuiContext, d: string): void {
+function streamDelta(ctx: TuiContext, d: string): void {
   const v = ctx.view;
   if (!v.streaming) {
     v.streaming = new ReplyMarkdown();
@@ -130,7 +183,7 @@ export function streamDelta(ctx: TuiContext, d: string): void {
 }
 
 /** 推理内容不隐藏:thinking 模型的思考过程以淡字实时呈现。 */
-export function streamReasoning(ctx: TuiContext, d: string): void {
+function streamReasoning(ctx: TuiContext, d: string): void {
   const v = ctx.view;
   if (!v.reasoningView) {
     v.reasoningView = new Block("");
@@ -342,6 +395,7 @@ function finishStream(
     "text" | "reasoning" | "reasoningKind"
   >,
 ): void {
+  clearToolStreams(ctx);
   const { view: v, transcript } = ctx;
   if (v.streamTimer) clearTimeout(v.streamTimer);
   v.streamTimer = undefined;
@@ -508,6 +562,7 @@ function renderRequestError(
   ctx: TuiContext,
   e: Extract<AgentEvent, { type: "request/error" }>,
 ): void {
+  clearToolStreams(ctx);
   if (ctx.view.streaming || ctx.view.reasoningView) {
     finishStream(ctx, { text: ctx.view.streamBuffer, reasoning: ctx.view.reasoningBuffer });
     ctx.transcript.addChild(
@@ -654,6 +709,8 @@ export function render(ctx: TuiContext, e: AgentEvent, index: number, cwd?: stri
       break;
     }
     case "session/interrupt":
+      clearToolStreams(ctx);
+      break;
     case "session/start":
       break;
     case "session/exit":

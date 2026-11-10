@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { GenerationUpdate } from "../src/provider.js";
 import { feedChunk, finishAcc, newAcc } from "../src/providers/openai-chat.js";
 
 // SSE 累积是纯函数,不碰网络即可测:这是把流解析从 fetch 里拆出来的全部理由。
@@ -35,23 +36,70 @@ describe("stream accumulation", () => {
 
   it("tool_calls 按 index 分片累积,参数 JSON 跨 chunk 拼合", () => {
     const acc = newAcc();
-    feedChunk(acc, {
-      choices: [
-        {
-          delta: {
-            tool_calls: [{ index: 0, id: "c1", function: { name: "read", arguments: '{"pa' } }],
+    const updates: GenerationUpdate[] = [];
+    const stream = (update: GenerationUpdate) => updates.push(update);
+    feedChunk(
+      acc,
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                { index: 0, function: { arguments: '{"pa' } },
+                { index: 1, id: "c2", function: { name: "echo", arguments: '{"text":"' } },
+              ],
+            },
           },
-        },
-      ],
-    });
-    feedChunk(acc, {
-      choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'th":"a.txt"}' } }] } }],
-    });
+        ],
+      },
+      stream,
+    );
+    feedChunk(
+      acc,
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                { index: 1, function: { arguments: '你好"}' } },
+                { index: 0, id: "c1", function: { name: "read" } },
+                { index: 0, function: { arguments: 'th":"a.txt"}' } },
+              ],
+            },
+          },
+        ],
+      },
+      stream,
+    );
     feedChunk(acc, { choices: [{ delta: {}, finish_reason: "tool_calls" }] });
 
     const turn = finishAcc(acc, false);
     expect(turn.stopReason).toBe("tool");
-    expect(turn.toolCalls).toEqual([{ id: "c1", name: "read", args: { path: "a.txt" } }]);
+    expect(turn.toolCalls).toEqual([
+      { id: "c1", name: "read", args: { path: "a.txt" } },
+      { id: "c2", name: "echo", args: { text: "你好" } },
+    ]);
+    expect(
+      updates.filter((update) => update.type === "tool/start").map((update) => update.index),
+    ).toEqual([0, 1]);
+    expect(updates).toContainEqual({
+      type: "tool/delta",
+      index: 0,
+      id: "c1",
+      name: "read",
+      delta: "",
+    });
+    for (const [index, input] of [
+      [0, '{"path":"a.txt"}'],
+      [1, '{"text":"你好"}'],
+    ] as const) {
+      expect(
+        updates
+          .filter((update) => update.type === "tool/delta" && update.index === index)
+          .map((update) => (update.type === "tool/delta" ? update.delta : ""))
+          .join(""),
+      ).toBe(input);
+    }
   });
 
   it("参数 JSON 残缺不抛错,包成 __unparsed 交给工具层回喂", () => {

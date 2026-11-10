@@ -107,10 +107,11 @@ describe("界面运行与回放", () => {
       model: "m",
       async complete(_messages, _tools, opts) {
         took = ms(() => {
-          for (let i = 0; i < 5000; i++) opts?.onReasoning?.("Reasoning 中文 0123456789.\n");
-          opts?.onReasoning?.("FINAL_THINKING");
+          for (let i = 0; i < 5000; i++)
+            opts?.onStream?.({ type: "reasoning/delta", delta: "Reasoning 中文 0123456789.\n" });
+          opts?.onStream?.({ type: "reasoning/delta", delta: "FINAL_THINKING" });
         });
-        opts?.onDelta?.("FINAL_REPLY");
+        opts?.onStream?.({ type: "text/delta", delta: "FINAL_REPLY" });
         return { text: "FINAL_REPLY", reasoning, toolCalls: [], stopReason: "end" };
       },
     };

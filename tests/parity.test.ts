@@ -530,7 +530,9 @@ describe("上下文口径:实测优先", () => {
           provider,
           tools: [],
           signal: cancel.signal,
-          onDelta: () => cancel.abort(),
+          onStream: (update) => {
+            if (update.type === "text/delta") cancel.abort();
+          },
         }),
       ).toBe("aborted");
       expect(log.events.find((event) => event.type === "assistant/message")).toMatchObject({

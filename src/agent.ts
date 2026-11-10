@@ -4,7 +4,7 @@ import { now } from "./events.js";
 import type { ImageInput } from "./images.js";
 import type { EventLog } from "./log.js";
 import { runTurn, type TurnDeps, type TurnOutcome } from "./loop.js";
-import type { EffortLevel, Provider } from "./provider.js";
+import type { CompleteOptions, EffortLevel, Provider } from "./provider.js";
 import { RECORDING_FULL } from "./recording.js";
 import type { Tool } from "./tools.js";
 
@@ -14,8 +14,7 @@ export type AgentOptions = {
   tools: Tool[] | (() => readonly Tool[]);
   slots?: TurnDeps["slots"];
   compaction?: TurnDeps["compaction"];
-  onDelta?: (textDelta: string) => void;
-  onReasoning?: (reasoningDelta: string) => void;
+  onStream?: CompleteOptions["onStream"];
   onRaw?: (line: string) => void;
   onRequest?: (body: string) => void;
   /** 强度级别,缺省不传;setEffort 会话中切换,下一请求生效。 */
@@ -278,8 +277,7 @@ export class Agent {
           ...(this.opts.slots && { slots: this.opts.slots }),
           ...(this.opts.compaction && { compaction: this.opts.compaction }),
           ...(manualCompaction !== undefined && { manualCompaction }),
-          ...(this.opts.onDelta && { onDelta: this.opts.onDelta }),
-          ...(this.opts.onReasoning && { onReasoning: this.opts.onReasoning }),
+          ...(this.opts.onStream && { onStream: this.opts.onStream }),
           ...(this.opts.onRaw && { onRaw: this.opts.onRaw }),
           ...(this.opts.onRequest && { onRequest: this.opts.onRequest }),
           effort: () => this.opts.effort,

@@ -25,7 +25,7 @@ function scripted(turns: AssistantTurn[]): Provider {
     async complete(_m, _t, opts) {
       const t = turns[i++];
       if (!t) throw new Error("脚本越界");
-      if (t.text && opts?.onDelta) opts.onDelta(t.text); // 模拟流式:整段作为一次增量
+      if (t.text) opts?.onStream?.({ type: "text/delta", delta: t.text }); // 模拟流式:整段作为一次增量
       return t;
     },
   };
@@ -72,7 +72,8 @@ function scriptedB(turns: AssistantTurn[], extra: Partial<Provider> = {}): Provi
     model: "m",
     async complete(_m, _t, opts) {
       const t = turns[i++] ?? { text: "done", toolCalls: [], stopReason: "end" };
-      if (t.reasoning && opts?.onReasoning) opts.onReasoning(t.reasoning.slice(0, 2));
+      if (t.reasoning)
+        opts?.onStream?.({ type: "reasoning/delta", delta: t.reasoning.slice(0, 2) });
       return t;
     },
     ...extra,
@@ -393,15 +394,31 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     const provider: Provider = {
       model: "fake-model",
       async complete(_messages, _tools, opts) {
+        opts?.onStream?.({ type: "attempt/start" });
         if (attempt++ === 0) {
-          opts?.onReasoning?.("FAILED_THINKING\n");
-          opts?.onReasoning?.("FAILED_TAIL");
-          opts?.onDelta?.("FAILED_REPLY ");
-          opts?.onDelta?.("LAST_FRAGMENT");
+          opts?.onStream?.({
+            type: "tool/start",
+            index: 0,
+            id: "pending",
+            name: "unfinished_tool",
+          });
+          opts?.onStream?.({
+            type: "tool/delta",
+            index: 0,
+            id: "pending",
+            name: "unfinished_tool",
+            delta: '{"text":"partial',
+          });
+          opts?.onStream?.({ type: "reasoning/delta", delta: "FAILED_THINKING\n" });
+          opts?.onStream?.({ type: "reasoning/delta", delta: "FAILED_TAIL" });
+          opts?.onStream?.({ type: "text/delta", delta: "FAILED_REPLY " });
+          opts?.onStream?.({ type: "text/delta", delta: "LAST_FRAGMENT" });
+          opts?.onStream?.({ type: "attempt/end", state: "error" });
           throw new Error("网络断了");
         }
-        opts?.onReasoning?.("NEW_THINKING");
-        opts?.onDelta?.("NEW_REPLY");
+        opts?.onStream?.({ type: "reasoning/delta", delta: "NEW_THINKING" });
+        opts?.onStream?.({ type: "text/delta", delta: "NEW_REPLY" });
+        opts?.onStream?.({ type: "attempt/end", state: "complete" });
         return { text: "NEW_REPLY", reasoning: "NEW_THINKING", toolCalls: [], stopReason: "end" };
       },
     };
@@ -415,6 +432,8 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
       expect(shown).toContain("/inspect raw");
       expect(shown).toContain("FAILED_REPLY LAST_FRAGMENT");
       expect(shown).toContain("Partial response");
+      expect(shown).not.toContain("unfinished_tool");
+      expect(shown).not.toContain("bytes received");
       expect(app.agent.running).toBe(false);
       term.feed("\x14");
       expect(text(app)).toContain("FAILED_TAIL");
@@ -439,9 +458,19 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     const provider: Provider = {
       model: "fake-model",
       async complete(_m, _t, opts) {
+        opts?.onStream?.({ type: "attempt/start" });
+        opts?.onStream?.({ type: "tool/start", index: 0, id: "pending", name: "edit" });
+        opts?.onStream?.({
+          type: "tool/delta",
+          index: 0,
+          id: "pending",
+          name: "edit",
+          delta: '{"path":"a.ts"',
+        });
         await new Promise<void>((r) =>
           opts?.signal?.addEventListener("abort", () => r(), { once: true }),
         );
+        opts?.onStream?.({ type: "attempt/end", state: "aborted" });
         return { text: "半截", toolCalls: [], stopReason: "aborted" };
       },
     };
@@ -449,6 +478,7 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     const running = app.submit("长任务");
     await new Promise((r) => setImmediate(r));
     expect(text(app)).toContain("Waiting for model");
+    expect(text(app)).toContain("generating edit");
     term.feed("\x1b[5;2~");
     expect(text(app)).toContain("Esc return live");
     term.feed("\x1b");
@@ -459,6 +489,7 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     const doc = text(app);
     expect(doc).toContain("— interrupted —");
     expect(doc).toContain("Interrupted");
+    expect(doc).not.toContain("generating edit");
     expect(app.agent.running).toBe(false);
     app.stop();
   });
@@ -529,8 +560,8 @@ describe("少见事件与流式思考的渲染", () => {
         async complete(_messages, _tools, opts) {
           started();
           await wait;
-          opts?.onReasoning?.("late thinking after stop");
-          opts?.onDelta?.("late reply after stop");
+          opts?.onStream?.({ type: "reasoning/delta", delta: "late thinking after stop" });
+          opts?.onStream?.({ type: "text/delta", delta: "late reply after stop" });
           return { text: "late reply after stop", toolCalls: [], stopReason: "end" };
         },
       },
@@ -608,7 +639,7 @@ describe("少见事件与流式思考的渲染", () => {
     app.stop();
   });
 
-  it("流式思考:定稿带思考时保留节点并可 Ctrl+T 展开;定稿无思考时撤掉节点;task 调用留槽", async () => {
+  it("生成流:重试清理工具预览,完整事实接管正文、思考与调用;task 调用留槽", async () => {
     let step = 0;
     let continueStep!: () => void;
     let firstStarted!: () => void;
@@ -621,19 +652,48 @@ describe("少见事件与流式思考的渲染", () => {
     const { app, term, log } = bootB({
       model: "m",
       async complete(_messages, _tools, opts) {
+        opts?.onStream?.({ type: "attempt/start" });
         if (step++ > 0) {
-          opts?.onReasoning?.("discarded thinking\n");
-          opts?.onReasoning?.("discarded tail");
+          opts?.onStream?.({ type: "reasoning/delta", delta: "discarded thinking\n" });
+          opts?.onStream?.({ type: "reasoning/delta", delta: "discarded tail" });
+          opts?.onStream?.({ type: "attempt/end", state: "complete" });
           return { text: "final", toolCalls: [], stopReason: "end", reasoning: "" };
         }
-        opts?.onReasoning?.("thinking\n");
-        opts?.onReasoning?.("hard about it");
-        opts?.onDelta?.("reply ");
-        opts?.onDelta?.("in progress");
+        opts?.onStream?.({ type: "tool/start", index: 0, id: "discard", name: "discarded_tool" });
+        opts?.onStream?.({
+          type: "tool/delta",
+          index: 0,
+          id: "discard",
+          name: "discarded_tool",
+          delta: "x".repeat(1000),
+        });
+        opts?.onStream?.({ type: "attempt/end", state: "error" });
+        opts?.onRetry?.({ attempt: 1, delayMs: 0, error: new Error("Retry fixture") });
+        opts?.onStream?.({ type: "attempt/start" });
+        opts?.onStream?.({ type: "tool/start", index: 0, id: "", name: "" });
+        opts?.onStream?.({
+          type: "tool/delta",
+          index: 0,
+          id: "t1",
+          name: "task",
+          delta: '{"task":"子任务',
+        });
+        opts?.onStream?.({ type: "reasoning/delta", delta: "thinking\n" });
+        opts?.onStream?.({ type: "reasoning/delta", delta: "hard about it" });
+        opts?.onStream?.({ type: "text/delta", delta: "reply " });
+        opts?.onStream?.({ type: "text/delta", delta: "in progress" });
         firstStarted();
         await paused;
-        opts?.onReasoning?.("\nFINAL_REASONING");
-        opts?.onDelta?.("LATE_DRAFT");
+        opts?.onStream?.({ type: "reasoning/delta", delta: "\nFINAL_REASONING" });
+        opts?.onStream?.({ type: "text/delta", delta: "LATE_DRAFT" });
+        opts?.onStream?.({
+          type: "tool/end",
+          index: 0,
+          id: "t1",
+          name: "task",
+          input: '{"task":"sub job"}',
+        });
+        opts?.onStream?.({ type: "attempt/end", state: "complete" });
         return {
           text: "first reply",
           toolCalls: [{ id: "t1", name: "task", args: { task: "sub job" } }],
@@ -648,6 +708,12 @@ describe("少见事件与流式思考的渲染", () => {
     expect(doc(app)).toContain("thinking");
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(doc(app)).toContain("reply in progress");
+    expect(doc(app)).toContain(
+      `generating task · ${Buffer.byteLength('{"task":"子任务')} bytes received`,
+    );
+    expect(doc(app)).not.toContain("discarded_tool");
+    expect(log.events.some((event) => event.type === "assistant/message")).toBe(false);
+    expect(log.events.some((event) => event.type === "tool/result")).toBe(false);
     term.feed("\x14");
     expect(doc(app)).toContain("hard about it");
     continueStep();
@@ -664,6 +730,8 @@ describe("少见事件与流式思考的渲染", () => {
     expect(d).toContain("final");
     expect(d).not.toContain("LATE_DRAFT");
     expect(d).not.toContain("discarded thinking");
+    expect(d).not.toContain("generating task");
+    expect(d.match(/» task/g)).toHaveLength(1);
     expect(log.events.find((event) => event.type === "assistant/message")).toMatchObject({
       reasoning: "thinking\nhard about it\nFINAL_REASONING",
       text: "first reply",

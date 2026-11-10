@@ -5,6 +5,7 @@ import type { StopReason, ToolCall, Usage } from "../events.js";
 import type { Message } from "../messages.js";
 import {
   type AssistantTurn,
+  type CompleteOptions,
   clampEffort,
   type EffortLevel,
   type FieldTable,
@@ -16,6 +17,7 @@ import { ProviderError, parseRetryAfter } from "./errors.js";
 import { fetchModelIds, linkedAbort, recordedFetch } from "./http.js";
 import { mergeRetry, type RetryOptions, withRetry } from "./retry.js";
 import { sseEvents, streamError } from "./sse.js";
+import { withStreamAttempt } from "./stream.js";
 
 /** 流式事件的最小类型,只声明用到的字段。 */
 export type AnthropicEvent =
@@ -109,8 +111,12 @@ export function thinkingText(acc: AnthropicAcc): string {
     .join("");
 }
 
-/** 喂入一个已解析的事件,返回本事件的文本增量。纯函数,不碰网络。 */
-export function feedAnthropicEvent(acc: AnthropicAcc, ev: AnthropicEvent): string {
+/** 喂入一个已解析的事件,返回本事件的文本增量;可同步观察临时生成。 */
+export function feedAnthropicEvent(
+  acc: AnthropicAcc,
+  ev: AnthropicEvent,
+  onStream?: CompleteOptions["onStream"],
+): string {
   switch (ev.type) {
     case "message_start": {
       if (ev.message.id) acc.extras.id = ev.message.id;
@@ -137,7 +143,10 @@ export function feedAnthropicEvent(acc: AnthropicAcc, ev: AnthropicEvent): strin
       const b = ev.content_block;
       if (b.type === "tool_use") {
         const t = b as { id: string; name: string };
+        const existing = acc.blocks.has(ev.index);
         acc.blocks.set(ev.index, { id: t.id, name: t.name, argsJson: "" });
+        if (!existing) onStream?.({ type: "tool/start", index: ev.index, id: t.id, name: t.name });
+        else onStream?.({ type: "tool/delta", index: ev.index, id: t.id, name: t.name, delta: "" });
       } else if (b.type === "thinking") {
         acc.thinking.set(ev.index, { type: "thinking", thinking: "", signature: "" });
       } else if (b.type === "redacted_thinking") {
@@ -153,17 +162,32 @@ export function feedAnthropicEvent(acc: AnthropicAcc, ev: AnthropicEvent): strin
       if (d.type === "text_delta") {
         const text = (d as { text: string }).text;
         acc.text += text;
+        if (text) onStream?.({ type: "text/delta", delta: text });
         return text;
       }
       if (d.type === "input_json_delta") {
         const slot = acc.blocks.get(ev.index);
-        if (slot) slot.argsJson += (d as { partial_json: string }).partial_json;
+        if (slot) {
+          const delta = (d as { partial_json: string }).partial_json;
+          slot.argsJson += delta;
+          if (delta)
+            onStream?.({
+              type: "tool/delta",
+              index: ev.index,
+              id: slot.id,
+              name: slot.name,
+              delta,
+            });
+        }
       }
       if (d.type === "thinking_delta" || d.type === "signature_delta") {
         const slot = acc.thinking.get(ev.index);
         if (slot?.type === "thinking") {
-          if (d.type === "thinking_delta") slot.thinking += (d as { thinking: string }).thinking;
-          else slot.signature = (d as { signature: string }).signature;
+          if (d.type === "thinking_delta") {
+            const delta = (d as { thinking: string }).thinking;
+            slot.thinking += delta;
+            if (delta) onStream?.({ type: "reasoning/delta", delta });
+          } else slot.signature = (d as { signature: string }).signature;
         }
       }
       return "";
@@ -507,7 +531,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
     async complete(
       messages: Message[],
       tools: ToolDef[],
-      { onDelta, onReasoning, signal, onRetry, onRaw, onRequest, record, effort, maxTokens } = {},
+      { onStream, signal, onRetry, onRaw, onRequest, record, effort, maxTokens } = {},
     ) {
       const body = JSON.stringify(
         wire(messages, tools, {
@@ -517,62 +541,73 @@ export function anthropic(opts: AnthropicOptions): Provider {
       );
 
       return withRetry(
-        async () => {
-          const acc = newAnthropicAcc();
-          const ac = linkedAbort(signal);
-          let saved: Promise<void> | undefined;
-          try {
-            onRequest?.(body);
-            const captured = await recordedFetch(
-              `${baseUrl}/v1/messages`,
-              {
-                method: "POST",
-                headers,
-                body,
-                signal: ac.signal,
-              },
-              record,
-            );
-            const res = captured.response;
-            saved = captured.saved;
-            if (!res.ok || !res.body) {
-              const text = await res.text();
-              const retryAfterMs = parseRetryAfter(res.headers);
-              throw new ProviderError(`provider ${res.status}: ${text}`, {
-                status: res.status,
-                body: text,
-                ...(retryAfterMs !== undefined && { retryAfterMs }),
+        () =>
+          withStreamAttempt(onStream, signal, async (emit) => {
+            const acc = newAnthropicAcc();
+            const ac = linkedAbort(signal);
+            let saved: Promise<void> | undefined;
+            let turn: AssistantTurn;
+            try {
+              onRequest?.(body);
+              const captured = await recordedFetch(
+                `${baseUrl}/v1/messages`,
+                {
+                  method: "POST",
+                  headers,
+                  body,
+                  signal: ac.signal,
+                },
+                record,
+              );
+              const res = captured.response;
+              saved = captured.saved;
+              if (!res.ok || !res.body) {
+                const text = await res.text();
+                const retryAfterMs = parseRetryAfter(res.headers);
+                throw new ProviderError(`provider ${res.status}: ${text}`, {
+                  status: res.status,
+                  body: text,
+                  ...(retryAfterMs !== undefined && { retryAfterMs }),
+                });
+              }
+              const events = sseEvents(res.body as AsyncIterable<Uint8Array>, {
+                ...(onRaw && { onRaw }),
+                ...(opts.stallTimeoutMs !== undefined && { stallTimeoutMs: opts.stallTimeoutMs }),
+                onStall: () => ac.abort(),
               });
+              for await (const ev of events) {
+                feedAnthropicEvent(acc, ev as AnthropicEvent, emit);
+              }
+              if (acc.error) {
+                // HTTP 200 之后流内报错(如 overloaded_error):尚未吐字时可重试。
+                throw new ProviderError(`provider stream error: ${acc.error}`, {
+                  retryable: !acc.text && /overloaded|api_error|rate_limit/i.test(acc.error),
+                  body: acc.error,
+                });
+              }
+              turn = finishAnthropicAcc(acc, Boolean(signal?.aborted), opts.model, { mode });
+            } catch (err) {
+              if (signal?.aborted) turn = finishAnthropicAcc(acc, true, opts.model, { mode });
+              else throw streamError(err, Boolean(acc.text || thinkingText(acc)));
+            } finally {
+              await saved;
             }
-            const events = sseEvents(res.body as AsyncIterable<Uint8Array>, {
-              ...(onRaw && { onRaw }),
-              ...(opts.stallTimeoutMs !== undefined && { stallTimeoutMs: opts.stallTimeoutMs }),
-              onStall: () => ac.abort(),
-            });
-            for await (const ev of events) {
-              const before = thinkingText(acc).length;
-              const delta = feedAnthropicEvent(acc, ev as AnthropicEvent);
-              if (delta && onDelta) onDelta(delta);
-              if (onReasoning) {
-                const now = thinkingText(acc);
-                if (now.length > before) onReasoning(now.slice(before));
+            if (turn.stopReason !== "aborted") {
+              for (const [index, slot] of acc.blocks) {
+                emit?.({
+                  type: "tool/end",
+                  index,
+                  id: slot.id,
+                  name: slot.name,
+                  input: slot.argsJson,
+                });
               }
             }
-            if (acc.error) {
-              // HTTP 200 之后流内报错(如 overloaded_error):尚未吐字时可重试。
-              throw new ProviderError(`provider stream error: ${acc.error}`, {
-                retryable: !acc.text && /overloaded|api_error|rate_limit/i.test(acc.error),
-                body: acc.error,
-              });
-            }
-            return finishAnthropicAcc(acc, false, opts.model, { mode });
-          } catch (err) {
-            if (signal?.aborted) return finishAnthropicAcc(acc, true, opts.model, { mode });
-            throw streamError(err, Boolean(acc.text || thinkingText(acc)));
-          } finally {
-            await saved;
-          }
-        },
+            // 录制和最后一次展示回调都可能取消;交付前再判定,正常完成不重复解析。
+            if (signal?.aborted && turn.stopReason !== "aborted")
+              turn = finishAnthropicAcc(acc, true, opts.model, { mode });
+            return turn;
+          }),
         mergeRetry(opts.retry, { ...(signal && { signal }), ...(onRetry && { onRetry }) }),
       );
     },

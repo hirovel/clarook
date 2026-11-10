@@ -79,8 +79,10 @@ function scripted(steps: Step[], model = "fake-agent"): Provider {
   };
 }
 function emit(t: AssistantTurn, opts: CompleteOptions): AssistantTurn {
-  if (t.reasoning && opts.onReasoning) opts.onReasoning(t.reasoning);
-  if (t.text && opts.onDelta) opts.onDelta(t.text);
+  opts.onStream?.({ type: "attempt/start" });
+  if (t.reasoning) opts.onStream?.({ type: "reasoning/delta", delta: t.reasoning });
+  if (t.text) opts.onStream?.({ type: "text/delta", delta: t.text });
+  opts.onStream?.({ type: "attempt/end", state: t.stopReason === "aborted" ? "aborted" : "complete" });
   return t;
 }
 
@@ -623,8 +625,8 @@ for (const [width, height] of [[60, 24], [120, 36]] as const) {
     async complete(_messages, _tools, opts) {
       if (fail) throw new ProviderError("The local fixture is unavailable.", { status: 503 });
       if (++requests > 1) return { text: "The update is complete. The execution boundary is unchanged.", toolCalls: [], stopReason: "end", usage: { inputTokens: 1800, outputTokens: 32 } };
-      opts?.onReasoning?.("Reviewing the current execution boundary before proposing a change.");
-      opts?.onDelta?.("The runtime currently mixes task state, context usage and shortcut hints.\n\nI am checking the existing components before updating their layout.");
+      opts?.onStream?.({ type: "reasoning/delta", delta: "Reviewing the current execution boundary before proposing a change." });
+      opts?.onStream?.({ type: "text/delta", delta: "The runtime currently mixes task state, context usage and shortcut hints.\n\nI am checking the existing components before updating their layout." });
       await new Promise<void>((resolve) => { release = resolve; });
       return { text: "The proposed status component keeps actions visible at narrow widths.", toolCalls: [{ id: "preview-write", name: "write", args: { path: "cli/runtime.ts", content: Array.from({ length: 35 }, (_, n) => `// Proposed layout line ${n + 1}`).join("\n") } }], stopReason: "tool", usage: { inputTokens: 1600, outputTokens: 60 } };
     },

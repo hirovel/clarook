@@ -6,6 +6,7 @@ import type { StopReason, ToolCall, Usage } from "../events.js";
 import type { Message } from "../messages.js";
 import {
   type AssistantTurn,
+  type CompleteOptions,
   clampEffort,
   type EffortLevel,
   type FieldTable,
@@ -17,6 +18,7 @@ import { ProviderError, parseRetryAfter } from "./errors.js";
 import { fetchModelIds, linkedAbort, recordedFetch } from "./http.js";
 import { mergeRetry, type RetryOptions, withRetry } from "./retry.js";
 import { sseEvents, streamError } from "./sse.js";
+import { withStreamAttempt } from "./stream.js";
 
 /** 回传的推理项。id 与 encrypted_content 都原样带回;summary 只是给人看的。 */
 export type ReasoningItem = {
@@ -104,13 +106,34 @@ export function newResponsesAcc(): ResponsesAcc {
   return { items: new Map(), extras: {} };
 }
 
-function itemAt(acc: ResponsesAcc, index: number, type = ""): Item {
+function itemAt(
+  acc: ResponsesAcc,
+  index: number,
+  item: string | OutputItem = "",
+  onStream?: CompleteOptions["onStream"],
+): Item {
+  const type = typeof item === "string" ? item : item.type;
   let it = acc.items.get(index);
+  const toolStarted = type === "function_call" && it?.type !== "function_call";
   if (!it) {
     it = { type, id: "", text: [], callId: "", name: "", argsJson: "", summary: "" };
     acc.items.set(index, it);
   }
+  const previousId = it.callId || it.id;
+  const previousName = it.name;
   if (type && !it.type) it.type = type;
+  if (typeof item !== "string") {
+    if (item.id) it.id = item.id;
+    if (item.call_id) it.callId = item.call_id;
+    if (item.name) it.name = item.name;
+  }
+  if (toolStarted) onStream?.({ type: "tool/start", index, id: it.callId || it.id, name: it.name });
+  else if (
+    it.type === "function_call" &&
+    (previousId !== (it.callId || it.id) || previousName !== it.name)
+  ) {
+    onStream?.({ type: "tool/delta", index, id: it.callId || it.id, name: it.name, delta: "" });
+  }
   return it;
 }
 
@@ -121,15 +144,22 @@ function setTextPart(it: Item, index: number, text: string): string {
   return text.startsWith(before) ? text.slice(before.length) : "";
 }
 
-function finishItem(acc: ResponsesAcc, index: number, item: OutputItem): string {
+function finishItem(
+  acc: ResponsesAcc,
+  index: number,
+  item: OutputItem,
+  onStream?: CompleteOptions["onStream"],
+): string {
   // 完成项以服务器给的为准:参数全文、加密推理、摘要段落与可见正文。
-  const it = itemAt(acc, index, item.type);
-  if (item.id) it.id = item.id;
-  if (item.call_id) it.callId = item.call_id;
-  if (item.name) it.name = item.name;
+  const it = itemAt(acc, index, item, onStream);
   if (typeof item.arguments === "string") it.argsJson = item.arguments;
   if (item.encrypted_content) it.encrypted = item.encrypted_content;
-  if (item.summary) it.summary = item.summary.map((s) => s.text).join("\n\n");
+  if (item.summary) {
+    const summary = item.summary.map((s) => s.text).join("\n\n");
+    const delta = summary.startsWith(it.summary) ? summary.slice(it.summary.length) : "";
+    emitSummary(acc, index, it, delta, onStream);
+    it.summary = summary;
+  }
   if (item.type !== "message" || !item.content) return "";
   const delta = item.content
     .map((part, partIndex) =>
@@ -145,45 +175,79 @@ function finishItem(acc: ResponsesAcc, index: number, item: OutputItem): string 
     )
     .join("");
   it.text.length = item.content.length;
+  if (delta) onStream?.({ type: "text/delta", delta });
   return delta;
 }
 
-/** 喂入一个已解析的事件,返回本事件的文本增量。纯函数,不碰网络。 */
-export function feedResponsesEvent(acc: ResponsesAcc, ev: ResponsesEvent): string {
+/** 只传新摘要片段;不在每个参数片段上排序并重建全部思考全文。 */
+function emitSummary(
+  acc: ResponsesAcc,
+  index: number,
+  it: Item,
+  delta: string,
+  onStream: CompleteOptions["onStream"],
+): void {
+  if (!delta || !onStream) return;
+  const separator =
+    !it.summary &&
+    [...acc.items].some(
+      ([i, other]) => i !== index && other.type === "reasoning" && Boolean(other.summary),
+    )
+      ? "\n\n"
+      : "";
+  onStream({ type: "reasoning/delta", delta: separator + delta });
+}
+
+/** 喂入一个已解析的事件,返回本事件的文本增量;可同步观察临时生成。 */
+export function feedResponsesEvent(
+  acc: ResponsesAcc,
+  ev: ResponsesEvent,
+  onStream?: CompleteOptions["onStream"],
+): string {
   const idx = ev.output_index ?? 0;
   switch (ev.type) {
-    case "response.output_item.added": {
-      const it = itemAt(acc, idx, ev.item?.type);
-      if (ev.item?.id) it.id = ev.item.id;
-      if (ev.item?.call_id) it.callId = ev.item.call_id;
-      if (ev.item?.name) it.name = ev.item.name;
+    case "response.output_item.added":
+      itemAt(acc, idx, ev.item ?? "", onStream);
       return "";
-    }
     case "response.output_text.delta":
     case "response.refusal.delta": {
       const it = itemAt(acc, idx, "message");
       const part = ev.content_index ?? 0;
       const delta = ev.delta ?? "";
       it.text[part] = (it.text[part] ?? "") + delta;
+      if (delta) onStream?.({ type: "text/delta", delta });
       return delta;
     }
     case "response.output_text.done":
     case "response.refusal.done": {
       const it = itemAt(acc, idx, "message");
-      return setTextPart(it, ev.content_index ?? 0, ev.refusal ?? ev.text ?? "");
+      const delta = setTextPart(it, ev.content_index ?? 0, ev.refusal ?? ev.text ?? "");
+      if (delta) onStream?.({ type: "text/delta", delta });
+      return delta;
     }
     case "response.reasoning_summary_text.delta": {
       const it = itemAt(acc, idx, "reasoning");
-      it.summary += ev.delta ?? "";
+      const delta = ev.delta ?? "";
+      emitSummary(acc, idx, it, delta, onStream);
+      it.summary += delta;
       return "";
     }
     case "response.function_call_arguments.delta": {
-      const it = itemAt(acc, idx, "function_call");
-      it.argsJson += ev.delta ?? "";
+      const it = itemAt(acc, idx, "function_call", onStream);
+      const delta = ev.delta ?? "";
+      it.argsJson += delta;
+      if (delta)
+        onStream?.({
+          type: "tool/delta",
+          index: idx,
+          id: it.callId || it.id,
+          name: it.name,
+          delta,
+        });
       return "";
     }
     case "response.output_item.done":
-      return ev.item ? finishItem(acc, idx, ev.item) : "";
+      return ev.item ? finishItem(acc, idx, ev.item, onStream) : "";
     case "response.completed":
     case "response.incomplete":
     case "response.failed": {
@@ -215,7 +279,7 @@ export function feedResponsesEvent(acc: ResponsesAcc, ev: ResponsesEvent): strin
           ...(reasoning !== undefined && { reasoningTokens: reasoning }),
         };
       }
-      return r?.output?.map((item, index) => finishItem(acc, index, item)).join("") ?? "";
+      return r?.output?.map((item, index) => finishItem(acc, index, item, onStream)).join("") ?? "";
     }
     case "error":
       acc.error = `${ev.error?.code ?? "error"}: ${ev.error?.message ?? ev.message ?? ""}`;
@@ -452,7 +516,7 @@ export function openaiResponses(opts: OpenAIResponsesOptions): Provider {
     async complete(
       messages,
       tools,
-      { onDelta, onReasoning, signal, onRetry, onRaw, onRequest, record, effort, maxTokens } = {},
+      { onStream, signal, onRetry, onRaw, onRequest, record, effort, maxTokens } = {},
     ) {
       const body = JSON.stringify(
         wire(messages, tools, {
@@ -461,66 +525,78 @@ export function openaiResponses(opts: OpenAIResponsesOptions): Provider {
         }),
       );
       return withRetry(
-        async () => {
-          const acc = newResponsesAcc();
-          const ac = linkedAbort(signal);
-          let saved: Promise<void> | undefined;
-          try {
-            onRequest?.(body);
-            const captured = await recordedFetch(
-              `${baseUrl}/responses`,
-              {
-                method: "POST",
-                headers,
-                body,
-                signal: ac.signal,
-              },
-              record,
-            );
-            const res = captured.response;
-            saved = captured.saved;
-            if (!res.ok || !res.body) {
-              const text = await res.text();
-              const retryAfterMs = parseRetryAfter(res.headers);
-              throw new ProviderError(`provider ${res.status}: ${text}`, {
-                status: res.status,
-                body: text,
-                ...(retryAfterMs !== undefined && { retryAfterMs }),
+        () =>
+          withStreamAttempt(onStream, signal, async (emit) => {
+            const acc = newResponsesAcc();
+            const ac = linkedAbort(signal);
+            let saved: Promise<void> | undefined;
+            let turn: AssistantTurn;
+            try {
+              onRequest?.(body);
+              const captured = await recordedFetch(
+                `${baseUrl}/responses`,
+                {
+                  method: "POST",
+                  headers,
+                  body,
+                  signal: ac.signal,
+                },
+                record,
+              );
+              const res = captured.response;
+              saved = captured.saved;
+              if (!res.ok || !res.body) {
+                const text = await res.text();
+                const retryAfterMs = parseRetryAfter(res.headers);
+                throw new ProviderError(`provider ${res.status}: ${text}`, {
+                  status: res.status,
+                  body: text,
+                  ...(retryAfterMs !== undefined && { retryAfterMs }),
+                });
+              }
+              const events = sseEvents(res.body as AsyncIterable<Uint8Array>, {
+                ...(onRaw && { onRaw }),
+                ...(opts.stallTimeoutMs !== undefined && { stallTimeoutMs: opts.stallTimeoutMs }),
+                onStall: () => ac.abort(),
               });
+              for await (const ev of events) {
+                feedResponsesEvent(acc, ev as ResponsesEvent, emit);
+              }
+              if (acc.error) {
+                throw new ProviderError(`provider stream error: ${acc.error}`, {
+                  retryable:
+                    acc.items.size === 0 && /rate_limit|server_error|overloaded/i.test(acc.error),
+                });
+              }
+              if (!acc.status) {
+                throw new ProviderError("stream ended without response.completed", {
+                  retryable: acc.items.size === 0,
+                });
+              }
+              turn = finishResponsesAcc(acc, Boolean(signal?.aborted), opts.model);
+            } catch (err) {
+              if (signal?.aborted) turn = finishResponsesAcc(acc, true, opts.model);
+              else throw streamError(err, acc.items.size > 0);
+            } finally {
+              await saved;
             }
-            const events = sseEvents(res.body as AsyncIterable<Uint8Array>, {
-              ...(onRaw && { onRaw }),
-              ...(opts.stallTimeoutMs !== undefined && { stallTimeoutMs: opts.stallTimeoutMs }),
-              onStall: () => ac.abort(),
-            });
-            for await (const ev of events) {
-              const before = summaryText(acc).length;
-              const delta = feedResponsesEvent(acc, ev as ResponsesEvent);
-              if (delta && onDelta) onDelta(delta);
-              if (onReasoning) {
-                const now = summaryText(acc);
-                if (now.length > before) onReasoning(now.slice(before));
+            if (turn.stopReason !== "aborted") {
+              for (const [index, slot] of acc.items) {
+                if (slot.type === "function_call")
+                  emit?.({
+                    type: "tool/end",
+                    index,
+                    id: slot.callId || slot.id,
+                    name: slot.name,
+                    input: slot.argsJson,
+                  });
               }
             }
-            if (acc.error) {
-              throw new ProviderError(`provider stream error: ${acc.error}`, {
-                retryable:
-                  acc.items.size === 0 && /rate_limit|server_error|overloaded/i.test(acc.error),
-              });
-            }
-            if (!acc.status) {
-              throw new ProviderError("stream ended without response.completed", {
-                retryable: acc.items.size === 0,
-              });
-            }
-            return finishResponsesAcc(acc, false, opts.model);
-          } catch (err) {
-            if (signal?.aborted) return finishResponsesAcc(acc, true, opts.model);
-            throw streamError(err, acc.items.size > 0);
-          } finally {
-            await saved;
-          }
-        },
+            // 录制和最后一次展示回调都可能取消;交付前再判定,正常完成不重复解析。
+            if (signal?.aborted && turn.stopReason !== "aborted")
+              turn = finishResponsesAcc(acc, true, opts.model);
+            return turn;
+          }),
         mergeRetry(opts.retry, { ...(signal && { signal }), ...(onRetry && { onRetry }) }),
       );
     },

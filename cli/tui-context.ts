@@ -88,6 +88,8 @@ export type ViewState = {
   firstRun: Text | undefined;
   streaming: ReplyMarkdown | undefined;
   streamBuffer: string;
+  /** 本次生成的工具预览:只记身份和收到的参数量,不保存第二份参数正文。 */
+  toolStreams: Map<number, { node: Block; name: string; bytes: number }>;
   /** 流式合帧:增量先攒着,每 33ms 落一次屏。 */
   streamTimer: ReturnType<typeof setTimeout> | undefined;
   /** 终端是否有焦点(CSI ?1004 焦点事件);通知只在失焦时发。 */

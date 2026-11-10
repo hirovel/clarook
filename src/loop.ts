@@ -14,7 +14,7 @@ import { annotateResult, DEFAULT_FACTS, dateNote, type FactsConfig } from "./fac
 import type { EventLog } from "./log.js";
 import { composeContext, deriveMessages, type Message, prepareToolReplay } from "./messages.js";
 import { DEFAULT_PLAN_REMINDER, planOpen, planState, planText, stepsSincePlan } from "./plan.js";
-import type { AssistantTurn, EffortLevel, Provider } from "./provider.js";
+import type { AssistantTurn, CompleteOptions, EffortLevel, Provider } from "./provider.js";
 import { errorMessage, isContextOverflow } from "./providers/errors.js";
 import { RECORDING_FULL } from "./recording.js";
 import { captureToolDefinitions } from "./tool-definitions.js";
@@ -92,8 +92,7 @@ export type TurnDeps = {
     boundary: "step" | "turn",
   ) => (string | { text: string; inputId: string; images?: import("./images.js").ImageInput[] })[];
   signal?: AbortSignal;
-  onDelta?: (textDelta: string) => void;
-  onReasoning?: (reasoningDelta: string) => void;
+  onStream?: CompleteOptions["onStream"];
   /** 非空 SSE 行的实时观察回调;完整响应独立保存到会话附件。 */
   onRaw?: (line: string) => void;
   onRequest?: (body: string) => void;
@@ -260,7 +259,7 @@ const interruptedNotice = (signal: AbortSignal) =>
  * 被打断、或终止策略叫停。所有状态变化都以事件落盘,函数本身不持有状态。
  */
 export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
-  const { log, provider, signal, onDelta, onReasoning } = deps;
+  const { log, provider, signal, onStream } = deps;
   const termination = deps.slots?.termination ?? untilIdle;
   const steering = deps.slots?.steering ?? steer;
   const approve = deps.slots?.approve ?? allowAll;
@@ -344,8 +343,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     let turn: AssistantTurn;
     try {
       turn = await completeRecorded(log, request, provider, messages, defs, {
-        ...(onDelta && { onDelta }),
-        ...(onReasoning && { onReasoning }),
+        ...(onStream && { onStream }),
         ...(signal && { signal }),
         ...(deps.onRaw && { onRaw: deps.onRaw }),
         ...(deps.onRequest && { onRequest: deps.onRequest }),

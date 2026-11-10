@@ -312,7 +312,8 @@ describe("合帧", () => {
     const provider: Provider = {
       model: "m",
       async complete(_m, _t, opts) {
-        for (const piece of ["a", "b", "c", "d"]) opts?.onDelta?.(piece);
+        for (const piece of ["a", "b", "c", "d"])
+          opts?.onStream?.({ type: "text/delta", delta: piece });
         return { text: "abcd", toolCalls: [], stopReason: "end" };
       },
     };

@@ -12,6 +12,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Changed
 
+- Replace separate text and reasoning callbacks with one typed `onStream` interface across Provider, Agent and the turn loop. Include per-attempt lifecycle and tool argument updates, and show temporary tool generation progress in the TUI. Clear unfinished tool previews on retry, cancellation and failure; execute only from the complete response through existing validation and approval.
 - Group single-file text replacements in the built-in `edit` tool's nonempty `edits` array. Match every item against the original file, reject overlapping targets, preserve per-item `replaceAll`, and write only after all checks pass. Reject the former top-level replacement arguments.
 - Show each requested edit and its unique/all-occurrences range in tool previews and complete inspectors. Preserve historical parameter reading and keep context text comparisons independent of tool input formats.
 - Apply Skills mode, sources, range and loading settings during future session preparation. Preserve the current system document and tools; share initial skill discovery with runtime assembly, and reuse prepared skills for explicit prompt rebuilds.

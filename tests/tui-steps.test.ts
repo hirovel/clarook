@@ -192,7 +192,7 @@ describe("账簿折叠", () => {
         async complete(_messages, _tools, options) {
           enter();
           await release;
-          options?.onDelta?.(text);
+          options?.onStream?.({ type: "text/delta", delta: text });
           return { text, toolCalls: [], stopReason: "end" };
         },
       } satisfies Provider,
