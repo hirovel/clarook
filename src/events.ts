@@ -88,6 +88,15 @@ export type AgentEvent =
        */
       extras?: Record<string, unknown>;
     }
+  /** 待审批的最终参数,不表示已批准或执行;原始模型调用仍在 callEvent。 */
+  | {
+      type: "tool/arguments";
+      at: string;
+      callEvent: number;
+      callId: string;
+      name: string;
+      args: unknown;
+    }
   | {
       type: "tool/result";
       at: string;

@@ -3,7 +3,7 @@ import { basename, join, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { createEditTool, createReadTool, createWriteTool, editTool } from "../cli/tools/fs.js";
-import { validateArgs } from "../src/tools.js";
+import { prepareArgs, validateArgs } from "../src/tools.js";
 import { testDirectory } from "./helpers/setup.js";
 
 const SCHEMA = Type.Object({
@@ -14,9 +14,14 @@ const SCHEMA = Type.Object({
 const ctx = { signal: new AbortController().signal };
 
 describe("validateArgs", () => {
-  it("合法参数通过,数字字符串被强转(Value.Convert)", () => {
+  it("JSON 参数保留标量转换,准备后的 JSON 值仍须满足 schema", () => {
     const r = validateArgs(SCHEMA, { path: "a.txt", limit: "5" });
     expect(r).toEqual({ ok: true, value: { path: "a.txt", limit: 5 } });
+    expect(prepareArgs(Type.Object({ value: Type.String() }), { value: 123 })).toEqual({
+      ok: true,
+      value: { value: "123" },
+    });
+    expect(prepareArgs(Type.Date(), "2026-11-10T00:00:00Z").ok).toBe(false);
   });
 
   it("缺字段→错误含路径与收到的参数原文", () => {

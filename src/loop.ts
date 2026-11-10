@@ -9,16 +9,16 @@ import {
 import { type CompactionAcceptance, DEFAULT_COMPACTION_SETTINGS } from "./compaction-presets.js";
 import { estimateInput } from "./context.js";
 import { type AgentEvent, now, type ToolCall } from "./events.js";
-import { completeRecorded, recordEvent, toolOutput } from "./exchange.js";
-import { annotateResult, DEFAULT_FACTS, dateNote, type FactsConfig } from "./facts.js";
+import { completeRecorded } from "./exchange.js";
+import { DEFAULT_FACTS, dateNote, type FactsConfig } from "./facts.js";
 import type { EventLog } from "./log.js";
 import { composeContext, deriveMessages, type Message, prepareToolReplay } from "./messages.js";
 import { DEFAULT_PLAN_REMINDER, planOpen, planState, planText, stepsSincePlan } from "./plan.js";
 import type { AssistantTurn, CompleteOptions, EffortLevel, Provider } from "./provider.js";
-import { errorMessage, isContextOverflow } from "./providers/errors.js";
-import { RECORDING_FULL } from "./recording.js";
+import { isContextOverflow } from "./providers/errors.js";
 import { captureToolDefinitions } from "./tool-definitions.js";
-import { type Tool, ToolOutcomeUnknownError, validateArgs } from "./tools.js";
+import { appendResult, type BeforeToolCall, executeCalls } from "./tool-execution.js";
+import type { Tool } from "./tools.js";
 
 // ---------- 策略槽(全部是开放接口,内置实现无特权,自定义实现从外部注入) ----------
 
@@ -81,6 +81,8 @@ export type TurnDeps = {
     steering?: SteeringPolicy;
     approve?: ApprovePolicy;
     execution?: ExecutionPolicy;
+    /** 显式返回替换参数,最终校验和审批仍由同一执行准备流程负责。 */
+    beforeToolCall?: BeforeToolCall;
     /**
      * 组装槽:事件数组 → 发给模型的消息。缺省就是 deriveMessages;给了就用它的结果发请求,
      * 差异部分记进 request.body(前缀投影 + 尾部),检视器仍能逐字节重建。扩展可在末尾追加一条提醒之类。
@@ -249,10 +251,6 @@ async function compactIfNeeded(
 
 const LENGTH_NOTICE =
   "Not executed: the response reached the token or context limit, so the arguments may be incomplete. Issue this tool call again.";
-const INTERRUPTED_NOTICE = "Interrupted by the user; not executed.";
-const STORAGE_NOTICE = "Not executed: recording buffer filled while saving was unavailable.";
-const interruptedNotice = (signal: AbortSignal) =>
-  signal.reason === RECORDING_FULL ? STORAGE_NOTICE : INTERRUPTED_NOTICE;
 
 /**
  * 跑一个 turn:从当前日志出发,循环 step 直到无事可欠(模型不调工具且队列为空)、
@@ -264,6 +262,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const steering = deps.slots?.steering ?? steer;
   const approve = deps.slots?.approve ?? allowAll;
   const execution = deps.slots?.execution ?? "sequential";
+  const beforeToolCall = deps.slots?.beforeToolCall;
   const drainQueue = deps.drainQueue ?? (() => []);
   const facts = { ...DEFAULT_FACTS, ...deps.facts };
   const planReminder = deps.planReminder ?? DEFAULT_PLAN_REMINDER;
@@ -362,7 +361,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       requestReason = "overflow-retry";
       continue;
     }
-    log.append({
+    const callEvent = log.append({
       type: "assistant/message",
       at: now(),
       ...turn,
@@ -384,12 +383,15 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
         return { stopped: reason };
       }
     } else if (turn.stopReason === "tool") {
-      await executeCalls(turn.toolCalls, {
+      const recorded = log.events[callEvent] as Extract<AgentEvent, { type: "assistant/message" }>;
+      await executeCalls(recorded.toolCalls, {
         log,
+        callEvent,
         tools,
         approve,
         execution,
         facts,
+        ...(beforeToolCall && { beforeToolCall }),
         ...(signal && { signal }),
         ...(deps.agent && { origin: { agent: deps.agent } }),
       });
@@ -498,187 +500,4 @@ export function describeRequestBody(
     }
   }
   return { prefixEvents: 0, tail: messages };
-}
-
-function appendResult(
-  log: EventLog,
-  call: ToolCall,
-  content: string,
-  isError: boolean,
-  durationMs?: number,
-  outcome?: "unknown",
-): void {
-  log.append({
-    type: "tool/result",
-    at: now(),
-    callId: call.id,
-    name: call.name,
-    content,
-    isError,
-    ...(durationMs !== undefined && { durationMs }),
-    ...(outcome && { outcome }),
-  });
-}
-
-type Prepared =
-  | { call: ToolCall; immediate: string }
-  | { call: ToolCall; tool: Tool; args: unknown };
-
-type Executed = { content: string; isError: boolean; durationMs?: number; outcome?: "unknown" };
-
-async function runOne(
-  p: Extract<Prepared, { tool: Tool }>,
-  signal: AbortSignal,
-  log: EventLog,
-): Promise<Executed> {
-  // 审批与前一批执行都可能等待;真正调用执行器前重新检查取消。
-  if (signal.aborted) return { content: interruptedNotice(signal), isError: true };
-  const startedAt = Date.now();
-  const output = toolOutput(log, p.call.id, p.call.name);
-  if (log.recording)
-    recordEvent(log, "tool/start", { callId: p.call.id, name: p.call.name, args: p.args });
-  try {
-    await log.checkpoint(signal);
-  } catch (error) {
-    if (!signal.aborted) throw error;
-  }
-  if (signal.aborted) return { content: interruptedNotice(signal), isError: true };
-  const finish = async (result: Executed): Promise<Executed> => {
-    if (output) {
-      await log.checkpoint();
-      // 并行工具各自完成即保存;模型结果仍按派发顺序追加,不让慢工具吞掉已完成证据。
-      recordEvent(log, "tool/finished", {
-        callId: p.call.id,
-        bytes: output.bytes,
-        ...result,
-        ...(output.ref.missingFrom !== undefined && { missingFrom: output.ref.missingFrom }),
-      });
-      await log.checkpoint();
-    }
-    return result;
-  };
-  try {
-    const content = await p.tool.execute(p.args as never, {
-      signal,
-      callId: p.call.id,
-      ...(output && { output }),
-    });
-    if (output && !output.written) {
-      output.write(content);
-      recordEvent(log, "tool/output-source", {
-        callId: p.call.id,
-        source: "returned text",
-        note: "No separate original output was provided by this tool",
-      });
-    }
-    return finish({ content, isError: false, durationMs: Date.now() - startedAt });
-  } catch (err) {
-    const content = errorMessage(err);
-    if (output && !output.written) {
-      output.write(content);
-      recordEvent(log, "tool/output-source", {
-        callId: p.call.id,
-        source: "error text",
-        note: "No separate original output was provided by this tool",
-      });
-    }
-    //:执行失败也是结果。打断导致的失败同样如实记录。
-    return finish({
-      content,
-      isError: true,
-      durationMs: Date.now() - startedAt,
-      ...((err instanceof ToolOutcomeUnknownError || signal.reason === RECORDING_FULL) && {
-        outcome: "unknown" as const,
-      }),
-    });
-  }
-}
-
-async function executeCalls(
-  calls: ToolCall[],
-  ctx: {
-    log: EventLog;
-    tools: Tool[];
-    approve: ApprovePolicy;
-    execution: ExecutionPolicy;
-    facts: FactsConfig;
-    signal?: AbortSignal;
-    origin?: ApproveOrigin;
-  },
-): Promise<void> {
-  const signal = ctx.signal ?? new AbortController().signal;
-
-  // 准备阶段永远按顺序:找工具、校验、审批。审批与执行共用有效参数,不能并发弹出。
-  const prepare = async (call: ToolCall): Promise<Prepared> => {
-    const tool = ctx.tools.find((t) => t.name === call.name);
-    if (!tool) return { call, immediate: `Unknown tool "${call.name}".` };
-    const checked = validateArgs(tool.parameters, call.args);
-    if (!checked.ok) return { call, immediate: checked.error };
-    const decision = await ctx.approve({ ...call, args: checked.value }, ctx.origin, signal);
-    if (signal.aborted) return { call, immediate: interruptedNotice(signal) };
-    const allowed = typeof decision === "boolean" ? decision : decision.allowed;
-    if (!allowed) {
-      const reason = typeof decision === "object" ? decision.reason : undefined;
-      return {
-        call,
-        immediate: reason ? `The user denied this call: ${reason}` : "The user denied this call.",
-      };
-    }
-    return { call, tool, args: checked.value };
-  };
-
-  // 并行批:相邻的、都声明了并行安全的调用。结果等整批完成后按顺序落盘。
-  let batch: Extract<Prepared, { tool: Tool }>[] = [];
-  const flush = async () => {
-    if (batch.length === 0) return;
-    const items = batch;
-    batch = [];
-    if (items.length > 1) {
-      ctx.log.append({
-        type: "decision",
-        at: now(),
-        slot: "execution",
-        parallel: items.length,
-        tools: items.map((p) => p.call.name),
-      });
-    }
-    const results = await Promise.all(items.map((p) => runOne(p, signal, ctx.log)));
-    await ctx.log.checkpoint(signal?.aborted ? undefined : signal);
-    items.forEach((p, i) => {
-      const r = results[i] as Executed;
-      // 事实附注贴在这条结果上:此前同样的失败有几次、这次比中位耗时慢多少。附注进日志,模型看到的就是它。
-      const content =
-        r.durationMs === undefined || r.outcome === "unknown"
-          ? r.content
-          : annotateResult(ctx.log.events, p.call, r, ctx.facts);
-      appendResult(ctx.log, p.call, content, r.isError, r.durationMs, r.outcome);
-      if (ctx.log.recording)
-        recordEvent(ctx.log, "tool/end", {
-          callId: p.call.id,
-          isError: r.isError,
-          ...(r.outcome && { outcome: r.outcome }),
-        });
-    });
-    await ctx.log.checkpoint(signal?.aborted ? undefined : signal);
-  };
-
-  for (const call of calls) {
-    // 打断后剩余调用不再执行,但必须逐个补应答。
-    if (signal.aborted) {
-      await flush();
-      appendResult(ctx.log, call, interruptedNotice(signal), true);
-      continue;
-    }
-    const p = await prepare(call);
-    if ("immediate" in p) {
-      await flush();
-      appendResult(ctx.log, call, p.immediate, true);
-      continue;
-    }
-    const parallelSafe = ctx.execution === "parallel" && p.tool.concurrency === "parallel";
-    if (!parallelSafe) await flush();
-    batch.push(p);
-    if (!parallelSafe) await flush();
-  }
-  await flush();
 }

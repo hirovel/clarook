@@ -20,6 +20,7 @@ import type { Provider } from "./provider.js";
 import { errorMessage } from "./providers/errors.js";
 import { recordUnresolvedCalls } from "./recovery.js";
 import { type SystemPrompt, systemAt } from "./system-prompt.js";
+import type { BeforeToolCall } from "./tool-execution.js";
 import {
   composeDescription,
   type DescriptionParts,
@@ -291,6 +292,8 @@ export type TaskToolOptions = {
 
 export type ChildTools = {
   tools: Tool[];
+  /** 工厂为这个子日志创建的前置函数;缺省表示该实例没有,不回退父工厂闭包。 */
+  beforeToolCall?: BeforeToolCall;
   dispose(): Promise<void>;
   /** 从本轮组合创建下一层资源,不重新读取根会话的开关。 */
   fork?: (log: EventLog) => Promise<ChildTools>;
@@ -544,6 +547,10 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
         resources = Array.isArray(opts.tools)
           ? { tools: opts.tools, dispose: async () => {} }
           : await opts.tools(childLog);
+        if (!Array.isArray(opts.tools)) {
+          delete slots.beforeToolCall;
+          if (resources.beforeToolCall) slots.beforeToolCall = resources.beforeToolCall;
+        }
         const permitted = identity?.tools ?? type?.tools;
         const remainingDepth =
           identity?.remainingDepth ??

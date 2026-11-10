@@ -2,6 +2,7 @@ import { Kind, type Static, type TSchema } from "@sinclair/typebox";
 import { ValueErrorType } from "@sinclair/typebox/errors";
 import { Value } from "@sinclair/typebox/value";
 import type { ToolOutput } from "./exchange.js";
+import { jsonSnapshot } from "./json-snapshot.js";
 
 /**
  * 可执行工具:ToolDef(wire 层纯描述)加 execute。
@@ -77,6 +78,17 @@ export function defineTool<S extends TSchema>(tool: Tool<S>): Tool<S> {
 }
 
 export type ValidationResult = { ok: true; value: unknown } | { ok: false; error: string };
+
+/** 准备值必须同时满足工具 schema 和实际记录的 JSON 表示,审批只观察该快照。 */
+export function prepareArgs(schema: TSchema, raw: unknown): ValidationResult {
+  const checked = validateArgs(schema, jsonSnapshot(raw).value);
+  if (!checked.ok) return checked;
+  const value = jsonSnapshot(checked.value).value;
+  // Date 等非 JSON schema 即使 Convert 成功,也不能悄悄变成另一种输入交给执行器。
+  if (Kind in schema && !Value.Check(schema, value))
+    return { ok: false, error: "Tool arguments must satisfy the schema as JSON values." };
+  return { ok: true, value };
+}
 
 /**
  * 参数校验(循环在执行前统一调用):

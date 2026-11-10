@@ -162,9 +162,20 @@ export function receivedBlocks(rec: RequestRecord, saved?: RequestRecording): Bo
     results.delete(callId);
   };
   for (const call of reply?.toolCalls ?? []) {
-    const args =
+    const prepared = rec.prepared?.find(
+      (input) =>
+        input.callEvent === rec.responseIndex &&
+        input.callId === call.id &&
+        input.name === call.name,
+    );
+    const previewArgs = prepared ? prepared.args : call.args;
+    const modelArgs =
       call.args && typeof call.args === "object"
         ? (call.args as Record<string, unknown>)
+        : undefined;
+    const args =
+      previewArgs && typeof previewArgs === "object"
+        ? (previewArgs as Record<string, unknown>)
         : undefined;
     const target =
       typeof args?.path === "string"
@@ -193,18 +204,29 @@ export function receivedBlocks(rec: RequestRecord, saved?: RequestRecording): Bo
     };
     const block = textBlock(
       `call-${call.id}`,
-      "Arguments",
+      "Model arguments",
       JSON.stringify(call.args, null, 2),
-      call.id,
+      `${call.id} · original model request${prepared ? "" : " · No preparation fact recorded"}`,
     );
     // 缺失说明先于规模和调用ID,窄屏截短也不能把它隐藏。
     if (!results.has(call.id)) block.meta = `result not recorded · ${block.meta}`;
     blocks.push({
       ...block,
       group,
-      preview: Object.keys(args ?? {}).join(" · ") || "(no arguments)",
+      preview: Object.keys(modelArgs ?? {}).join(" · ") || "(no arguments)",
     });
-    const edits = call.name === "edit" ? editPreviewItems(call.args) : [];
+    if (prepared)
+      blocks.push({
+        ...textBlock(
+          `prepared-${call.id}`,
+          "Prepared arguments",
+          JSON.stringify(prepared.args, null, 2),
+          `${call.id} · prepared for approval · execution not implied`,
+        ),
+        group,
+        preview: Object.keys(args ?? {}).join(" · ") || "(no arguments)",
+      });
+    const edits = call.name === "edit" ? editPreviewItems(previewArgs) : [];
     const edit = edits.length > 0;
     const write = call.name === "write" && typeof args?.content === "string";
     if (edit || write) {
@@ -212,14 +234,14 @@ export function receivedBlocks(rec: RequestRecord, saved?: RequestRecording): Bo
       blocks.push({
         id: `change-${call.id}`,
         group,
-        title: `${edit ? "Requested replacement" : "Submitted file content"} · ${state}`,
+        title: `${edit ? (prepared ? "Prepared replacement" : "Requested replacement") : prepared ? "Prepared file content" : "Submitted file content"} · ${state}`,
         meta: edit
           ? `Parameter preview · ${edits.length} edit${edits.length === 1 ? "" : "s"} · not a full-file diff`
           : "Previous file content not recorded · not a full-file diff",
-        preview: "Enter to inspect · complete parameters in Arguments",
-        version: call,
+        preview: `Enter to inspect · complete parameters in ${prepared ? "Prepared arguments" : "Model arguments"}`,
+        version: prepared ?? call,
         // 从已记录参数按需排版,不读当前文件,不把预览误作真实文件快照。
-        lines: () => toolCallDetail(call.name, call.args, "full").split("\n").filter(Boolean),
+        lines: () => toolCallDetail(call.name, previewArgs, "full").split("\n").filter(Boolean),
       });
     }
     addEvidence(call.id, group);

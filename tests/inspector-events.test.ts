@@ -101,6 +101,16 @@ describe("事件一句话", () => {
     ];
     expect(eventSummary(bare, 0).sign).toBe("»");
     expect(stripAnsi(eventSummary(bare, 0).text)).toBe("read");
+    e.push({
+      type: "tool/arguments",
+      at,
+      callEvent: 4,
+      callId: "c1",
+      name: "read",
+      args: { path: "b" },
+    });
+    expect(s(12)).toContain("read · prepared arguments · call from #4 · execution not implied");
+    expect(modelSees(e, 12).text).toBe("kernel");
   });
 
   it("模型眼里的状态:sent · kernel · covered · cleared · dropped · edited · not sent yet", () => {
@@ -126,8 +136,16 @@ describe("事件一句话", () => {
 
   it("筛选:conversation · kernel · changes · extensions", () => {
     const e = events();
+    e.push({
+      type: "tool/arguments",
+      at,
+      callEvent: 4,
+      callId: "c1",
+      name: "read",
+      args: { path: "b" },
+    });
     expect(filteredIndices(e, 2)).toEqual([0, 1, 4, 5]);
-    expect(filteredIndices(e, 3)).toEqual([2, 3, 6, 7]);
+    expect(filteredIndices(e, 3)).toEqual([2, 3, 6, 7, 12]);
     expect(filteredIndices(e, 4)).toEqual([8, 9, 10]);
     expect(filteredIndices(e, 5)).toEqual([11]);
     expect(eventPasses(e[2] as AgentEvent, 1)).toBe(true);
@@ -140,6 +158,17 @@ describe("事件一句话", () => {
     expect(view).toContain("usage        in 1000 (cache 800) · out 20");
     expect(view).toContain("thinking (full)");
     expect(view).toContain("» read");
+    e.push({
+      type: "tool/arguments",
+      at,
+      callEvent: 4,
+      callId: "c1",
+      name: "read",
+      args: { path: "b" },
+    });
+    const prepared = eventViewLines(e, 12).map(stripAnsi).join("\n");
+    expect(prepared).toContain("prepared for approval; execution not implied");
+    expect(prepared).toContain('"path": "b"');
     const dropped = projectionLines(e, 4).map(stripAnsi).join("\n");
     expect(dropped).toContain("now          dropped");
     expect(dropped).toContain("since        event #10 · retry");

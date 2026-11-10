@@ -240,7 +240,7 @@ export class ChildView {
       if (e.usage) this.tokens = e.usage.inputTokens;
     }
     if (e.type === "tool/result") this.toolsUsed += 1;
-    this.lines.push(...childEventLines(e, cwd).map((l) => GUIDE + l));
+    this.lines.push(...childEventLines(e, cwd, this.info.log.events).map((l) => GUIDE + l));
   }
 
   finish(): void {
@@ -306,7 +306,11 @@ export function attachChild(ctx: TuiContext, child: ChildInfo): void {
 }
 
 /** 子 agent 事件的屏幕行(不含引导线),与主屏同一套记号:› » ✓ ✗ ·。 */
-export function childEventLines(e: AgentEvent, cwd?: string): string[] {
+export function childEventLines(
+  e: AgentEvent,
+  cwd?: string,
+  events?: readonly AgentEvent[],
+): string[] {
   switch (e.type) {
     case "session/directory":
       return [c.soft(`· Session directory: ${plainDisplayText(e.cwd)}`)];
@@ -335,6 +339,10 @@ export function childEventLines(e: AgentEvent, cwd?: string): string[] {
       }
       if (e.stopReason === "aborted") lines.push(c.faint("— interrupted —"));
       return lines;
+    }
+    case "tool/arguments": {
+      const line = preparedLine(events ?? [], e, cwd);
+      return line ? [line] : [];
     }
     case "tool/result": {
       const mark = e.outcome === "unknown" ? c.jin("?") : e.isError ? c.zhu(G.err) : c.soft(G.ok);
@@ -370,6 +378,23 @@ export function childEventLines(e: AgentEvent, cwd?: string): string[] {
     default:
       return [];
   }
+}
+
+/** 变更准备值才补一行;原模型调用仍保留在前面,不把准备解释成执行。 */
+function preparedLine(
+  events: readonly AgentEvent[],
+  e: Extract<AgentEvent, { type: "tool/arguments" }>,
+  cwd?: string,
+): string | undefined {
+  const owner = events[e.callEvent];
+  const call =
+    owner?.type === "assistant/message"
+      ? owner.toolCalls.find((call) => call.id === e.callId && call.name === e.name)
+      : undefined;
+  if (!call || JSON.stringify(call.args) === JSON.stringify(e.args)) return undefined;
+  return c.faint(
+    `· prepared ${plainDisplayText(e.name)} ${formatArgs(e.args, { cwd })} · execution not implied`,
+  );
 }
 
 // ---------- 主屏:一条事件一段屏幕 ----------
@@ -620,6 +645,11 @@ export function render(ctx: TuiContext, e: AgentEvent, index: number, cwd?: stri
     case "assistant/message":
       renderAssistant(ctx, e, cwd);
       break;
+    case "tool/arguments": {
+      const line = preparedLine(ctx.log.events, e, cwd);
+      if (line) ctx.note(line);
+      break;
+    }
     case "tool/result":
       renderToolResult(ctx, e);
       break;

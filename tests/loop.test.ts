@@ -243,6 +243,7 @@ describe("runTurn", () => {
       "tools/snapshot",
       "request",
       "assistant/message",
+      "tool/arguments",
       "tool/result",
       "tools/snapshot",
       "request",
@@ -589,6 +590,151 @@ describe("runTurn", () => {
     expect(result.content).toContain('"wrong": 1');
   });
 
+  it("前置显式改参后重新校验,审批固定最终值,原始调用和跨请求身份保留", async () => {
+    const log = newLog();
+    const raw = [
+      call("echo", { text: "original" }, "same-id"),
+      call("echo", { text: "second" }, "second"),
+      call("echo", { text: "valid" }, "invalid"),
+      call("echo", { text: "valid" }, "undefined"),
+      call("echo", { text: "valid" }, "thrown"),
+      call("echo", { text: "valid" }, "denied"),
+    ];
+    const again = call("echo", { text: "new-original" }, "same-id");
+    const executed: string[] = [];
+    const approved: string[] = [];
+    let retained: { text: string } | undefined;
+    const replacement = { text: 123 };
+    const echo = defineTool({
+      ...echoTool,
+      concurrency: "parallel",
+      async execute(args) {
+        const text = args.text;
+        executed.push(text);
+        args.text = "tool-private-change";
+        return `echo:${text}`;
+      },
+    });
+    expect(
+      await runTurn({
+        log,
+        tools: [echo],
+        provider: scripted([
+          { text: "", toolCalls: raw, stopReason: "tool" },
+          { text: "", toolCalls: [again], stopReason: "tool" },
+          { text: "done", toolCalls: [], stopReason: "end" },
+        ]),
+        slots: {
+          execution: "parallel",
+          beforeToolCall: ({ call: original, args }) => {
+            expect(Object.isFrozen(original)).toBe(true);
+            expect(Object.isFrozen(args)).toBe(true);
+            if (original.id === "same-id")
+              return {
+                args:
+                  (args as { text: string }).text === "original"
+                    ? replacement
+                    : { text: "new-final" },
+              };
+            if (original.id === "second") {
+              replacement.text = 456;
+              return;
+            }
+            if (original.id === "invalid") return { args: { text: { nested: true } } };
+            if (original.id === "undefined") return { args: undefined };
+            if (original.id === "thrown") throw new Error("extension unavailable");
+            return { args: { text: "denied-final" } };
+          },
+          approve: (prepared) => {
+            const args = prepared.args as { text: string };
+            approved.push(args.text);
+            expect(Object.isFrozen(args)).toBe(true);
+            if (prepared.id === "same-id") retained = args;
+            if (prepared.id === "second")
+              expect(() => {
+                (retained as { text: string }).text = "late-change";
+              }).toThrow(TypeError);
+            return prepared.id !== "denied";
+          },
+        },
+      }),
+    ).toBe("idle");
+    expect(approved).toEqual(["123", "second", "denied-final", "new-final"]);
+    expect(executed).toEqual(["123", "second", "new-final"]);
+    const prepared = log.events.filter((event) => event.type === "tool/arguments");
+    expect(prepared.map((event) => event.args)).toEqual([
+      { text: "123" },
+      { text: "second" },
+      { text: "denied-final" },
+      { text: "new-final" },
+    ]);
+    const reused = prepared.filter((event) => event.callId === "same-id");
+    expect(reused).toHaveLength(2);
+    expect(reused[0]?.callEvent).not.toBe(reused[1]?.callEvent);
+    for (const event of reused) {
+      const owner = log.events[event.callEvent];
+      expect(owner?.type).toBe("assistant/message");
+      if (owner?.type === "assistant/message")
+        expect(owner.toolCalls.find((item) => item.id === event.callId)?.args).toEqual({
+          text: event === reused[0] ? "original" : "new-original",
+        });
+    }
+    const results = log.events.filter((event) => event.type === "tool/result");
+    expect(results.map((event) => event.isError)).toEqual([
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+    ]);
+    expect(results[2]?.content).toContain("Tool argument validation failed");
+    expect(results[3]?.content).toContain("Tool argument preparation failed");
+    expect(results[4]?.content).toContain("extension unavailable");
+    expect(results[5]?.content).toContain("The user denied this call");
+    expect(raw[0]?.args).toEqual({ text: "original" });
+    expect(again.args).toEqual({ text: "new-original" });
+    expect(
+      deriveMessages(log.events).filter((message) => message.role === "assistant")[0],
+    ).toMatchObject({
+      toolCalls: raw,
+    });
+  });
+
+  it("外来工具的 JSON 自有键在审批与执行副本中保持,不变成原型", async () => {
+    const args = JSON.parse('{"path":"b.ts","__proto__":{"inherited":"marker"}}');
+    const log = newLog();
+    let seen: unknown;
+    const tool = defineTool({
+      name: "foreign",
+      description: "Foreign JSON schema",
+      parameters: JSON.parse('{"type":"object"}'),
+      async execute(input) {
+        seen = input;
+        return "done";
+      },
+    });
+    await runTurn({
+      log,
+      tools: [tool],
+      provider: scripted([
+        { text: "", toolCalls: [call("foreign", { path: "a.ts" })], stopReason: "tool" },
+        { text: "done", toolCalls: [], stopReason: "end" },
+      ]),
+      slots: {
+        beforeToolCall: () => ({ args }),
+        approve: (prepared) => {
+          expect(prepared.args).toEqual(args);
+          return true;
+        },
+      },
+    });
+    expect(JSON.stringify(seen)).toBe(JSON.stringify(args));
+    expect(Object.getPrototypeOf(seen)).toBe(Object.prototype);
+    expect(log.events.find((event) => event.type === "tool/arguments")?.args).toEqual(args);
+  });
+
   it("审批拒绝→不执行,以错误结果回喂", async () => {
     const log = newLog();
     await runTurn({
@@ -694,6 +840,7 @@ describe("runTurn", () => {
       "tools/snapshot",
       "request",
       "assistant/message",
+      "tool/arguments",
       "tool/result",
       "decision",
       "user/message",
@@ -724,6 +871,7 @@ describe("runTurn", () => {
       "tools/snapshot",
       "request",
       "assistant/message",
+      "tool/arguments",
       "tool/result",
       "request",
       "assistant/message",
@@ -769,10 +917,15 @@ describe("runTurn", () => {
     });
 
     // 审批等待与批次刷新都能让取消跨过最外层检查;以实际副作用计数验证执行入口。
-    for (const mode of ["approval", "buffered", "flush"] as const) {
+    for (const mode of ["before", "arguments", "approval", "buffered", "flush"] as const) {
       const boundaryLog = newLog();
       const cancel = new AbortController();
       const executed: string[] = [];
+      let approvals = 0;
+      if (mode === "arguments")
+        boundaryLog.subscribe((event) => {
+          if (event.type === "tool/arguments") cancel.abort();
+        });
       const first = defineTool({
         name: "first",
         description: "first",
@@ -806,7 +959,11 @@ describe("runTurn", () => {
         ]),
         slots: {
           execution: mode === "approval" ? "sequential" : "parallel",
+          beforeToolCall: async () => {
+            if (mode === "before") cancel.abort();
+          },
           approve: async (call) => {
+            approvals += 1;
             if (
               (mode === "approval" && call.id === "one") ||
               (mode === "buffered" && call.id === "two")
@@ -817,6 +974,13 @@ describe("runTurn", () => {
         },
       });
       expect(stopped).toBe("aborted");
+      if (mode === "before" || mode === "arguments") expect(approvals).toBe(0);
+      if (mode === "before")
+        expect(boundaryLog.events.some((event) => event.type === "tool/arguments")).toBe(false);
+      if (mode === "arguments")
+        expect(boundaryLog.events.filter((event) => event.type === "tool/arguments")).toHaveLength(
+          1,
+        );
       expect(executed, mode).toEqual(mode === "flush" ? ["first"] : []);
       const boundaryResults = boundaryLog.events.filter((e) => e.type === "tool/result");
       expect(boundaryResults.map((r) => r.callId)).toEqual(["one", "two"]);

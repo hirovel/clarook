@@ -7,6 +7,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Added
 
+- Add `slots.beforeToolCall` for explicit argument replacement before final validation and approval. Preserve raw model calls, record final prepared parameters in `tool/arguments`, and expose both values in request and event inspection without requiring body attachments. Give approval immutable parameters and execution a private copy; keep factory-created child hooks bound to their own session.
 - Save session directory bindings in the event history. Resume from another launch directory without changing the project root; explicitly choose and remember a directory for older sessions or moved projects through `/session directory` and `clarook sessions directory FILE DIRECTORY`. Keep current environment facts through compaction while preserving original history and saved instructions.
 - Save complete tool declaration snapshots on the first ordinary request and actual definition changes. Inspect historical definitions without optional recordings; distinguish unavailable legacy evidence from an empty tool set.
 

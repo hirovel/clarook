@@ -32,6 +32,7 @@ const CONVERSATION = new Set([
   "session/directory",
 ]);
 const KERNEL = new Set([
+  "tool/arguments",
   "request",
   "request/error",
   "retry",
@@ -150,6 +151,12 @@ export function eventSummary(
         tok: eventTokens(e),
       };
     }
+    case "tool/arguments":
+      return {
+        sign: G.note,
+        text: `${e.name} · prepared arguments · call from #${e.callEvent} · execution not implied`,
+        tok: undefined,
+      };
     case "tool/result": {
       const lines = e.content.split("\n").length;
       const size =
@@ -418,6 +425,11 @@ export function eventViewLines(
           ),
         );
       if (e.extras) out.push(...block("extras", JSON.stringify(e.extras, null, 2), c.faint));
+      break;
+    case "tool/arguments":
+      out.push(row("tool", `${e.name} · ${e.callId} · call event #${e.callEvent}`));
+      out.push(row("state", "prepared for approval; execution not implied"));
+      out.push(...block("prepared arguments", JSON.stringify(e.args, null, 2)));
       break;
     case "tool/result":
       out.push(

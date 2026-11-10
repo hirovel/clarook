@@ -83,6 +83,7 @@ describe("请求层记录", () => {
       "tools/snapshot",
       "request",
       "assistant/message",
+      "tool/arguments",
       "tool/result",
       "request",
       "assistant/message",
@@ -103,7 +104,7 @@ describe("请求层记录", () => {
     expect(typeof resp.latencyMs).toBe("number");
   });
 
-  it("工具结果按请求显示,拒绝与校验失败没有原文附件也不能遗漏", async () => {
+  it("工具结果与准备参数绑定原调用,拒绝与校验失败没有原文附件也不能遗漏", async () => {
     const log = fresh();
     await runTurn({
       log,
@@ -122,6 +123,9 @@ describe("请求层记录", () => {
       ]),
       tools: [echo],
       slots: {
+        beforeToolCall: ({ args }) => ({
+          args: { text: `prepared ${(args as { text: string }).text}` },
+        }),
         approve: async (call) =>
           call.id === "c3" ? { allowed: false, reason: "Run tests first" } : true,
       },
@@ -135,6 +139,27 @@ describe("请求层记录", () => {
     const records = collectRequests(log.events);
     const first = records[0];
     if (!first) throw new Error("missing request");
+    const inputs = receivedBlocks(first);
+    expect(
+      inputs
+        .filter((block) => block.id.startsWith("prepared-"))
+        .map((block) => block.lines().join("\n")),
+    ).toEqual([
+      JSON.stringify({ text: "prepared a" }, null, 2),
+      JSON.stringify({ text: "prepared denied" }, null, 2),
+    ]);
+    expect(
+      inputs
+        .find((block) => block.id === "call-c1")
+        ?.lines()
+        .join("\n"),
+    ).toBe(JSON.stringify({ text: "a" }, null, 2));
+    expect(inputs.find((block) => block.id === "prepared-c3")?.meta).toContain(
+      "execution not implied",
+    );
+    expect(inputs.find((block) => block.id === "call-c4")?.meta).toContain(
+      "No preparation fact recorded",
+    );
     const displayed = receivedBlocks(first).filter((block) => block.id.startsWith("model-"));
     expect(displayed.map((block) => block.lines().join("\n"))).toEqual(
       results.map((result) => result.content),
@@ -322,8 +347,70 @@ describe("请求层记录", () => {
         ?.lines()
         .join("\n"),
     ).toBe(JSON.stringify(calls[0]?.args, null, 2));
+    const preparedFiles = receivedBlocks({
+      ...fileRecord,
+      prepared: [
+        {
+          type: "tool/arguments",
+          at: "t",
+          callEvent: first.responseIndex as number,
+          callId: "edit-ok",
+          name: "edit",
+          args: {
+            path: "/project/prepared.ts",
+            edits: [{ oldText: "old", newText: "prepared replacement" }],
+          },
+        },
+      ],
+    });
+    const preparedEdit = preparedFiles.find((block) => block.id === "change-edit-ok");
+    expect(preparedEdit?.title).toBe("Prepared replacement · success");
+    expect(preparedEdit?.lines().map(stripAnsi).join("\n")).toContain("+ prepared replacement");
+    expect(
+      preparedFiles
+        .find((block) => block.id === "call-edit-ok")
+        ?.lines()
+        .join("\n"),
+    ).toBe(JSON.stringify(calls[0]?.args, null, 2));
     expect(JSON.stringify(fileRecord)).toBe(before);
     expect(JSON.stringify(deriveMessages(log.events))).toBe(messagesBefore);
+
+    // 同一 callId 在下一请求复用时,检视器仍按原 assistant 位置找准备值。
+    log.append({ type: "user/message", at: "t", text: "next" });
+    await runTurn({
+      log,
+      tools: [echo],
+      provider: scripted([
+        {
+          text: "",
+          toolCalls: [{ id: "c1", name: "echo", args: { text: "later" } }],
+          stopReason: "tool",
+        },
+        { text: "done", toolCalls: [], stopReason: "end" },
+      ]),
+      slots: { beforeToolCall: () => ({ args: { text: "prepared later" } }) },
+    });
+    const rounds = collectRequests(log.events);
+    const original = receivedBlocks(rounds[0] as NonNullable<typeof first>);
+    const later = receivedBlocks(rounds[2] as NonNullable<typeof first>);
+    expect(
+      original
+        .find((block) => block.id === "prepared-c1")
+        ?.lines()
+        .join("\n"),
+    ).toBe(JSON.stringify({ text: "prepared a" }, null, 2));
+    expect(
+      later
+        .find((block) => block.id === "prepared-c1")
+        ?.lines()
+        .join("\n"),
+    ).toBe(JSON.stringify({ text: "prepared later" }, null, 2));
+    expect(
+      later
+        .find((block) => block.id === "call-c1")
+        ?.lines()
+        .join("\n"),
+    ).toBe(JSON.stringify({ text: "later" }, null, 2));
   });
 
   it("未配置压缩时 request 不带阈值", async () => {

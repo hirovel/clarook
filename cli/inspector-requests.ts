@@ -37,6 +37,9 @@ export type RequestRecord = {
   index: number;
   request: RequestEvent;
   response?: AssistantEvent;
+  /** 原始 assistant 的固定位置;准备参数不能只按可能复用的 callId 关联。 */
+  responseIndex?: number;
+  prepared?: Extract<AgentEvent, { type: "tool/arguments" }>[];
   /** 本次回复后产生的工具结果;未执行的调用也有结果,不依赖原文附件。 */
   results: Extract<AgentEvent, { type: "tool/result" }>[];
   error?: RequestErrorEvent;
@@ -52,6 +55,7 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
   const out: RequestRecord[] = [];
   let pending: AgentEvent[] = [];
   let current: RequestRecord | undefined;
+  const responses = new Map<number, RequestRecord>();
   for (let i = 0; i < events.length; i++) {
     const e = events[i];
     if (!e) continue;
@@ -62,6 +66,7 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
           index: i,
           request: e,
           results: [],
+          prepared: [],
           retries: [],
           before: pending,
         };
@@ -75,7 +80,14 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
         if (current && !current.response) current.error = e;
         break;
       case "assistant/message":
-        if (current && !current.response && !current.error) current.response = e;
+        if (current && !current.response && !current.error) {
+          current.response = e;
+          current.responseIndex = i;
+          responses.set(i, current);
+        }
+        break;
+      case "tool/arguments":
+        responses.get(e.callEvent)?.prepared?.push(e);
         break;
       case "tool/result":
         current?.results.push(e);

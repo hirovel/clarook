@@ -231,7 +231,8 @@ describe("请求检视器", () => {
     doc = text();
     expect(doc).toContain("[6 received]");
     expect(doc).toContain("先看看");
-    expect(doc).toContain("Arguments");
+    expect(doc).toContain("Model arguments");
+    expect(doc).toContain("Prepared arguments");
     expect(doc).toContain("HTTP attempt 1");
     expect(doc).not.toContain("data: [DONE]");
     insp.handleInput("\x1b[B");
@@ -239,11 +240,17 @@ describe("请求检视器", () => {
     expect(text()).toContain('"text": "hi"');
     insp.handleInput("\x1b[B");
     insp.handleInput("\r");
+    expect(text()).toContain("prepared for approval");
+    insp.handleInput("\x1b[B");
+    insp.handleInput("\r");
     expect(text()).toContain("Result for model");
     expect(text()).toContain("echo:hi");
     insp.handleInput("\x1b[B");
     insp.handleInput("\r");
     expect(text()).toContain("data: [DONE]");
+    insp.handleInput("\x1b[B");
+    insp.handleInput("\x1b[B");
+    insp.handleInput("\r");
     expect(text()).toContain("用户想读内容");
 
     // 短窗口必须给选中目标和实际操作留位置,不能由固定统计挤出屏幕。
@@ -290,6 +297,10 @@ describe("请求检视器", () => {
       expect(restored.text()).toContain("回显文本");
       expect(restored.text()).toContain('"text": {');
       expect(restored.text()).not.toContain("replacement");
+      restored.insp.showRequest(1, 6);
+      expect(restored.text()).toContain("Model arguments");
+      expect(restored.text()).toContain("Prepared arguments");
+      expect(restored.text()).toContain("execution not implied");
       restored.insp.showRequest(3, 4);
       expect(restored.text()).toContain("replacement description");
       expect(restored.text()).toContain('"replacement": {');

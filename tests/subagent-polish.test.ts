@@ -10,7 +10,7 @@ import { EventLog as Log } from "../src/log.js";
 import { type ApproveOrigin, maxSteps, type TurnDeps } from "../src/loop.js";
 import { deriveMessages, type Message } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
-import { createTaskTool, type TaskToolOptions } from "../src/subagent.js";
+import { type ChildTools, createTaskTool, type TaskToolOptions } from "../src/subagent.js";
 import { defineTool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
 
@@ -102,18 +102,62 @@ const ctx = (callId = "c1") => ({ signal: new AbortController().signal, callId }
 describe("子的审批", () => {
   it("inherit(缺省):子沿用父此刻的审批实现,调用带上子的名字", async () => {
     const asked: { call: ToolCall; origin?: ApproveOrigin }[] = [];
+    let inheritedHooks = 0;
     const slots: TurnDeps["slots"] = {
+      beforeToolCall: () => {
+        inheritedHooks += 1;
+        return { args: { text: "static-inherited" } };
+      },
       approve: (call, origin) => {
         asked.push({ call, ...(origin && { origin }) });
         return true;
       },
     };
-    const { tool } = mk({ provider: childProvider(), tools: [echo], slots });
+    const { tool, firstResult } = mk({ provider: childProvider(), tools: [echo], slots });
     const out = await tool.execute({ task: "go" }, ctx());
     expect(out).toContain("child done 2");
     expect(asked).toHaveLength(1);
     expect(asked[0]?.call.name).toBe("echo");
     expect(asked[0]?.origin).toEqual({ agent: "sub-1" });
+    expect(asked[0]?.call.args).toEqual({ text: "static-inherited" });
+    expect(firstResult()).toMatchObject({ content: "echo:static-inherited" });
+    expect(inheritedHooks).toBe(1);
+
+    // 工厂没有本地 hook 时也不能回退父闭包;有 hook 时只操作自己的子日志。
+    for (const local of [false, true]) {
+      const parent = parentLog();
+      const child = mk({
+        parent,
+        provider: childProvider(),
+        slots,
+        tools: async (log): Promise<ChildTools> => {
+          const resources: ChildTools = { tools: [echo], dispose: async () => {} };
+          if (local)
+            resources.beforeToolCall = () => {
+              log.append({
+                type: "ext/event",
+                at: "t",
+                source: "owner-test",
+                kind: "before",
+                payload: {},
+              });
+              return { args: { text: "child-local" } };
+            };
+          return resources;
+        },
+      });
+      await child.tool.execute({ task: "go" }, ctx());
+      expect(inheritedHooks).toBe(1);
+      expect(child.firstResult()).toMatchObject({ content: local ? "echo:child-local" : "echo:x" });
+      expect(
+        child.logs[0]?.events.filter(
+          (event) => event.type === "ext/event" && event.source === "owner-test",
+        ),
+      ).toHaveLength(Number(local));
+      expect(
+        parent.events.some((event) => event.type === "ext/event" && event.source === "owner-test"),
+      ).toBe(false);
+    }
   });
 
   it("父拒绝则子也被拒;allow 档让子绕过父的审批", async () => {
@@ -930,13 +974,14 @@ describe("类型注册表与嵌套", () => {
 
   it("有限小数 depth 按逐层判断,子有 task 工具且续聊保持,孙没有", async () => {
     const seen: string[][] = [];
+    const owned: EventLog[] = [];
     let n = 0;
     const provider: Provider = {
       model: "fake",
       async complete(_m: unknown[], defs: ToolDef[]) {
         seen.push(defs.map((t) => t.name));
         n += 1;
-        // 子的第一步派一个孙;孙直接收尾;子第二步收尾。
+        // 子的第一步派一个孙;孙执行自己的工具后收尾;子第二步收尾。
         if (n === 1) {
           return {
             text: "",
@@ -944,20 +989,60 @@ describe("类型注册表与嵌套", () => {
             stopReason: "tool",
           };
         }
+        if (n === 2)
+          return {
+            text: "",
+            toolCalls: [{ id: "grandchild-echo", name: "echo", args: { text: "raw" } }],
+            stopReason: "tool",
+          };
         return { text: `done ${n}`, toolCalls: [], stopReason: "end" };
       },
     };
+    const factory = async (log: EventLog): Promise<ChildTools> => {
+      owned.push(log);
+      return {
+        tools: [echo, other],
+        beforeToolCall: ({ call }) => {
+          log.append({
+            type: "ext/event",
+            at: "t",
+            source: "owner-test",
+            kind: "before",
+            payload: { tool: call.name },
+          });
+          if (call.name === "echo") return { args: { text: "grandchild-local" } };
+        },
+        dispose: async () => {},
+        fork: factory,
+      };
+    };
     const { tool } = mk({
       provider,
-      tools: [echo, other],
+      tools: factory,
+      slots: {
+        beforeToolCall: () => {
+          throw new Error("A factory child must use its own hook");
+        },
+      },
       depth: 1.5,
       types: { limited: { description: "restricted tools", tools: ["echo", "task"] } },
     });
     const out = await tool.execute({ task: "child", type: "limited" }, ctx());
-    expect(out).toContain("done 3");
+    expect(out).toContain("done 4");
     expect(seen[0]).toEqual(["echo", "task"]);
     expect(seen[1]).toEqual(["echo"]);
+    expect(owned).toHaveLength(2);
+    expect(
+      owned.map((log) =>
+        log.events.flatMap((event) =>
+          event.type === "ext/event" && event.source === "owner-test" ? [event.payload.tool] : [],
+        ),
+      ),
+    ).toEqual([["task"], ["echo"]]);
+    expect(owned[1]?.events.find((event) => event.type === "tool/result")).toMatchObject({
+      content: "echo:grandchild-local",
+    });
     await tool.execute({ task: "follow-up", resume: "sub-1" }, ctx());
-    expect(seen[3]).toEqual(["echo", "task"]);
+    expect(seen[4]).toEqual(["echo", "task"]);
   });
 });

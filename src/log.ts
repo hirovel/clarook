@@ -1,14 +1,6 @@
 import type { AgentEvent } from "./events.js";
+import { freezeJson, jsonSnapshot } from "./json-snapshot.js";
 import { Recording } from "./recording.js";
-
-// JSON 快照已与调用方解耦;冻结其对象和数组,读者不能悄悄修改历史。
-function seal<T>(value: T): T {
-  if (value && typeof value === "object" && !Object.isFrozen(value)) {
-    for (const child of Object.values(value)) seal(child);
-    Object.freeze(value);
-  }
-  return value;
-}
 
 /** 一份追加式事实数组。编辑通过事件改变投影;文件格式与恢复完全归 Recording。 */
 export class EventLog {
@@ -42,8 +34,7 @@ export class EventLog {
 
   append(e: AgentEvent): number {
     // 内存与磁盘使用同一份 JSON 内容,原始对象的后续变化不会改写已捕获事实。
-    const json = JSON.stringify(e);
-    const snapshot = seal(JSON.parse(json) as AgentEvent);
+    const { json, value: snapshot } = jsonSnapshot(e);
     const previous = this.entries;
     const index = previous.length;
     // 保存状态观察者也能追加事实,观察前必须已提交当前事件及其固定身份。
@@ -81,7 +72,7 @@ export class EventLog {
     const log = new EventLog(opts.attach ? filePath : undefined);
     try {
       const events = (log.recording ?? new Recording(filePath)).loadEvents(opts.attach);
-      log.entries = Object.freeze(events.map((event) => seal(event)));
+      log.entries = Object.freeze(events.map((event) => freezeJson(event)));
       return log;
     } catch (error) {
       log.recording?.dispose();

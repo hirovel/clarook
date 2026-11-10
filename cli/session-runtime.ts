@@ -249,6 +249,9 @@ export async function prepareSessionRuntime(options: {
                 })),
               dispose: resources.dispose,
               fork,
+              ...(resources.slots?.beforeToolCall && {
+                beforeToolCall: resources.slots.beforeToolCall,
+              }),
             };
           };
           return fork(childLog);
