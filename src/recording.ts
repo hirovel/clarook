@@ -6,9 +6,11 @@ import {
   fstatSync,
   fsyncSync,
   ftruncateSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  rmSync,
   writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -59,6 +61,31 @@ export class Recording {
     if (this.disposed) throw new Error(`Recording is closed: ${this.journal}`);
     this.writer ??= lockFile(this.journal);
     this.writer.assertHeld();
+  }
+
+  /** 新候选须在独占期间确认路径未被使用,不提前创建journal或改变写失败接纳规则。 */
+  claimNew(): void {
+    try {
+      this.claim();
+      for (const file of [this.journal, this.directory]) {
+        if (lstatSync(file, { throwIfNoEntry: false }))
+          throw new Error(`Recording path already exists: ${file}`);
+      }
+    } catch (error) {
+      this.dispose();
+      throw error;
+    }
+  }
+
+  /** 仅放弃未发布的新候选;删除时仍须持锁,不能清理已被其他writer接管的路径。 */
+  discard(): void {
+    try {
+      this.claim();
+      rmSync(this.journal, { force: true });
+      rmSync(this.directory, { recursive: true, force: true });
+    } finally {
+      this.dispose();
+    }
   }
 
   dispose(): void {

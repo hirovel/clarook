@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
@@ -9,7 +9,14 @@ import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
-import { type ChildInfo, fork, inProcessRunner, TaskSessions, taskOnly } from "../src/subagent.js";
+import {
+  type ChildInfo,
+  DEFAULT_SCOPES,
+  fork,
+  inProcessRunner,
+  TaskSessions,
+  taskOnly,
+} from "../src/subagent.js";
 import { defineTool } from "../src/tools.js";
 
 const PARENT: AgentEvent[] = [
@@ -202,9 +209,23 @@ describe("TaskSessions.tool", () => {
         };
       },
     };
-    const task = new TaskSessions(parent).tool({
+    const sessions = new TaskSessions(parent);
+    const unrecordable: AgentEvent & { toJSON(): undefined } = {
+      type: "user/message",
+      at: "t",
+      text: "unrecordable fixture",
+      toJSON: () => undefined,
+    };
+    const task = sessions.tool({
       provider: childProvider,
       tools: [],
+      scopes: {
+        ...DEFAULT_SCOPES,
+        unrecordable: {
+          description: "A fixture with an unrecordable final event.",
+          scope: (snapshot) => [...taskOnly()(snapshot), unrecordable],
+        },
+      },
       compaction: {
         window: 5000,
         reserveTokens: 1000,
@@ -269,6 +290,24 @@ describe("TaskSessions.tool", () => {
       ).rejects.toThrow("ENOENT");
       expect(existsSync(join(dir, "parent-sub-2.jsonl"))).toBe(false);
       expect(existsSync(join(dir, "parent-sub-2.records"))).toBe(false);
+      expect(existsSync(join(dir, "parent-sub-2.jsonl.lock"))).toBe(false);
+      const source = parent.events;
+      const sourceBytes = readFileSync(parent.path, "utf8");
+      await expect(
+        task.execute(
+          { task: "must not start", scope: "unrecordable" },
+          { signal: new AbortController().signal },
+        ),
+      ).rejects.toThrow();
+      expect(parent.events).toBe(source);
+      expect(readFileSync(parent.path, "utf8")).toBe(sourceBytes);
+      expect(sessions.logs()).toEqual([parent, childLog]);
+      const failedPath = join(dir, "parent-sub-3.jsonl");
+      expect(existsSync(failedPath)).toBe(false);
+      expect(existsSync(failedPath.replace(/\.jsonl$/, ".records"))).toBe(false);
+      expect(existsSync(`${failedPath}.lock`)).toBe(false);
+      const retried = EventLog.create(taskOnly()(snapshot), { filePath: failedPath });
+      retried.recording?.discard();
     } finally {
       parent.recording?.dispose();
       childLog?.recording?.dispose();

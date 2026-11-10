@@ -11,6 +11,7 @@ import { type ApproveOrigin, maxSteps, type TurnDeps } from "../src/loop.js";
 import { deriveMessages, type Message } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
 import { type ChildTools, TaskSessions, type TaskToolOptions } from "../src/subagent.js";
+import { systemAt } from "../src/system-prompt.js";
 import { defineTool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
 
@@ -605,6 +606,26 @@ describe("步数上限与续聊", () => {
       const child = initial.logs[0];
       if (!child) throw new Error("missing child");
       opened.push(child);
+      expect(child.events[2]).toMatchObject({
+        type: "ext/event",
+        source: "subagent",
+        kind: "identity",
+        payload: { type: "ancestor", inherited: true },
+      });
+      expect(parent.events[2]).toMatchObject({ payload: { type: "ancestor" } });
+      if (parent.events[2]?.type !== "ext/event") throw new Error("missing ancestor identity");
+      expect(parent.events[2].payload).not.toHaveProperty("inherited");
+      expect(
+        child.events.filter(
+          (event) =>
+            event.type === "ext/event" &&
+            event.source === "subagent" &&
+            event.kind === "identity" &&
+            !event.payload.inherited,
+        ),
+      ).toMatchObject([
+        { payload: { id: "sub-1", type: "research", model: "p/same", remainingDepth: 1 } },
+      ]);
       child.append({ type: "context/edit", at: "t", target: 0, field: "system", value: "CHILD" });
       for (const log of opened) {
         log.recording?.flush();
@@ -909,6 +930,7 @@ describe("类型注册表与嵌套", () => {
       ["fork", undefined],
       ["fork", "OVERRIDE"],
       ["fork", ""],
+      ["captured", "type override"],
     ] as const) {
       const parent = parentLog();
       if (scope === "userMessagesOnly") {
@@ -973,6 +995,28 @@ describe("类型注册表与嵌套", () => {
       const { tool, logs } = mk({
         parent,
         tools: [],
+        ...(scope === "captured" && {
+          scopes: {
+            captured: {
+              description: "A fixture whose JSON snapshot contains the session start.",
+              scope: () => [
+                {
+                  type: "ext/event" as const,
+                  at: "t",
+                  source: "fixture",
+                  kind: "uncaptured-start",
+                  payload: {},
+                  toJSON: () => ({
+                    type: "session/start",
+                    at: "t",
+                    model: "fake",
+                    system: "captured base",
+                  }),
+                },
+              ],
+            },
+          },
+        }),
         types: {
           custom: { description: "custom", ...(override !== undefined && { system: override }) },
         },
@@ -990,6 +1034,7 @@ describe("类型注册表与嵌套", () => {
       expect(JSON.stringify(parent.events)).toBe(before);
       const child = logs[0];
       expect(child).toBeDefined();
+      if (scope === "captured") expect(systemAt(child?.events ?? [])).toBe("type override");
       if (scope === "userMessagesOnly") {
         expect(requests[0]?.filter((message) => message.role === "user")).toEqual([
           { role: "user", content: "EARLY_EDITED" },

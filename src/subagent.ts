@@ -1,6 +1,6 @@
 // subagent:可选装能力。内核任何模块都不引用本文件;组装者按需 import 并挂成一个工具。
 // 子 agent = 同一内核的递归实例化:独立事件日志、独立会话文件,replay 与构成投影零改动可用。
-import { existsSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { Agent } from "./agent.js";
@@ -551,25 +551,27 @@ export class TaskSessions {
           };
           const compaction = opts.compaction && { ...opts.compaction };
           if (!log) {
-            const start = (entry as ScopeEntry).scope({
-              events: parent.events,
-              system: systemAt(parent.events) ?? "",
-              model: provider.model,
-            });
-            log = new EventLog(pathFor(id));
-            opened = true;
-            child = new TaskSessions(log, sessions.retained);
-            children.set(id, child);
-            log.recording?.copyAttachments(start, parent.recording);
-            for (const event of start) {
-              // 保留下标与上下文引用,只标记复制来的身份,不把祖先当成本子。
-              log.append(
+            const start = (entry as ScopeEntry)
+              .scope({
+                events: parent.events,
+                system: systemAt(parent.events) ?? "",
+                model: provider.model,
+              })
+              .map((event) =>
+                // 保留下标与上下文引用,只标记复制来的身份,不把祖先当成本子。
                 isIdentity(event)
                   ? { ...event, payload: { ...event.payload, inherited: true } }
                   : event,
               );
-            }
-            const systemTarget = start.findIndex((event) => event.type === "session/start");
+            const path = pathFor(id);
+            log = EventLog.create(start, {
+              ...(path && { filePath: path }),
+              ...(parent.recording && { sourceRecording: parent.recording }),
+            });
+            opened = true;
+            child = new TaskSessions(log, sessions.retained);
+            children.set(id, child);
+            const systemTarget = log.events.findIndex((event) => event.type === "session/start");
             if (type?.system !== undefined && systemTarget >= 0)
               changeContext(log, {
                 type: "set-system",
@@ -682,28 +684,34 @@ export class TaskSessions {
             ...(compaction && { compaction }),
           });
         } catch (error) {
-          let failure = error;
+          const failures = [error];
           if (resources) {
             try {
               await resources.dispose();
             } catch (cleanupError) {
-              failure = new AggregateError(
-                [error, cleanupError],
-                `Sub-agent failed and cleanup failed: ${errorMessage(error)}; ${errorMessage(cleanupError)}`,
-              );
+              failures.push(cleanupError);
             }
           }
           if (record) record.running = false;
-          if (info) info.state = { status: "partial", reason: errorMessage(failure) };
-          if (!record && opened && log) {
-            children.delete(id);
-            log.recording?.dispose();
-            if (!resumed && log.path) {
-              rmSync(log.path, { force: true });
-              if (log.recording) rmSync(log.recording.directory, { recursive: true, force: true });
+          try {
+            if (!record && opened && log) {
+              children.delete(id);
+              if (resumed) log.recording?.dispose();
+              else log.recording?.discard();
             }
+          } catch (cleanupError) {
+            failures.push(cleanupError);
+          } finally {
+            preparing.delete(id);
           }
-          preparing.delete(id);
+          const failure =
+            failures.length === 1
+              ? error
+              : new AggregateError(
+                  failures,
+                  `Sub-agent failed and cleanup failed: ${failures.map(errorMessage).join("; ")}`,
+                );
+          if (info) info.state = { status: "partial", reason: errorMessage(failure) };
           throw failure;
         }
         try {

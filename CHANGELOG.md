@@ -7,6 +7,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Added
 
+- Add `EventLog.create` for one-time initialization from independently captured events. Copy referenced bodies before journal writes and reject invalid initial JSON before writer allocation; keep live append and recovery behavior.
 - Add `slots.afterToolCall` for explicit model-result text and error-flag replacement after immutable execution recording. Preserve unknown outcomes, distinguish post-processing failures from execution failures, stop local hook waits on cancellation, discard late patches, and keep factory-created child hooks bound to their own session.
 - Record executor returns and errors as native `tool/executed` facts before ordered model-result publication, including SDK sessions without Recording. Link final results to their execution facts and inspect execution values independently of original output bytes and model results. Replace recording completion events without automatically retrying or reconstructing missing final results.
 - Add `slots.beforeToolCall` for explicit argument replacement before final validation and approval. Preserve raw model calls, record final prepared parameters in `tool/arguments`, and expose both values in request and event inspection without requiring body attachments. Give approval immutable parameters and execution a private copy; keep factory-created child hooks bound to their own session.
@@ -34,6 +35,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Avoid repeatedly copying the event prefix when a new child inherits a long history. Reject existing journal or recording paths under the write lock, and centralize failed-candidate deletion in Recording while retaining write ownership during cleanup.
 - Include nested task logs in saving status, manual retry, session switching and shutdown. Reuse live grandchild logs on follow-up, retain failed writes across switches, and protect borrowed logs while a replacement runtime is preparing.
 - Avoid rebuilding unused intermediate event snapshots when writing a physical session fork. Use the existing Recording writer and JSON snapshot rules while preserving event order, referenced bodies, source history and failed-fork cleanup.
 - Set the active cancellation signal before notifying pending-input and interruption observers. Reentrant interruption no longer duplicates cancellation records, newly queued input stays paused, and callback or recording failures still leave the run cancelled.

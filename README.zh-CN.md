@@ -138,6 +138,8 @@ MCP 图片和音频分别保存到会话的产物目录。按各次结果返回�
 
 嵌套任务在工具和 runtime 重准备后继续使用原活日志。保存状态、Ctrl+S、会话切换和退出覆盖整棵任务树；失败写入按现有退出规则保留供重试。内核集成改用 `new TaskSessions(log).tool(options)`，替代 `createTaskTool`；跨轮保留这个持有者，通过 `logs()` 统一保存和释放。`inProcessRunner` 必须传已准备的 `log`，不再通过 `startEvents` 或 `sessionPath` 创建日志。
 
+新子任务的历史逐事件捕获，一次安装，初始化不再反复复制中间数组。内核集成可用 `EventLog.create(events, { filePath, sourceRecording })` 获得同样行为。它在取得 writer 前拒绝非法 JSON，要求目标日志和录制路径未被使用，并在写入历史前复制引用的正文。实时 `append` 沿用原不可变快照规则。
+
 在 `/settings` 打开以下设置，切到 **Saved defaults** 保存，下次启动生效。也可写入命名预设或命令行参数：
 
 | `defaults` 下的设置 | 默认值 | 含义 |

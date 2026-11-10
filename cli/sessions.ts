@@ -9,6 +9,7 @@ import type { AgentEvent } from "../src/events.js";
 import { lockFile } from "../src/file-lock.js";
 import { jsonSnapshot } from "../src/json-snapshot.js";
 import { EventLog } from "../src/log.js";
+import { errorMessage } from "../src/providers/errors.js";
 import { Recording } from "../src/recording.js";
 import { recordUnresolvedCalls } from "../src/recovery.js";
 import type { CommonArgs } from "./args.js";
@@ -251,7 +252,7 @@ export function forkSession(
   const n = Math.max(1, Math.min(upTo, events.length));
   const file = newSessionPath(dir, "-fork");
   const recording = new Recording(file);
-  recording.claim();
+  recording.claimNew();
   const prefix = events.slice(0, n);
   try {
     recording.copyAttachments(prefix, source);
@@ -261,9 +262,14 @@ export function forkSession(
     if (recording.error) throw new Error(recording.error);
     return { file, events: n };
   } catch (error) {
-    recording.dispose();
-    rmSync(file, { force: true });
-    rmSync(recording.directory, { recursive: true, force: true });
+    try {
+      recording.discard();
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        `Session fork and cleanup failed: ${errorMessage(error)}; ${errorMessage(cleanupError)}`,
+      );
+    }
     throw error;
   } finally {
     recording.dispose();

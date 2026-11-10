@@ -1,7 +1,9 @@
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   renameSync,
   rmSync,
   truncateSync,
@@ -73,6 +75,16 @@ describe("EventLog", () => {
       first.append(START);
       first.append({ ...ASK, text: "A" });
       first.recording?.flush();
+      const originalBody = first.recording?.open("existing output");
+      if (!originalBody) throw new Error("missing recording");
+      originalBody.write("preserve existing output");
+      first.recording?.flush();
+      const existingBytes = readFileSync(file, "utf8");
+      expect(() => EventLog.create([START], { filePath: file })).toThrow("File is in use");
+      const rejected = new Recording(file);
+      expect(() => rejected.discard()).toThrow("File is in use");
+      expect(readFileSync(file, "utf8")).toBe(existingBytes);
+      expect(first.recording?.read(originalBody.ref)).toBe("preserve existing output");
       const blocked = run();
       expect(blocked.status).not.toBe(0);
       expect(blocked.stderr).toContain("File is in use");
@@ -85,6 +97,19 @@ describe("EventLog", () => {
         "A",
         "B edited",
       ]);
+      const restoredBytes = readFileSync(file, "utf8");
+      expect(() => EventLog.create([START], { filePath: file })).toThrow("already exists");
+      expect(readFileSync(file, "utf8")).toBe(restoredBytes);
+      expect(new Recording(file).read(originalBody.ref)).toBe("preserve existing output");
+      expect(existsSync(`${file}.lock`)).toBe(false);
+      const orphan = join(dir, "orphan.jsonl");
+      const orphanRecords = join(dir, "orphan.records");
+      mkdirSync(orphanRecords);
+      writeFileSync(join(orphanRecords, "keep.txt"), "preserve orphan records");
+      expect(() => EventLog.create([START], { filePath: orphan })).toThrow("already exists");
+      expect(readFileSync(join(orphanRecords, "keep.txt"), "utf8")).toBe("preserve orphan records");
+      expect(existsSync(orphan)).toBe(false);
+      expect(existsSync(`${orphan}.lock`)).toBe(false);
       const stale = EventLog.load(file, { attach: true });
       try {
         // 模拟崩溃后遗留或进程长期暂停的租约,不让回归真实等待一分钟。
@@ -97,7 +122,9 @@ describe("EventLog", () => {
           expect(stale.events.at(-1)).toEqual(ASK);
           expect(stale.recording?.error).toMatch(/ownership changed/);
           expect(EventLog.load(file).events).toEqual(before);
-          stale.recording?.dispose();
+          expect(() => stale.recording?.discard()).toThrow(/ownership changed/);
+          expect(EventLog.load(file).events).toEqual(before);
+          expect(replacement.recording?.read(originalBody.ref)).toBe("preserve existing output");
           replacement.append({ ...ASK, text: "new owner" });
           replacement.recording?.flush();
           expect(EventLog.load(file).events.at(-1)).toMatchObject({ text: "new owner" });
@@ -190,6 +217,30 @@ describe("EventLog", () => {
       ).toMatchObject({
         original: "original text that the model does not receive",
       });
+      // 原对象中的假引用不能参与复制;新日志只认独立JSON捕获后的引用。
+      const capturedFile = join(dir, "captured.jsonl");
+      const captured = EventLog.create(
+        log.events.map((event) =>
+          event.type === "ext/event" && event.source === "recording" && event.kind === "tool/output"
+            ? {
+                ...event,
+                payload: { output: { file: "deadbeef.body", bytes: 1 } },
+                toJSON: () => event,
+              }
+            : event,
+        ),
+        { filePath: capturedFile, sourceRecording: store },
+      );
+      try {
+        expect(captured.events).toEqual(log.events);
+        expect(
+          readRequestRecording(capturedFile, captured.events, request)?.outputs?.[0],
+        ).toMatchObject({
+          original: "original text that the model does not receive",
+        });
+      } finally {
+        captured.recording?.dispose();
+      }
       expect(store.error).toBeTruthy();
       rmSync(store.directory);
       rmSync(file, { recursive: true });
@@ -216,6 +267,9 @@ describe("EventLog", () => {
       ).toEqual(saved?.outputs);
       expect(
         readRequestRecording(fork.file, EventLog.load(fork.file).events, index)?.outputs,
+      ).toEqual(saved?.outputs);
+      expect(
+        readRequestRecording(capturedFile, EventLog.load(capturedFile).events, index)?.outputs,
       ).toEqual(saved?.outputs);
       expect(readRequestRecording(file, loaded.events, index)?.error).toContain("Missing");
       const outputEvent = loaded.events.find(
@@ -322,8 +376,11 @@ describe("EventLog", () => {
     const dir = mkdtempSync(join(tmpdir(), "kernel-"));
     const file = join(dir, "s.jsonl");
     try {
-      const log = new EventLog(file);
-      for (const e of SESSION) log.append(e);
+      const empty = EventLog.create([], { filePath: file });
+      expect(empty.events).toEqual([]);
+      expect(existsSync(file)).toBe(false);
+      empty.recording?.dispose();
+      const log = EventLog.create(SESSION, { filePath: file });
       const loaded = EventLog.load(file);
       expect(loaded.events).toEqual(SESSION);
       rmSync(file);
@@ -402,22 +459,30 @@ describe("EventLog", () => {
   it("订阅读取独立快照:外部修改不能改变事实或恢复后的投影", () => {
     const dir = mkdtempSync(join(tmpdir(), "clarook-snapshot-"));
     const file = join(dir, "s.jsonl");
-    const log = new EventLog(file);
+    const event: AgentEvent = {
+      type: "ext/event",
+      at: "t",
+      source: "fixture",
+      kind: "snapshot",
+      payload: { nested: { value: "original" } },
+    };
+    const keys: string[] = [];
+    const initial: AgentEvent[] = [
+      START,
+      ASK,
+      {
+        ...event,
+        toJSON(key: string) {
+          keys.push(key);
+          return event;
+        },
+      } as AgentEvent,
+      event,
+    ];
+    const log = EventLog.create(initial, { filePath: file });
     try {
-      const seen: string[] = [];
-      const off = log.subscribe((e) => seen.push(e.type));
-      log.append(START);
-      off();
-      log.append(ASK);
-      expect(seen).toEqual(["session/start"]);
-      const event: AgentEvent = {
-        type: "ext/event",
-        at: "t",
-        source: "fixture",
-        kind: "snapshot",
-        payload: { nested: { value: "original" } },
-      };
-      log.append(event);
+      expect(keys).toEqual([""]);
+      initial.splice(0);
       (event.payload.nested as { value: string }).value = "changed outside log";
       const before = log.events;
       const captured = before.at(-1);
@@ -428,8 +493,14 @@ describe("EventLog", () => {
       );
       expect(() => Array.prototype.reverse.call(before)).toThrow(TypeError);
       expect(() => Array.prototype.splice.call(before, 1, 1)).toThrow(TypeError);
+      expect(before[2]).not.toBe(captured);
+      if (before[2]?.type !== "ext/event") throw new Error("missing independent snapshot");
+      expect(before[2].payload).not.toBe(captured.payload);
+      const seen: string[] = [];
+      const off = log.subscribe((e) => seen.push(e.type));
       log.append({ type: "context/edit", at: "t", target: 1, field: "content", value: "edited" });
-      expect(before).toHaveLength(3);
+      off();
+      expect(before).toHaveLength(4);
       expect(deriveMessages(before).map((message) => message.content)).toEqual([
         START.system,
         ASK.text,
@@ -444,6 +515,22 @@ describe("EventLog", () => {
       expect(loaded.events).toEqual(log.events);
       expect(deriveMessages(loaded.events)).toEqual(deriveMessages(log.events));
       expect(Reflect.set(loaded.events, "1", START)).toBe(false);
+      const unallocated = join(dir, "unallocated");
+      const bad: AgentEvent & { toJSON(): undefined } = {
+        ...ASK,
+        toJSON: () => undefined,
+      };
+      expect(() =>
+        EventLog.create([START, bad], { filePath: join(unallocated, "bad.jsonl") }),
+      ).toThrow();
+      expect(existsSync(unallocated)).toBe(false);
+      const sparse = new Array<AgentEvent>(2);
+      sparse[0] = START;
+      expect(() => EventLog.create(sparse)).toThrow();
+      expect(() =>
+        EventLog.create(sparse, { filePath: join(unallocated, "sparse.jsonl") }),
+      ).toThrow();
+      expect(existsSync(unallocated)).toBe(false);
 
       // 保存状态观察者追加事实时,接纳顺序、事件身份与恢复后的顺序必须一致。
       const store = log.recording;
@@ -469,6 +556,7 @@ describe("EventLog", () => {
       expect(nestedIndex).toBe(beforeNested + 1);
       expect(log.events.slice(beforeNested)).toMatchObject([{ text: "A" }, { text: "B" }]);
       for (const item of observed) expect(log.events[item.index]).toBe(item.event);
+      expect(seen).toEqual(["context/edit"]);
       rmSync(file, { recursive: true });
       renameSync(backup, file);
       store.flush();

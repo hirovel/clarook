@@ -1,5 +1,6 @@
 import type { AgentEvent } from "./events.js";
 import { freezeJson, jsonSnapshot } from "./json-snapshot.js";
+import { errorMessage } from "./providers/errors.js";
 import { Recording } from "./recording.js";
 
 /** 一份追加式事实数组。编辑通过事件改变投影;文件格式与恢复完全归 Recording。 */
@@ -66,6 +67,34 @@ export class EventLog {
   subscribe(fn: (e: AgentEvent, index: number) => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
+  }
+
+  /** 新实例在返回前一次安装既有历史;逐事件捕获JSON,不广播初始化的中间版本。 */
+  static create(
+    initialEvents: readonly AgentEvent[],
+    opts: { filePath?: string; sourceRecording?: Recording } = {},
+  ): EventLog {
+    const captured = Array.from(initialEvents, (event) => jsonSnapshot(event));
+    const events = captured.map((snapshot) => snapshot.value);
+    const log = new EventLog(opts.filePath);
+    // 取锁或拒绝旧资源失败时不能进入discard,这些路径不属于新候选。
+    log.recording?.claimNew();
+    try {
+      log.recording?.copyAttachments(events, opts.sourceRecording);
+      log.entries = Object.freeze(events);
+      for (const snapshot of captured) log.recording?.appendEvent(snapshot.json);
+      return log;
+    } catch (error) {
+      try {
+        log.recording?.discard();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          `Session creation and cleanup failed: ${errorMessage(error)}; ${errorMessage(cleanupError)}`,
+        );
+      }
+      throw error;
+    }
   }
 
   static load(filePath: string, opts: { attach?: boolean } = {}): EventLog {

@@ -156,6 +156,8 @@ The `task` tool delegates work to a child context. Follow up with `resume: "sub-
 
 Nested tasks keep their live logs across tool and runtime preparation. Saving status, Ctrl+S, session switching and shutdown include the whole task tree. Failed writes remain available for retry under the existing exit rules. Core integrations use `new TaskSessions(log).tool(options)` in place of `createTaskTool`; keep that owner across runs and use `logs()` for final saving and release. `inProcessRunner` requires a prepared `log`; it no longer creates one from `startEvents` or `sessionPath`.
 
+New child histories are captured per event and installed once, avoiding intermediate array copies during initialization. Core integrations can use `EventLog.create(events, { filePath, sourceRecording })` for the same behavior. It rejects invalid JSON before acquiring a writer, requires unused target journal and recording paths, and copies referenced bodies before writing history. Live `append` keeps the existing immutable snapshot rules.
+
 Open these entries in `/settings`, switch to **Saved defaults**, and restart to use the new values. They also work in named presets and command-line flags:
 
 | Setting under `defaults` | Default | Meaning |
