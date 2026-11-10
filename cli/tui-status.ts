@@ -100,7 +100,7 @@ export class RuntimeStatus implements Component {
     const ctx = this.context();
     const { agent, view } = ctx;
     const inner = Math.max(1, width - 2);
-    const logs = [ctx.log, ...ctx.children.views.map((v) => v.info.log)];
+    const logs = ctx.logs();
     const unsaved =
       logs.find((log) => log.recording?.full) ?? logs.find((log) => log.recording?.error);
     const busy = agent.running || this.work !== undefined;

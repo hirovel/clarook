@@ -6,7 +6,7 @@ import { maxSteps, queueToTurnEnd, type TurnDeps } from "../src/loop.js";
 import type { Provider } from "../src/provider.js";
 import { errorMessage } from "../src/providers/errors.js";
 import { recordSessionDirectory } from "../src/session-directory.js";
-import { type ChildInfo, type ChildTools, createTaskTool } from "../src/subagent.js";
+import type { ChildInfo, ChildTools, TaskSessions } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
 import type { CommonArgs } from "./args.js";
 import {
@@ -34,7 +34,7 @@ import { createSkillTool, skillCatalog } from "./tools/skill.js";
 export async function prepareSessionRuntime(options: {
   boot: ReturnType<typeof bootstrap>;
   args: CommonArgs;
-  log: EventLog;
+  sessions: TaskSessions;
   sessionFile: string;
   /** 新建时与初稿共享同次发现;恢复时按保存的配置重新准备能力。 */
   skills?: Skill[];
@@ -43,13 +43,15 @@ export async function prepareSessionRuntime(options: {
   chooseDirectory?: (issue: DirectoryIssue) => Promise<string | undefined>;
   connections?: McpConnections;
   onChild?: (child: ChildInfo) => void;
+  onLog?: (log: EventLog) => void;
   slots?: () => TurnDeps["slots"];
   current?: () => { provider: Provider; modelLocator: string; tools: readonly Tool[] } | undefined;
   allowUnavailable?: boolean;
   descriptions?: Record<string, string>;
   confirmProjectMcp?: (review: ProjectMcpReview) => Promise<boolean>;
 }) {
-  const { boot, args, log } = options;
+  const { boot, args, sessions } = options;
+  const log = sessions.log;
   const directory = await prepareSessionDirectory(log, {
     entryCwd: options.entryCwd ?? process.cwd(),
     ...(options.directory !== undefined && { directory: options.directory }),
@@ -221,11 +223,10 @@ export async function prepareSessionRuntime(options: {
         tools: root.tools.filter((t) => !args.disabledTools?.includes(t.name)),
       };
     if (args.subagent && !root.tools.some((t) => t.name === "task")) {
-      const task = createTaskTool({
+      const task = sessions.tool({
         ...boot.config.subagents,
         ...(args.subagentMaxSteps != null && { maxSteps: args.subagentMaxSteps }),
         ...(args.subagentDepth !== undefined && { depth: args.subagentDepth }),
-        parent: log,
         cwd,
         provider: () => current().provider,
         modelLocator: () => current().modelLocator,
@@ -268,12 +269,14 @@ export async function prepareSessionRuntime(options: {
           };
         },
         ...(options.onChild && { onChild: options.onChild }),
+        ...(options.onLog && { onLog: options.onLog }),
         slots: () => options.slots?.() ?? slots,
       });
       applyToolPrompts([task], toolPrompts);
       root.tools.push(task);
     }
     return {
+      sessions,
       cwd,
       choice,
       compaction,
@@ -287,6 +290,7 @@ export async function prepareSessionRuntime(options: {
         root.mcp.activate();
         directory.commit();
       },
+      // runtime只是这一代执行资源;日志节点由Session跨代持有,宿主最后保存释放。
       dispose: () => disposeOwned(root.dispose),
     };
   } catch (error) {

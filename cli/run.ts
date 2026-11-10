@@ -9,6 +9,7 @@ import type { AgentEvent } from "../src/events.js";
 import { errorMessage } from "../src/providers/errors.js";
 import { getSetting, SETTINGS } from "../src/settings.js";
 import { setupSnapshot } from "../src/setup.js";
+import { TaskSessions } from "../src/subagent.js";
 import { expandFileRefs } from "./attachments.js";
 import {
   beginSession,
@@ -56,6 +57,7 @@ try {
 
 const session = beginSession(args, choice, process.cwd(), sessionsDir(boot.config));
 const { log, sessionFile } = session;
+const sessions = new TaskSessions(log);
 // 事件流输出(--events):每条事件一行 JSON,与会话文件逐字节相同;给外部程序订阅内核的全部状态变化。
 if (args.events) log.subscribe((e) => process.stdout.write(`${JSON.stringify(e)}\n`));
 const reportSkillError = (e: AgentEvent) => {
@@ -98,13 +100,14 @@ try {
     boot,
     args,
     ...session,
+    sessions,
     slots: () => agent.slots,
     current: () => ({
       provider: agent.provider,
       modelLocator: `${choice.providerName}/${choice.model}`,
       tools: agent.tools,
     }),
-    onChild: (child) => watchSaving(child.log),
+    onLog: watchSaving,
   });
   if (!prepared) throw new Error("Session preparation cancelled.");
   runtime = prepared;
@@ -187,7 +190,7 @@ try {
   try {
     await runtime.dispose();
   } finally {
-    for (const source of recordings) {
+    for (const source of sessions.logs()) {
       await source.checkpoint();
       source.recording?.dispose();
     }

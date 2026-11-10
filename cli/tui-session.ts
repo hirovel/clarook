@@ -9,6 +9,7 @@ import { deriveMessages } from "../src/messages.js";
 import { errorMessage } from "../src/providers/errors.js";
 import { recordUnresolvedCalls } from "../src/recovery.js";
 import { directoryAt } from "../src/session-directory.js";
+import { TaskSessions } from "../src/subagent.js";
 import { applyPreset, type CommonArgs, parseCommonArgs, settingsFromArgs } from "./args.js";
 import {
   type Bootstrap,
@@ -36,7 +37,7 @@ import { discoverTemplates } from "./templates.js";
 import { createTuiApp, type TuiApp } from "./tui-app.js";
 import type { SessionTarget } from "./tui-context.js";
 
-type Session = ReturnType<typeof openSession>;
+type Session = ReturnType<typeof openSession> & { sessions: TaskSessions };
 type Runtime = NonNullable<Awaited<ReturnType<typeof prepareSessionRuntime>>>;
 
 export async function startTuiSession(options: {
@@ -62,12 +63,12 @@ export async function startTuiSession(options: {
       if (!store.error) {
         unsaved.delete(key);
         off();
-        if (current?.session.log !== log) store.dispose();
+        if (!isCurrentLog(log)) store.dispose();
       }
     });
   };
   const releaseSessionLog = (log: EventLog) => {
-    if (log === current.session.log) return;
+    if (isCurrentLog(log)) return;
     log.recording?.flush();
     retainUnsaved(log);
     if (!log.recording?.error) log.recording?.dispose();
@@ -93,6 +94,17 @@ export async function startTuiSession(options: {
     runtime?: Runtime;
     binding?: { view?: TuiApp };
   };
+  let candidate: Session | undefined;
+  const isCurrentLog = (log: EventLog) =>
+    (current?.session.sessions.logs().includes(log) ?? false) ||
+    (candidate?.sessions.logs().includes(log) ?? false);
+  const withSessions = (session: ReturnType<typeof openSession>): Session => ({
+    ...session,
+    sessions:
+      session.log === current?.session.log
+        ? current.session.sessions
+        : new TaskSessions(session.log, (path) => unsaved.get(resolve(path))),
+  });
   let trustView: TuiApp | undefined;
   const argsFor = (values: Preset) =>
     applyPreset(parseCommonArgs([]), {
@@ -136,6 +148,7 @@ export async function startTuiSession(options: {
           terminal,
           cwd: runtime?.cwd ?? directoryAt(session.log.events)?.cwd ?? entryCwd,
           log: session.log,
+          sessionLogs: () => session.sessions.logs(),
           provider: choice.provider,
           tools: runtime?.tools ?? [],
           compaction: runtime?.compaction ?? {
@@ -259,6 +272,7 @@ export async function startTuiSession(options: {
           issue.suggested,
         ),
       onChild: (child) => binding.view?.attachChild(child),
+      onLog: (log) => binding.view?.watchLog(log),
       slots: () => binding.view?.slots(),
       current: () =>
         binding.view && {
@@ -313,7 +327,6 @@ export async function startTuiSession(options: {
     const originalSetup = old.view.setup();
     const originalValues = JSON.stringify(originalSetup.values);
     let prepared: Awaited<ReturnType<typeof prepare>> | undefined;
-    let candidate: Session | undefined;
     try {
       const origin = old.runtime?.cwd ?? entryCwd;
       let directory = target.kind === "new" ? undefined : target.directory;
@@ -335,9 +348,11 @@ export async function startTuiSession(options: {
                   : resolve(origin, target.file);
               const live =
                 file === resolve(old.session.sessionFile) ? old.session.log : unsaved.get(file);
-              return live
-                ? { log: live, sessionFile: file, resumed: true }
-                : openSession({ resume: file, continue: false }, dir);
+              return withSessions(
+                live
+                  ? { log: live, sessionFile: file, resumed: true }
+                  : openSession({ resume: file, continue: false }, dir),
+              );
             })()
           : undefined;
       candidate = session;
@@ -367,7 +382,7 @@ export async function startTuiSession(options: {
             } = beginSession(args, boot.choose(args.model), origin, dir);
             skills = discovered;
             initialPreambleTarget = preambleTarget;
-            session = opened;
+            session = withSessions(opened);
           }
           candidate = session;
           old.view.note("Preparing session… Your current session remains available.");
@@ -438,11 +453,7 @@ export async function startTuiSession(options: {
           }
           const showView = prepareView(session, args, prepared.runtime);
           old.view.flushInputs();
-          for (const log of [
-            old.session.log,
-            ...old.view.children().map((child) => child.log),
-            session.log,
-          ]) {
+          for (const log of [...old.session.sessions.logs(), session.log]) {
             log.recording?.flush();
             retainUnsaved(log);
           }
@@ -503,7 +514,7 @@ export async function startTuiSession(options: {
             .catch((error) =>
               current.view.note(`Previous session cleanup failed: ${errorMessage(error)}`),
             );
-          for (const log of [old.session.log, ...old.view.children().map((child) => child.log)]) {
+          for (const log of old.session.sessions.logs()) {
             releaseSessionLog(log);
           }
           return;
@@ -541,7 +552,9 @@ export async function startTuiSession(options: {
       }
     } finally {
       await prepared?.runtime.dispose();
-      if (candidate) releaseSessionLog(candidate.log);
+      const abandoned = candidate;
+      candidate = undefined;
+      if (abandoned) for (const log of abandoned.sessions.logs()) releaseSessionLog(log);
       switching = false;
     }
   }
@@ -557,9 +570,7 @@ export async function startTuiSession(options: {
     if (closed) return Promise.resolve();
     closed = true;
     const { view, session, runtime } = current;
-    const logs = () => [
-      ...new Set([session.log, ...view.children().map((child) => child.log), ...unsaved.values()]),
-    ];
+    const logs = () => [...new Set([...session.sessions.logs(), ...unsaved.values()])];
     let forced = false;
     let finishForce!: () => void;
     const forceDone = new Promise<void>((resolve) => {
@@ -686,7 +697,8 @@ export async function startTuiSession(options: {
     options.args.resume || options.args.continue
       ? openSession(options.args, dir)
       : beginSession(options.args, first, entryCwd, dir);
-  const { skills, preambleTarget: _preambleTarget, ...session } = opened;
+  const { skills, preambleTarget: _preambleTarget, ...initial } = opened;
+  const session = withSessions(initial);
   if (session.resumed) {
     current = { session, args: options.args, view: prepareView(session, options.args)() };
     void switchSession({ kind: "resume", file: session.sessionFile }).catch((error) =>
@@ -712,7 +724,7 @@ export async function startTuiSession(options: {
       } catch (cleanupError) {
         cleanupErrors.push(cleanupError);
       }
-      session.log.recording?.dispose();
+      for (const log of session.sessions.logs()) log.recording?.dispose();
       if (cleanupErrors.length)
         throw new AggregateError([error, ...cleanupErrors], "Session startup and cleanup failed");
       throw error;

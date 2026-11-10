@@ -154,6 +154,8 @@ Extensions can supply `slots.afterToolCall` to return `{ content?, isError? }` f
 
 The `task` tool delegates work to a child context. Follow up with `resume: "sub-N"`: the child keeps its original type, selected provider/model, actual tool names, per-run step limit and remaining delegation depth, including after restarting Clarook. Raising the current depth does not expand its delegation rights; reducing it below the original requirement rejects the follow-up. Missing original resources or an explicit type change also reject it before model execution. Older child logs without an execution identity remain readable but cannot be resumed. Approval follows the parent's current rules; model aliases and tool implementations are not version-pinned.
 
+Nested tasks keep their live logs across tool and runtime preparation. Saving status, Ctrl+S, session switching and shutdown include the whole task tree. Failed writes remain available for retry under the existing exit rules. Core integrations use `new TaskSessions(log).tool(options)` in place of `createTaskTool`; keep that owner across runs and use `logs()` for final saving and release. `inProcessRunner` requires a prepared `log`; it no longer creates one from `startEvents` or `sessionPath`.
+
 Open these entries in `/settings`, switch to **Saved defaults**, and restart to use the new values. They also work in named presets and command-line flags:
 
 | Setting under `defaults` | Default | Meaning |

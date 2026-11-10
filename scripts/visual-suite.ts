@@ -19,7 +19,7 @@ import { EventLog } from "../src/log.js";
 import type { AssistantTurn, CompleteOptions, Provider } from "../src/provider.js";
 import type { Message } from "../src/messages.js";
 import { ProviderError } from "../src/providers/errors.js";
-import { createTaskTool } from "../src/subagent.js";
+import { TaskSessions } from "../src/subagent.js";
 import { defineTool, type Tool } from "../src/tools.js";
 import { createBashTool } from "../cli/tools/bash.js";
 import { readTool } from "../cli/tools/fs.js";
@@ -211,17 +211,19 @@ scene = "2";
   ]);
   const log = new EventLog();
   let app: TuiApp | undefined;
-  const task = createTaskTool({
-    parent: log,
+  const sessions = new TaskSessions(log);
+  const task = sessions.tool({
     provider,
     tools: [echo],
     slots: () => app?.slots(),
     onChild: (child) => app?.attachChild(child),
+    onLog: (childLog) => app?.watchLog(childLog),
   });
   const term = new VirtualTerminal(W, 44);
   app = createTuiApp({
     terminal: term,
     log,
+    sessionLogs: () => sessions.logs(),
     provider,
     tools: [bash, read, echo, task],
     compaction: { strategy: async () => null, window: 131072, reserveTokens: 32000 },
@@ -273,18 +275,20 @@ scene = "3";
   ]);
   const log = new EventLog();
   let app: TuiApp | undefined;
-  const task = createTaskTool({
-    parent: log,
+  const sessions = new TaskSessions(log);
+  const task = sessions.tool({
     provider,
     tools: [echo, slow],
     slots: () => app?.slots(),
     maxSteps: 2,
     types: { research: { description: "read-only investigation", tools: ["echo"] } },
     onChild: (child) => app?.attachChild(child),
+    onLog: (childLog) => app?.watchLog(childLog),
   });
   app = createTuiApp({
     terminal: new VirtualTerminal(W, 60),
     log,
+    sessionLogs: () => sessions.logs(),
     provider,
     tools: [echo, slow, task],
     compaction: { strategy: async () => null, window: 131072, reserveTokens: 32000 },

@@ -15,6 +15,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Changed
 
+- Replace `createTaskTool` with `TaskSessions.tool()`. Keep task logs and child identities across tool and runtime generations; require an existing `log` in `inProcessRunner` instead of accepting `startEvents` or an input `sessionPath`.
 - Replace separate text and reasoning callbacks with one typed `onStream` interface across Provider, Agent and the turn loop. Include per-attempt lifecycle and tool argument updates, and show temporary tool generation progress in the TUI. Clear unfinished tool previews on retry, cancellation and failure; execute only from the complete response through existing validation and approval.
 - Group single-file text replacements in the built-in `edit` tool's nonempty `edits` array. Match every item against the original file, reject overlapping targets, preserve per-item `replaceAll`, and write only after all checks pass. Reject the former top-level replacement arguments.
 - Show each requested edit and its unique/all-occurrences range in tool previews and complete inspectors. Preserve historical parameter reading and keep context text comparisons independent of tool input formats.
@@ -33,6 +34,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Include nested task logs in saving status, manual retry, session switching and shutdown. Reuse live grandchild logs on follow-up, retain failed writes across switches, and protect borrowed logs while a replacement runtime is preparing.
 - Avoid rebuilding unused intermediate event snapshots when writing a physical session fork. Use the existing Recording writer and JSON snapshot rules while preserving event order, referenced bodies, source history and failed-fork cleanup.
 - Set the active cancellation signal before notifying pending-input and interruption observers. Reentrant interruption no longer duplicates cancellation records, newly queued input stays paused, and callback or recording failures still leave the run cancelled.
 - Render child transcripts in committed event order when extensions append messages during synchronous event callbacks. Share the existing history-prefix projection with the main view while retaining recursive subscriptions, child-view start positions and cleanup.

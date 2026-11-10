@@ -13,7 +13,7 @@ import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { CLEARED_PLACEHOLDER } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
-import { type ChildInfo, createTaskTool } from "../src/subagent.js";
+import { type ChildInfo, TaskSessions } from "../src/subagent.js";
 import { defineTool } from "../src/tools.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
@@ -66,10 +66,10 @@ describe("子 agent 视图", () => {
       { text: "父收到", toolCalls: [], stopReason: "end" },
     ]);
     const log = new EventLog();
+    const sessions = new TaskSessions(log);
     const children: ChildInfo[] = [];
     let app: ReturnType<typeof createTuiApp> | undefined;
-    const task = createTaskTool({
-      parent: log,
+    const task = sessions.tool({
       provider,
       tools: async (childLog) => {
         const off = childLog.subscribe((event) => {
@@ -82,10 +82,12 @@ describe("子 agent 视图", () => {
         children.push(child);
         app?.attachChild(child);
       },
+      onLog: (childLog) => app?.watchLog(childLog),
     });
     app = createTuiApp({
       terminal: new VirtualTerminal(110, 50),
       log,
+      sessionLogs: () => sessions.logs(),
       provider,
       tools: [echo, task],
       compaction: { strategy: async () => null, window: 100000, reserveTokens: 20000 },

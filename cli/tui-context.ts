@@ -156,6 +156,7 @@ export type TuiContext = {
   /** 当前实例的配置基底;技能即时修改在此提交,待重启项仍保留启动值。 */
   setupBase: Preset;
   log: EventLog;
+  logs(): readonly EventLog[];
   tools: Tool[];
   compaction: CompactionConfig;
   agent: Agent;

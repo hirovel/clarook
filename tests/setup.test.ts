@@ -210,6 +210,21 @@ describe("setup data and persistence", () => {
           options?.onRaw?.('data: {"fixture":true}');
           seen.push({ model, tools: tools.map((t) => t.name) });
           const last = messages.at(-1);
+          if (last?.role === "user" && ["nested-owner", "nested-again"].includes(last.content))
+            return {
+              text: "",
+              stopReason: "tool",
+              toolCalls: [
+                {
+                  id: "nested",
+                  name: "task",
+                  args:
+                    last.content === "nested-owner"
+                      ? { task: "grand-owner" }
+                      : { task: "grand-follow", resume: "sub-1" },
+                },
+              ],
+            };
           if (messages.some((m) => m.role === "user" && m.content === "bounded-probe"))
             return {
               text: "working",
@@ -254,12 +269,13 @@ describe("setup data and persistence", () => {
       },
     };
     let host: Awaited<ReturnType<typeof startTuiSession>> | undefined;
+    let terminal = new VirtualTerminal(80, 24);
     const ctx = { signal: new AbortController().signal };
     try {
       const running = await startTuiSession({
         boot,
         args: boot.resolve(parseCommonArgs([])),
-        terminal: () => new VirtualTerminal(80, 24),
+        terminal: () => (terminal = new VirtualTerminal(80, 24)),
         onExit() {},
       });
       host = running;
@@ -374,6 +390,42 @@ describe("setup data and persistence", () => {
       const beforeBounded = seen.length;
       expect(await task.execute({ task: "bounded-probe" }, ctx)).toContain("step limit 2 reached");
       expect(seen).toHaveLength(beforeBounded + 2);
+      // 日志持有不依赖界面卡片:孙日志在同根runtime重建与切走保存故障后都能继续。
+      await task.execute({ task: "nested-owner" }, ctx);
+      const nestedFile = running.app().children().at(-1)?.log.path;
+      if (!nestedFile) throw new Error("missing nested child log");
+      const grandFile = nestedFile.replace(/\.jsonl$/, "-sub-1.jsonl");
+      expect(
+        EventLog.load(grandFile).events.some(
+          (e) => e.type === "user/message" && e.text === "grand-owner",
+        ),
+      ).toBe(true);
+      await running.switchSession({ kind: "resume", file: running.file() });
+      const rebuilt = running.app().agent.tools.find((t) => t.name === "task");
+      if (!rebuilt) throw new Error("missing rebuilt task");
+      const nestedId = /-(sub-\d+)\.jsonl$/.exec(nestedFile)?.[1];
+      await rebuilt.execute({ task: "nested-again", resume: nestedId }, ctx);
+      renameSync(grandFile, `${grandFile}.hold`);
+      mkdirSync(grandFile);
+      await rebuilt.execute({ task: "nested-again", resume: nestedId }, ctx);
+      expect(running.app().lines(110).join("\n")).toContain("Saving failed");
+      const originalRoot = running.file();
+      await running.switchSession({ kind: "new" });
+      await running.switchSession({ kind: "resume", file: originalRoot });
+      duringRequest = async () => {
+        rmdirSync(grandFile);
+        renameSync(`${grandFile}.hold`, grandFile);
+        terminal.feed("\x13");
+        duringRequest = async () => {};
+      };
+      const restoredTask = running.app().agent.tools.find((t) => t.name === "task");
+      if (!restoredTask) throw new Error("missing restored task");
+      await restoredTask.execute({ task: "nested-again", resume: nestedId }, ctx);
+      expect(
+        EventLog.load(grandFile)
+          .events.filter((e) => e.type === "user/message")
+          .map((e) => e.text),
+      ).toEqual(["grand-owner", "grand-follow", "grand-follow", "grand-follow"]);
       const history = createTuiApp({
         terminal: new VirtualTerminal(60, 30),
         log: parentLog,
@@ -394,6 +446,10 @@ describe("setup data and persistence", () => {
         history.stop();
       }
       await running.close();
+      for (const file of [originalRoot, nestedFile, grandFile]) {
+        const reopened = EventLog.load(file, { attach: true });
+        reopened.recording?.dispose();
+      }
       host = await startTuiSession({
         boot,
         args: boot.resolve(parseCommonArgs([])),
@@ -675,11 +731,22 @@ describe("setup data and persistence", () => {
     const dir = mkdtempSync(join(tmpdir(), "clarook-switch-"));
     vi.spyOn(process, "cwd").mockReturnValue(dir);
     writeFileSync(join(dir, "AGENTS.md"), "UNIQUE PROJECT INSTRUCTION");
+    const preparingExtension = join(dir, "preparing.mjs");
+    writeFileSync(
+      preparingExtension,
+      `
+      export const control = { prepare: async () => {} };
+      export default async ({ log }) => { await control.prepare(log); return {}; };
+    `,
+    );
+    const { control: preparation } = (await import(pathToFileURL(preparingExtension).href)) as {
+      control: { prepare(log: EventLog): Promise<void> };
+    };
     const config: KernelConfig = {
       default: "p/m",
       providers: { p: { protocol: "openai", baseUrl: "http://unused", models: ["m"] } },
       sessionsDir: dir,
-      defaults: { prompt: { sections: [] } },
+      defaults: { prompt: { sections: [] }, extensions: [preparingExtension] },
     };
     let block = false;
     let requests = 0;
@@ -773,10 +840,23 @@ describe("setup data and persistence", () => {
       mkdirSync(original);
       await host.app().submit("unsaved probe");
       await host.switchSession({ kind: "new" });
-      await host.switchSession({ kind: "resume", file: original });
+      preparation.prepare = async (log) => {
+        if (log.path !== original) return;
+        // 候选已经借入原writer,在扩展准备期间恢复保存也不能将它关闭。
+        rmdirSync(original);
+        renameSync(`${original}.hold`, original);
+        log.recording?.flush();
+      };
+      try {
+        await host.switchSession({ kind: "resume", file: original });
+      } finally {
+        preparation.prepare = async () => {};
+        if (existsSync(`${original}.hold`)) {
+          rmSync(original, { recursive: true, force: true });
+          renameSync(`${original}.hold`, original);
+        }
+      }
       expect(host.app().lines(110).join("\n")).toContain("unsaved probe");
-      rmdirSync(original);
-      renameSync(`${original}.hold`, original);
       await vi.waitFor(
         () =>
           expect(

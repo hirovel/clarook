@@ -9,13 +9,7 @@ import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
-import {
-  type ChildInfo,
-  createTaskTool,
-  fork,
-  inProcessRunner,
-  taskOnly,
-} from "../src/subagent.js";
+import { type ChildInfo, fork, inProcessRunner, TaskSessions, taskOnly } from "../src/subagent.js";
 import { defineTool } from "../src/tools.js";
 
 const PARENT: AgentEvent[] = [
@@ -73,15 +67,41 @@ function scripted(turns: AssistantTurn[]): Provider {
 }
 
 describe("inProcessRunner", () => {
-  it("跑完返回子的最终文本,状态 completed", async () => {
-    const res = await inProcessRunner({
-      task: "任务",
-      startEvents: taskOnly()(snapshot),
-      provider: scripted([{ text: "子结果", toolCalls: [], stopReason: "end" }]),
-      tools: [],
-      signal: new AbortController().signal,
-    });
-    expect(res).toEqual({ text: "子结果", status: "completed" });
+  it("借入文件日志跑完返回 completed,调用方仍可续写并再次执行", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "clarook-runner-log-"));
+    const file = join(dir, "child.jsonl");
+    const log = new EventLog(file);
+    for (const event of taskOnly()(snapshot)) log.append(event);
+    const provider = scripted([
+      { text: "child result", toolCalls: [], stopReason: "end" },
+      { text: "follow-up result", toolCalls: [], stopReason: "end" },
+    ]);
+    try {
+      const request = { log, provider, tools: [], signal: new AbortController().signal };
+      const res = await inProcessRunner({ ...request, task: "first task" });
+      expect(res).toEqual({ text: "child result", status: "completed", sessionPath: file });
+      log.append({ type: "user/message", at: "t", text: "caller note" });
+      expect(await inProcessRunner({ ...request, task: "follow-up" })).toMatchObject({
+        text: "follow-up result",
+        status: "completed",
+      });
+      await log.checkpoint();
+      log.recording?.dispose();
+      const restored = EventLog.load(file, { attach: true });
+      try {
+        expect(restored.events.filter((event) => event.type === "session/start")).toHaveLength(1);
+        expect(
+          restored.events
+            .filter((event) => event.type === "user/message")
+            .map((event) => event.text),
+        ).toEqual(["first task", "caller note", "follow-up"]);
+      } finally {
+        restored.recording?.dispose();
+      }
+    } finally {
+      log.recording?.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("父打断传播到子,返回 partial", async () => {
@@ -95,9 +115,11 @@ describe("inProcessRunner", () => {
         return { text: "半截", toolCalls: [], stopReason: "aborted" };
       },
     };
+    const log = new EventLog();
+    for (const event of taskOnly()(snapshot)) log.append(event);
     const p = inProcessRunner({
       task: "长任务",
-      startEvents: taskOnly()(snapshot),
+      log,
       provider,
       tools: [],
       signal: ac.signal,
@@ -110,7 +132,7 @@ describe("inProcessRunner", () => {
   });
 });
 
-describe("createTaskTool", () => {
+describe("TaskSessions.tool", () => {
   function parentLog(): EventLog {
     const log = new EventLog();
     for (const e of PARENT.slice(0, 5)) log.append(e);
@@ -135,7 +157,7 @@ describe("createTaskTool", () => {
         return "";
       },
     });
-    const task = createTaskTool({ parent, provider: childProvider, tools: [echo] });
+    const task = new TaskSessions(parent).tool({ provider: childProvider, tools: [echo] });
 
     await runTurn({
       log: parent,
@@ -180,8 +202,7 @@ describe("createTaskTool", () => {
         };
       },
     };
-    const task = createTaskTool({
-      parent,
+    const task = new TaskSessions(parent).tool({
       provider: childProvider,
       tools: [],
       compaction: {
@@ -257,7 +278,7 @@ describe("createTaskTool", () => {
 
   it("scope 枚举来自注册表;未知值被参数校验拦下", async () => {
     const parent = parentLog();
-    const task = createTaskTool({ parent, provider: scripted([]), tools: [] });
+    const task = new TaskSessions(parent).tool({ provider: scripted([]), tools: [] });
     const schema = task.parameters as unknown as {
       properties: { scope: { anyOf: { const: string }[] } };
     };
@@ -286,8 +307,7 @@ describe("createTaskTool", () => {
   it("outputSchema:子以 JSON 收尾则校验后附上;不合规则 isError 回喂", async () => {
     const schema = Type.Object({ answer: Type.Number() });
     const mk = (reply: string) =>
-      createTaskTool({
-        parent: parentLog(),
+      new TaskSessions(parentLog()).tool({
         provider: scripted([{ text: reply, toolCalls: [], stopReason: "end" }]),
         tools: [],
         outputSchema: schema,
@@ -314,7 +334,7 @@ describe("createTaskTool", () => {
         return { text: "做了一半", toolCalls: [], stopReason: "aborted" };
       },
     };
-    const task = createTaskTool({ parent, provider: childProvider, tools: [] });
+    const task = new TaskSessions(parent).tool({ provider: childProvider, tools: [] });
     const p = task.execute({ task: "长活" }, { signal: ac.signal });
     await new Promise((r) => setImmediate(r));
     ac.abort();
@@ -326,8 +346,7 @@ describe("createTaskTool", () => {
       let released = 0;
       let fail = true;
       let failCleanup = false;
-      const custom = createTaskTool({
-        parent: parentLog(),
+      const custom = new TaskSessions(parentLog()).tool({
         provider: scripted([]),
         tools: async () => ({
           tools: [],

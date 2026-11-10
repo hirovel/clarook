@@ -99,6 +99,8 @@ export type TuiAppDeps = {
   cwd?: string;
   terminal: Terminal;
   log: EventLog;
+  /** 宿主持有的完整日志树;独立界面缺省观察根日志与已挂接子日志。 */
+  sessionLogs?: () => readonly EventLog[];
   provider: Provider;
   tools: Tool[];
   compaction: CompactionConfig;
@@ -216,6 +218,8 @@ export type TuiApp = {
   };
   /** 子 agent 开跑时由 task 工具通知:挂到对应调用行下面并实时订阅。 */
   attachChild(child: ChildInfo): void;
+  /** 保存观察独立于是否创建子任务卡片。 */
+  watchLog(log: EventLog): void;
   children(): ChildInfo[];
   /** 当前策略槽实现;task 工具派活时取,子沿用父此刻的审批与执行策略。 */
   slots(): TurnDeps["slots"];
@@ -401,6 +405,7 @@ export function createTuiApp(
   // ---------- ctx:模块共享的全部状态与少数动作 ----------
   const ctx: TuiContext = {
     deps,
+    logs: deps.sessionLogs ?? (() => [log, ...ctx.children.views.map((v) => v.info.log)]),
     cwd,
     setupBase: structuredClone(
       deps.startupSettings ??
@@ -601,7 +606,8 @@ export function createTuiApp(
         log.recording?.flush();
       } finally {
         deps.inputs?.detach();
-        for (const off of recordingOffs) off();
+        for (const off of recordingOffs.values()) off();
+        recordingOffs.clear();
         // 停止的界面不再消费日志;旧连接的迟到事件不能重新驱动它渲染。
         unsubscribeLog?.();
         unsubscribeLog = undefined;
@@ -645,8 +651,9 @@ export function createTuiApp(
     tui.requestRender();
   }
 
-  const recordingOffs: (() => void)[] = [];
+  const recordingOffs = new Map<EventLog, () => void>();
   const watchRecording = (source: EventLog) => {
+    if (recordingOffs.has(source)) return;
     let shownError: string | undefined;
     const off = source.recording?.subscribe(() => {
       const recording = source.recording;
@@ -659,7 +666,7 @@ export function createTuiApp(
       shownError = recording?.error;
       tui.requestRender();
     });
-    if (off) recordingOffs.push(off);
+    if (off) recordingOffs.set(source, off);
   };
   function closeQuitPrompt(): void {
     quitPrompt?.overlay.hide();
@@ -668,7 +675,7 @@ export function createTuiApp(
   try {
     // 焦点事件:通知只在终端失焦时发。
     deps.terminal.write(FOCUS_ON);
-    watchRecording(log);
+    for (const source of ctx.logs()) watchRecording(source);
 
     // ---------- 历史回放与订阅:屏幕即历史,历史与新事件长得一样 ----------
     let directory: string | undefined;
@@ -852,8 +859,7 @@ export function createTuiApp(
           ctx.dialog.component.handleInput(data);
           return { consume: true };
         }
-        for (const source of [log, ...ctx.children.views.map((v) => v.info.log)])
-          source.recording?.flush();
+        for (const source of ctx.logs()) source.recording?.flush();
         tui.requestRender();
         return { consume: true };
       }
@@ -1135,6 +1141,7 @@ export function createTuiApp(
         watchRecording(child.log);
         return attachChild(ctx, child);
       },
+      watchLog: watchRecording,
       children: () => ctx.children.views.map((v) => v.info),
       slots: () => ctx.agent.slots,
       approvalLines: () => approval.prompt?.render(deps.terminal.columns) ?? [],

@@ -18,6 +18,7 @@ import { prepareSessionRuntime } from "../cli/session-runtime.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
+import { TaskSessions } from "../src/subagent.js";
 import { systemText } from "../src/system-prompt.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
@@ -276,7 +277,12 @@ describe("会话恢复", () => {
     };
     const session = beginSession(args, choice, tmp, join(tmp, "sessions"));
     writeFileSync(file, "---\nname: proof\ndescription: Changed catalog\n---\nChanged body");
-    const runtime = await prepareSessionRuntime({ boot, args, ...session });
+    const runtime = await prepareSessionRuntime({
+      boot,
+      args,
+      ...session,
+      sessions: new TaskSessions(session.log),
+    });
     if (!runtime) throw new Error("Expected a prepared runtime");
     try {
       expect(runtime.skills.find((skill) => skill.name === "proof")?.body).toBe("Original body");

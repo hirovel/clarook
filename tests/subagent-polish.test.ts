@@ -10,7 +10,7 @@ import { EventLog as Log } from "../src/log.js";
 import { type ApproveOrigin, maxSteps, type TurnDeps } from "../src/loop.js";
 import { deriveMessages, type Message } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
-import { type ChildTools, createTaskTool, type TaskToolOptions } from "../src/subagent.js";
+import { type ChildTools, TaskSessions, type TaskToolOptions } from "../src/subagent.js";
 import { defineTool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
 
@@ -83,16 +83,20 @@ function loopingProvider(model = "fake"): Provider & { tools: string[][] } {
 }
 
 /** task 工具加一个子日志收集器:每次派活(含续聊)把子日志按顺序记下。 */
-function mk(opts: Omit<TaskToolOptions, "parent" | "onChild"> & { parent?: EventLog }) {
+function mk({
+  parent = parentLog(),
+  ...opts
+}: Omit<TaskToolOptions, "onChild"> & { parent?: EventLog }) {
   const logs: EventLog[] = [];
-  const tool = createTaskTool({
-    parent: opts.parent ?? parentLog(),
+  const sessions = new TaskSessions(parent);
+  const tool = sessions.tool({
     ...opts,
     onChild: (child) => logs.push(child.log),
   });
   return {
     tool,
     logs,
+    sessions,
     firstResult: (nth = 1) => logs[nth - 1]?.events.find((e) => e.type === "tool/result"),
   };
 }
@@ -449,7 +453,7 @@ describe("步数上限与续聊", () => {
     let modelLocator = " ";
     let failedPath: string | undefined;
     let fail = false;
-    const { tool, logs } = mk({
+    const { tool, logs, sessions } = mk({
       parent,
       provider: {
         model: "fake",
@@ -502,6 +506,7 @@ describe("步数上限与续聊", () => {
       );
       expect(nonfiniteProvider.tools).toEqual([]);
       expect(invalidDepth.logs).toEqual([]);
+      expect(invalidDepth.sessions.logs()).toEqual([parent]);
       await expect(tool.execute({ task: "invalid model locator" }, ctx())).rejects.toThrow(
         "non-empty model locator",
       );
@@ -514,6 +519,7 @@ describe("步数上限与续聊", () => {
       expect(preparations).toBe(0);
       expect(requests).toBe(0);
       expect(logs).toEqual([]);
+      expect(sessions.logs()).toEqual([parent]);
       expect(postprocessed).toBe(0);
       limit = 1;
       fail = true;
@@ -522,6 +528,7 @@ describe("步数上限与续聊", () => {
       );
       expect(requests).toBe(0);
       expect(logs).toEqual([]);
+      expect(sessions.logs()).toEqual([parent]);
       expect(postprocessed).toBe(0);
       if (!failedPath) throw new Error("missing failed preparation path");
       const candidatePath = failedPath;
@@ -724,6 +731,7 @@ describe("步数上限与续聊", () => {
       ).rejects.toThrow("requires delegation depth 1, but only 0 is available");
       expect(resumedProvider.tools).toEqual([]);
       expect(shallow.logs).toEqual([]);
+      expect(shallow.sessions.logs()).toEqual([restoredParent]);
       const afterShallow = Log.load(childPath, { attach: true });
       expect(deriveMessages(afterShallow.events)).toEqual(originalMessages);
       afterShallow.recording?.dispose();
@@ -767,6 +775,7 @@ describe("步数上限与续聊", () => {
         ).rejects.toThrow(error);
         expect(resumedProvider.tools).toEqual([]);
         expect(restored.logs).toEqual([]);
+        expect(restored.sessions.logs()).toEqual([restoredParent]);
         expect(readFileSync(childPath, "utf8").startsWith(original)).toBe(true);
         const inspect = Log.load(childPath, { attach: true });
         expect(deriveMessages(inspect.events)).toEqual(originalMessages);
@@ -786,6 +795,7 @@ describe("步数上限与续聊", () => {
         ["echo", "task"],
       ]);
       expect(disposed).toBe(2);
+      const ownedAfterResume = restored.sessions.logs();
 
       const legacyPath = join(dir, "parent-sub-2.jsonl");
       const legacy = new Log(legacyPath);
@@ -797,6 +807,7 @@ describe("步数上限与续聊", () => {
         restored.tool.execute({ task: "guess", resume: "sub-2" }, ctx()),
       ).rejects.toThrow("has no original execution identity");
       expect(resumedProvider.tools).toHaveLength(2);
+      expect(restored.sessions.logs()).toEqual(ownedAfterResume);
       expect(readFileSync(legacyPath, "utf8")).toBe(beforeLegacy);
       const inspectedLegacy = Log.load(legacyPath, { attach: true });
       expect(deriveMessages(inspectedLegacy.events)).toEqual([
@@ -840,6 +851,7 @@ describe("步数上限与续聊", () => {
           restored.tool.execute({ task: "must not coerce identity", resume: id }, ctx()),
         ).rejects.toThrow("invalid execution identity");
         expect(resumedProvider.tools).toHaveLength(2);
+        expect(restored.sessions.logs()).toEqual(ownedAfterResume);
         expect(readFileSync(invalidPath, "utf8")).toBe(beforeInvalid);
         const inspectedInvalid = Log.load(invalidPath, { attach: true });
         inspectedInvalid.recording?.dispose();
@@ -1018,13 +1030,16 @@ describe("类型注册表与嵌套", () => {
     );
   });
 
-  it("有限小数 depth 按逐层判断,子有 task 工具且续聊保持,孙没有", async () => {
+  it("有限小数 depth 逐层限制工具,子续聊重建工具仍继续同一孙日志,最终释放整树", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "clarook-nested-owner-"));
+    const parent = new Log(join(dir, "parent.jsonl"));
+    for (const event of parentLog().events) parent.append(event);
     const seen: string[][] = [];
     const owned: EventLog[] = [];
     let n = 0;
     const provider: Provider = {
       model: "fake",
-      async complete(_m: unknown[], defs: ToolDef[]) {
+      async complete(messages, defs: ToolDef[]) {
         seen.push(defs.map((t) => t.name));
         n += 1;
         // 子的第一步派一个孙;孙执行自己的工具后收尾;子第二步收尾。
@@ -1041,6 +1056,18 @@ describe("类型注册表与嵌套", () => {
             toolCalls: [{ id: "grandchild-echo", name: "echo", args: { text: "raw" } }],
             stopReason: "tool",
           };
+        if (n === 5)
+          return {
+            text: "",
+            toolCalls: [
+              { id: "g2", name: "task", args: { task: "grandchild follow-up", resume: "sub-1" } },
+            ],
+            stopReason: "tool",
+          };
+        if (n === 6)
+          expect(
+            messages.filter((message) => message.role === "user").map((message) => message.content),
+          ).toEqual(["grandchild", "grandchild follow-up"]);
         return { text: `done ${n}`, toolCalls: [], stopReason: "end" };
       },
     };
@@ -1072,7 +1099,8 @@ describe("类型注册表与嵌套", () => {
         fork: factory,
       };
     };
-    const { tool } = mk({
+    const { tool, sessions } = mk({
+      parent,
       provider,
       tools: factory,
       slots: {
@@ -1086,27 +1114,60 @@ describe("类型注册表与嵌套", () => {
       depth: 1.5,
       types: { limited: { description: "restricted tools", tools: ["echo", "task"] } },
     });
-    const out = await tool.execute({ task: "child", type: "limited" }, ctx());
-    expect(out).toContain("done 4");
-    expect(seen[0]).toEqual(["echo", "task"]);
-    expect(seen[1]).toEqual(["echo"]);
-    expect(owned).toHaveLength(2);
-    expect(
-      owned.map((log) =>
-        log.events.flatMap((event) =>
-          event.type === "ext/event" && event.source === "owner-test"
-            ? [`${event.kind}:${event.payload.tool}`]
-            : [],
+    try {
+      const out = await tool.execute({ task: "child", type: "limited" }, ctx());
+      expect(out).toContain("done 4");
+      expect(seen[0]).toEqual(["echo", "task"]);
+      expect(seen[1]).toEqual(["echo"]);
+      expect(owned).toHaveLength(2);
+      expect(
+        owned.map((log) =>
+          log.events.flatMap((event) =>
+            event.type === "ext/event" && event.source === "owner-test"
+              ? [`${event.kind}:${event.payload.tool}`]
+              : [],
+          ),
         ),
-      ),
-    ).toEqual([
-      ["before:task", "after:task"],
-      ["before:echo", "after:echo"],
-    ]);
-    expect(owned[1]?.events.find((event) => event.type === "tool/result")).toMatchObject({
-      content: "local-after:echo:grandchild-local",
-    });
-    await tool.execute({ task: "follow-up", resume: "sub-1" }, ctx());
-    expect(seen[4]).toEqual(["echo", "task"]);
+      ).toEqual([
+        ["before:task", "after:task"],
+        ["before:echo", "after:echo"],
+      ]);
+      const grandchild = owned[1];
+      if (!grandchild) throw new Error("missing grandchild log");
+      expect(grandchild.events.find((event) => event.type === "tool/result")).toMatchObject({
+        content: "local-after:echo:grandchild-local",
+      });
+      const before = grandchild.events;
+      expect(await tool.execute({ task: "follow-up", resume: "sub-1" }, ctx())).toContain("done 7");
+      expect(seen[4]).toEqual(["echo", "task"]);
+      expect(seen[5]).toEqual(["echo"]);
+      expect(sessions.logs().find((log) => log.path === grandchild.path)).toBe(grandchild);
+      expect(grandchild.events.slice(0, before.length)).toEqual(before);
+      expect(grandchild.events.filter((event) => event.type === "session/start")).toHaveLength(1);
+      expect(
+        grandchild.events.filter(
+          (event) =>
+            event.type === "ext/event" && event.source === "subagent" && event.kind === "identity",
+        ),
+      ).toHaveLength(1);
+      const logs = sessions.logs();
+      expect(logs).toHaveLength(3);
+      expect(logs).toEqual(expect.arrayContaining([parent, owned[0], grandchild]));
+      for (const log of logs) {
+        await log.checkpoint();
+        log.recording?.dispose();
+      }
+      for (const log of logs) {
+        const attached = Log.load(log.path as string, { attach: true });
+        try {
+          expect(attached.events).toEqual(log.events);
+        } finally {
+          attached.recording?.dispose();
+        }
+      }
+    } finally {
+      for (const log of sessions.logs()) log.recording?.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
