@@ -71,7 +71,13 @@ describe("子 agent 视图", () => {
     const task = createTaskTool({
       parent: log,
       provider,
-      tools: [echo],
+      tools: async (childLog) => {
+        const off = childLog.subscribe((event) => {
+          if (event.type === "assistant/message" && event.text === "子先回显")
+            childLog.append({ type: "user/message", at: "t", text: "AFTER_CHILD_NOTE" });
+        });
+        return { tools: [echo], dispose: async () => off() };
+      },
       onChild: (child) => {
         children.push(child);
         app?.attachChild(child);
@@ -112,6 +118,8 @@ describe("子 agent 视图", () => {
     expect(all).toContain('┆ » echo  {"text":"one"}');
     expect(all).toContain("┆ ✓ echo");
     expect(all).toContain("┆ 子先回显");
+    expect(all.indexOf("┆ 子先回显")).toBeLessThan(all.indexOf("┆ › AFTER_CHILD_NOTE"));
+    expect(all.match(/┆ › AFTER_CHILD_NOTE/g)).toHaveLength(1);
 
     // 检视器:s 切到子会话,请求列表与事件视图作用在子的数组上
     app.inspector.open();

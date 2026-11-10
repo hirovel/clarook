@@ -33,6 +33,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Render child transcripts in committed event order when extensions append messages during synchronous event callbacks. Share the existing history-prefix projection with the main view while retaining recursive subscriptions, child-view start positions and cleanup.
 - Keep error descriptions printable when a thrown value or optional error metadata cannot be read, preserving any message already obtained. Honor post-processing cancellation before formatting its exception.
 - Give each saved MCP image or audio block a locally generated filename and create it exclusively. Reused or path-like tool-call IDs no longer overwrite earlier artifacts or select paths outside the session artifact directory.
 - Match path approval rules against the resolved target instead of raw input spelling, so `src/../private.txt` cannot borrow a `src/**` allow rule or trigger its deny rule. Recognize ordinary `..`-prefixed names such as `..cache` as internal paths while preserving actual parent-directory checks for main and child approval.

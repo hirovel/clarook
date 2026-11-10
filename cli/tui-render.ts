@@ -4,6 +4,7 @@
 import { type Component, Container, Markdown, Spacer } from "@earendil-works/pi-tui";
 import type { AgentEvent } from "../src/events.js";
 import { imageSummary } from "../src/images.js";
+import type { EventLog } from "../src/log.js";
 import { composeContext, requestMessages } from "../src/messages.js";
 import type { GenerationUpdate } from "../src/provider.js";
 import { classifyError, type ErrorKind, hintFor } from "../src/providers/errors.js";
@@ -44,6 +45,30 @@ import { autoFold, beginStep, refreshStep } from "./tui-steps.js";
 export const PROSE_WIDTH = 96;
 /** 正文列:标记列两格。 */
 const CONTENT = "  ";
+
+/** 通知可能因同步追加而倒序;视图只按已提交前缀消费,起点决定是否回放历史。 */
+export function followHistory(
+  log: EventLog,
+  from: number,
+  observe: (event: AgentEvent, index: number) => void,
+): () => void {
+  let next = from;
+  const draw = (through: number) => {
+    while (next <= through) {
+      // 绘制中也可能追加;先推进位置,重入时不再绘制同一事实。
+      const index = next++;
+      observe(log.events[index] as AgentEvent, index);
+    }
+  };
+  const off = log.subscribe((_event, index) => draw(index));
+  try {
+    draw(log.events.length - 1);
+  } catch (error) {
+    off();
+    throw error;
+  }
+  return off;
+}
 
 /** 工具结果的屏幕文本。折叠只是显示状态,内容原封不动留在节点里。 */
 export function resultText(ctx: TuiContext, r: ResultRecord): string {
@@ -221,7 +246,7 @@ export class ChildView {
     // 结束即退订:续聊在同一日志上再跑,新事件归新的视图,旧视图定格。
     let directory: string | undefined;
     for (const e of info.log.events) if (e.type === "session/directory") directory = e.cwd;
-    this.unsubscribe = info.log.subscribe((e) => {
+    this.unsubscribe = followHistory(info.log, info.log.events.length, (e) => {
       if (e.type === "session/directory") directory = e.cwd;
       this.absorb(e, directory);
       this.refresh();

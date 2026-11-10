@@ -138,7 +138,7 @@ Path approval rules match the resolved target using normalized project-relative 
 
 While a model generates tool calls, the TUI shows each tool's name and received argument bytes. Retry, cancellation and failure clear unfinished tool previews. Execution uses the complete response after validation and approval. Provider and Agent integrations receive text, reasoning, tool argument updates and attempt lifecycle through the single `onStream` callback; the former `onDelta` and `onReasoning` callbacks have been removed. Partial updates are temporary display data, not saved conversation facts.
 
-Extensions can record side events without changing which request owns its captured input and HTTP bodies. Live and reopened transcript views follow the committed event order, including events appended by synchronous observers.
+Extensions can record side events without changing which request owns its captured input and HTTP bodies. Main and child live transcripts follow the committed event order, including events appended by synchronous observers. Main-session replay uses the same sequence.
 
 Extensions can supply `slots.beforeToolCall` to return `{ args: replacement }` before approval; returning nothing preserves the prepared arguments. Replacement values go through the existing JSON argument validation and scalar conversion. Invalid replacements and preparation errors return a tool error without execution. Approval reads a fixed final snapshot, and execution receives a private copy. The original model call remains unchanged in history and future model inputs.
 
