@@ -2,9 +2,15 @@
 
 /** 保留原文,只补充规范错误码;不展开原因中的正文、地址或请求对象。 */
 export function errorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  const codes = errorCodes(error).filter((code) => !message.includes(code));
-  return codes.length ? `${message} [${codes.join(", ")}]` : message;
+  let message = "Unknown error";
+  try {
+    message = String(error instanceof Error ? error.message : error);
+    const codes = errorCodes(error).filter((code) => !message.includes(code));
+    return codes.length ? `${message} [${codes.join(", ")}]` : message;
+  } catch {
+    // 错误对象的转换和元数据 getter 也可能抛错;保留已经取得的原文。
+    return message;
+  }
 }
 
 /** 显示与网络判定读取同一条原因链,不依赖文案恰好包含错误码。 */

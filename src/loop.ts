@@ -17,7 +17,12 @@ import { DEFAULT_PLAN_REMINDER, planOpen, planState, planText, stepsSincePlan } 
 import type { AssistantTurn, CompleteOptions, EffortLevel, Provider } from "./provider.js";
 import { isContextOverflow } from "./providers/errors.js";
 import { captureToolDefinitions } from "./tool-definitions.js";
-import { appendResult, type BeforeToolCall, executeCalls } from "./tool-execution.js";
+import {
+  type AfterToolCall,
+  appendResult,
+  type BeforeToolCall,
+  executeCalls,
+} from "./tool-execution.js";
 import type { Tool } from "./tools.js";
 
 // ---------- 策略槽(全部是开放接口,内置实现无特权,自定义实现从外部注入) ----------
@@ -83,6 +88,8 @@ export type TurnDeps = {
     execution?: ExecutionPolicy;
     /** 显式返回替换参数,最终校验和审批仍由同一执行准备流程负责。 */
     beforeToolCall?: BeforeToolCall;
+    /** 原执行已留证后,显式替换给模型的正文和错误标记。 */
+    afterToolCall?: AfterToolCall;
     /**
      * 组装槽:事件数组 → 发给模型的消息。缺省就是 deriveMessages;给了就用它的结果发请求,
      * 差异部分记进 request.body(前缀投影 + 尾部),检视器仍能逐字节重建。扩展可在末尾追加一条提醒之类。
@@ -263,6 +270,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const approve = deps.slots?.approve ?? allowAll;
   const execution = deps.slots?.execution ?? "sequential";
   const beforeToolCall = deps.slots?.beforeToolCall;
+  const afterToolCall = deps.slots?.afterToolCall;
   const drainQueue = deps.drainQueue ?? (() => []);
   const facts = { ...DEFAULT_FACTS, ...deps.facts };
   const planReminder = deps.planReminder ?? DEFAULT_PLAN_REMINDER;
@@ -393,6 +401,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
         execution,
         facts,
         ...(beforeToolCall && { beforeToolCall }),
+        ...(afterToolCall && { afterToolCall }),
         ...(signal && { signal }),
         ...(deps.agent && { origin: { agent: deps.agent } }),
       });

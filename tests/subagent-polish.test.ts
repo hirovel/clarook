@@ -103,10 +103,15 @@ describe("子的审批", () => {
   it("inherit(缺省):子沿用父此刻的审批实现,调用带上子的名字", async () => {
     const asked: { call: ToolCall; origin?: ApproveOrigin }[] = [];
     let inheritedHooks = 0;
+    let inheritedAfterHooks = 0;
     const slots: TurnDeps["slots"] = {
       beforeToolCall: () => {
         inheritedHooks += 1;
         return { args: { text: "static-inherited" } };
+      },
+      afterToolCall: ({ result }) => {
+        inheritedAfterHooks += 1;
+        return { content: `static-after:${result.content}` };
       },
       approve: (call, origin) => {
         asked.push({ call, ...(origin && { origin }) });
@@ -120,8 +125,9 @@ describe("子的审批", () => {
     expect(asked[0]?.call.name).toBe("echo");
     expect(asked[0]?.origin).toEqual({ agent: "sub-1" });
     expect(asked[0]?.call.args).toEqual({ text: "static-inherited" });
-    expect(firstResult()).toMatchObject({ content: "echo:static-inherited" });
+    expect(firstResult()).toMatchObject({ content: "static-after:echo:static-inherited" });
     expect(inheritedHooks).toBe(1);
+    expect(inheritedAfterHooks).toBe(1);
 
     // 工厂没有本地 hook 时也不能回退父闭包;有 hook 时只操作自己的子日志。
     for (const local of [false, true]) {
@@ -132,7 +138,7 @@ describe("子的审批", () => {
         slots,
         tools: async (log): Promise<ChildTools> => {
           const resources: ChildTools = { tools: [echo], dispose: async () => {} };
-          if (local)
+          if (local) {
             resources.beforeToolCall = () => {
               log.append({
                 type: "ext/event",
@@ -143,17 +149,31 @@ describe("子的审批", () => {
               });
               return { args: { text: "child-local" } };
             };
+            resources.afterToolCall = ({ result }) => {
+              log.append({
+                type: "ext/event",
+                at: "t",
+                source: "owner-test",
+                kind: "after",
+                payload: {},
+              });
+              return { content: `child-after:${result.content}` };
+            };
+          }
           return resources;
         },
       });
       await child.tool.execute({ task: "go" }, ctx());
       expect(inheritedHooks).toBe(1);
-      expect(child.firstResult()).toMatchObject({ content: local ? "echo:child-local" : "echo:x" });
+      expect(inheritedAfterHooks).toBe(1);
+      expect(child.firstResult()).toMatchObject({
+        content: local ? "child-after:echo:child-local" : "echo:x",
+      });
       expect(
         child.logs[0]?.events.filter(
           (event) => event.type === "ext/event" && event.source === "owner-test",
         ),
-      ).toHaveLength(Number(local));
+      ).toHaveLength(local ? 2 : 0);
       expect(
         parent.events.some((event) => event.type === "ext/event" && event.source === "owner-test"),
       ).toBe(false);
@@ -424,6 +444,7 @@ describe("步数上限与续聊", () => {
     for (const event of parentLog().events) parent.append(event);
     let requests = 0;
     let preparations = 0;
+    let postprocessed = 0;
     let limit = 1;
     let modelLocator = " ";
     let failedPath: string | undefined;
@@ -432,13 +453,24 @@ describe("步数上限与续聊", () => {
       parent,
       provider: {
         model: "fake",
-        async complete() {
+        async complete(messages) {
           requests++;
+          if (messages.at(-1)?.role === "user")
+            return {
+              text: "",
+              toolCalls: [{ id: "prepared-echo", name: "echo", args: { text: "ready" } }],
+              stopReason: "tool",
+            };
           return { text: "done", toolCalls: [], stopReason: "end" };
         },
       },
       modelLocator: () => modelLocator,
-      slots: () => ({ termination: maxSteps(limit) }),
+      slots: () => ({
+        termination: maxSteps(limit),
+        afterToolCall: () => {
+          throw new Error("A factory child must use its own hook");
+        },
+      }),
       tools: async (log) => {
         preparations++;
         if (fail) {
@@ -452,7 +484,14 @@ describe("步数上限与续聊", () => {
           });
           throw new Error("resource preparation failed");
         }
-        return { tools: [], dispose: async () => {} };
+        return {
+          tools: [echo],
+          afterToolCall: ({ result }) => {
+            postprocessed++;
+            return { content: `prepared-after:${result.content}` };
+          },
+          dispose: async () => {},
+        };
       },
     });
     try {
@@ -475,6 +514,7 @@ describe("步数上限与续聊", () => {
       expect(preparations).toBe(0);
       expect(requests).toBe(0);
       expect(logs).toEqual([]);
+      expect(postprocessed).toBe(0);
       limit = 1;
       fail = true;
       await expect(tool.execute({ task: "must not start" }, ctx())).rejects.toThrow(
@@ -482,6 +522,7 @@ describe("步数上限与续聊", () => {
       );
       expect(requests).toBe(0);
       expect(logs).toEqual([]);
+      expect(postprocessed).toBe(0);
       if (!failedPath) throw new Error("missing failed preparation path");
       const candidatePath = failedPath;
       expect(existsSync(candidatePath)).toBe(false);
@@ -489,8 +530,13 @@ describe("步数上限与续聊", () => {
       const candidate = new Log(candidatePath);
       candidate.recording?.dispose();
       fail = false;
+      limit = 2;
       expect(await tool.execute({ task: "start" }, ctx())).toContain("finished");
-      expect(requests).toBe(1);
+      expect(requests).toBe(2);
+      expect(postprocessed).toBe(1);
+      expect(logs[0]?.events.find((event) => event.type === "tool/result")).toMatchObject({
+        content: "prepared-after:echo:ready",
+      });
       expect(
         logs[0]?.events.filter((event) => event.type === "user/message").map((event) => event.text),
       ).toEqual(["start"]);
@@ -1012,6 +1058,16 @@ describe("类型注册表与嵌套", () => {
           });
           if (call.name === "echo") return { args: { text: "grandchild-local" } };
         },
+        afterToolCall: ({ call, result }) => {
+          log.append({
+            type: "ext/event",
+            at: "t",
+            source: "owner-test",
+            kind: "after",
+            payload: { tool: call.name },
+          });
+          return { content: `local-after:${result.content}` };
+        },
         dispose: async () => {},
         fork: factory,
       };
@@ -1021,6 +1077,9 @@ describe("类型注册表与嵌套", () => {
       tools: factory,
       slots: {
         beforeToolCall: () => {
+          throw new Error("A factory child must use its own hook");
+        },
+        afterToolCall: () => {
           throw new Error("A factory child must use its own hook");
         },
       },
@@ -1035,12 +1094,17 @@ describe("类型注册表与嵌套", () => {
     expect(
       owned.map((log) =>
         log.events.flatMap((event) =>
-          event.type === "ext/event" && event.source === "owner-test" ? [event.payload.tool] : [],
+          event.type === "ext/event" && event.source === "owner-test"
+            ? [`${event.kind}:${event.payload.tool}`]
+            : [],
         ),
       ),
-    ).toEqual([["task"], ["echo"]]);
+    ).toEqual([
+      ["before:task", "after:task"],
+      ["before:echo", "after:echo"],
+    ]);
     expect(owned[1]?.events.find((event) => event.type === "tool/result")).toMatchObject({
-      content: "echo:grandchild-local",
+      content: "local-after:echo:grandchild-local",
     });
     await tool.execute({ task: "follow-up", resume: "sub-1" }, ctx());
     expect(seen[4]).toEqual(["echo", "task"]);

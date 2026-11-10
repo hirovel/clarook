@@ -91,6 +91,13 @@ describe("classifyError", () => {
     ).toBe("ECONNRESET already shown");
     expect(errorMessage(new Error("plain"))).toBe("plain");
     expect(errorMessage("plain value")).toBe("plain value");
+    expect(errorMessage(Object.create(null))).toBe("Unknown error");
+    const metadataError = Object.defineProperty(new Error("Known message"), "code", {
+      get() {
+        throw new Error("Unreadable metadata");
+      },
+    });
+    expect(errorMessage(metadataError)).toBe("Known message");
   });
 
   it("hintFor 每类都指向一个动作,并带上供应商与模型名", () => {

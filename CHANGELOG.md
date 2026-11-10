@@ -7,6 +7,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Added
 
+- Add `slots.afterToolCall` for explicit model-result text and error-flag replacement after immutable execution recording. Preserve unknown outcomes, distinguish post-processing failures from execution failures, stop local hook waits on cancellation, discard late patches, and keep factory-created child hooks bound to their own session.
 - Record executor returns and errors as native `tool/executed` facts before ordered model-result publication, including SDK sessions without Recording. Link final results to their execution facts and inspect execution values independently of original output bytes and model results. Replace recording completion events without automatically retrying or reconstructing missing final results.
 - Add `slots.beforeToolCall` for explicit argument replacement before final validation and approval. Preserve raw model calls, record final prepared parameters in `tool/arguments`, and expose both values in request and event inspection without requiring body attachments. Give approval immutable parameters and execution a private copy; keep factory-created child hooks bound to their own session.
 - Save session directory bindings in the event history. Resume from another launch directory without changing the project root; explicitly choose and remember a directory for older sessions or moved projects through `/session directory` and `clarook sessions directory FILE DIRECTORY`. Keep current environment facts through compaction while preserving original history and saved instructions.
@@ -32,6 +33,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Keep error descriptions printable when a thrown value or optional error metadata cannot be read, preserving any message already obtained. Honor post-processing cancellation before formatting its exception.
 - Give each saved MCP image or audio block a locally generated filename and create it exclusively. Reused or path-like tool-call IDs no longer overwrite earlier artifacts or select paths outside the session artifact directory.
 - Match path approval rules against the resolved target instead of raw input spelling, so `src/../private.txt` cannot borrow a `src/**` allow rule or trigger its deny rule. Recognize ordinary `..`-prefixed names such as `..cache` as internal paths while preserving actual parent-directory checks for main and child approval.
 - Commit accepted events before synchronous save-status observers run, and return their fixed event positions. Preserve buffered writes on I/O failure and reject appends to closed recordings without changing history.

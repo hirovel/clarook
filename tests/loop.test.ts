@@ -8,7 +8,7 @@ import { deriveMessages, type Message, requestMessages } from "../src/messages.j
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { toAnthropicWire } from "../src/providers/anthropic.js";
 import { captureToolDefinitions, toolDefinitionsForRequest } from "../src/tool-definitions.js";
-import { defineTool, type Tool } from "../src/tools.js";
+import { defineTool, type Tool, ToolOutcomeUnknownError } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
 
 // 脚本化 provider:按序吐出预设的 turn,离线验证循环语义。
@@ -736,6 +736,176 @@ describe("runTurn", () => {
     });
   });
 
+  it("后置只改最终正文和标记,原执行事实保留,异常分阶段且未知和未执行不进入", async () => {
+    const log = newLog();
+    const calls: string[] = [];
+    const frozenInputs: boolean[] = [];
+    const patch = {
+      content: "Validation failed.",
+      isError: true,
+      durationMs: -1,
+      executionEvent: -1,
+    };
+    const unknownFailure = new ToolOutcomeUnknownError("Remote outcome unknown.");
+    const rawCalls = [
+      call("echo", { text: "raw" }, "changed"),
+      call("fail", {}, "recovered"),
+      call("echo", { text: "raw" }, "void"),
+      call("echo", { text: "raw" }, "empty"),
+      call("echo", { text: "raw" }, "thrown"),
+      call("echo", { text: "raw" }, "malformed"),
+      call("echo", { text: "raw" }, "unprintable"),
+      call("unknown", {}, "unknown"),
+      call("echo", { text: "raw" }, "denied"),
+      call("echo", { wrong: true }, "invalid"),
+      call("missing", {}, "missing"),
+    ];
+    await runTurn({
+      log,
+      provider: scripted([
+        { text: "", toolCalls: rawCalls, stopReason: "tool" },
+        { text: "done", toolCalls: [], stopReason: "end" },
+      ]),
+      tools: [
+        echoTool,
+        {
+          ...failTool,
+          async execute() {
+            throw new Error("Executor failed.");
+          },
+        },
+        {
+          ...failTool,
+          name: "unknown",
+          async execute() {
+            throw unknownFailure;
+          },
+        },
+      ],
+      slots: {
+        approve: (call) => call.id !== "denied",
+        afterToolCall: ({ call, args, result }) => {
+          calls.push(call.id);
+          frozenInputs.push(Object.isFrozen(call), Object.isFrozen(args), Object.isFrozen(result));
+          if (call.id === "changed") return patch;
+          patch.content = "late change";
+          if (call.id === "recovered") return { isError: false };
+          if (call.id === "empty") return { content: "", isError: false };
+          if (call.id === "thrown") throw new Error("Summary unavailable.");
+          if (call.id === "malformed") return { content: 123 } as never;
+          if (call.id === "unprintable") throw Object.create(null);
+        },
+      },
+    });
+    expect(calls).toEqual([
+      "changed",
+      "recovered",
+      "void",
+      "empty",
+      "thrown",
+      "malformed",
+      "unprintable",
+    ]);
+    expect(frozenInputs.every(Boolean)).toBe(true);
+    const results = log.events.filter((event) => event.type === "tool/result");
+    expect(results[0]).toMatchObject({ content: "Validation failed.", isError: true });
+    expect(results[1]).toMatchObject({ content: "Executor failed.", isError: false });
+    expect(results[2]).toMatchObject({ content: "echo:raw", isError: false });
+    expect(results[3]).toMatchObject({ content: "", isError: false });
+    for (const result of results.slice(4, 7)) {
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("reported success");
+      expect(result.content).toContain("Result post-processing failed");
+      expect(result.content).not.toContain("[note:");
+    }
+    expect(results[4]?.content).toContain("Summary unavailable.");
+    expect(results[6]?.content).toContain("Unknown error");
+    expect(results[7]).toMatchObject({
+      content: unknownFailure.message,
+      isError: true,
+      outcome: "unknown",
+    });
+    const executions = log.events.filter((event) => event.type === "tool/executed");
+    expect(executions[0]).toMatchObject({ content: "echo:raw", isError: false });
+    expect(executions[1]).toMatchObject({ content: "Executor failed.", isError: true });
+    expect(results[0]?.durationMs).toBe(executions[0]?.durationMs);
+    expect(log.events[results[0]?.executionEvent as number]).toBe(executions[0]);
+    expect(deriveMessages(log.events).filter((message) => message.role === "tool")).toHaveLength(
+      rawCalls.length,
+    );
+  });
+
+  it("取消后置等待立即结算,迟到返回和拒绝不改写记录,后续回调不启动", async () => {
+    for (const late of ["return", "reject"] as const) {
+      const log = newLog();
+      const cancel = new AbortController();
+      const started: string[] = [];
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let finish!: (patch: { content: string }) => void;
+      let fail!: (error: Error) => void;
+      const pending = new Promise<{ content: string }>((resolve, reject) => {
+        finish = resolve;
+        fail = reject;
+      });
+      const turn = runTurn({
+        log,
+        signal: cancel.signal,
+        provider: scripted([
+          {
+            text: "",
+            stopReason: "tool",
+            toolCalls: [
+              call("echo", { text: "kept-one" }, "one"),
+              call("echo", { text: "kept-two" }, "two"),
+            ],
+          },
+        ]),
+        tools: [{ ...echoTool, concurrency: "parallel" }],
+        slots: {
+          execution: "parallel",
+          afterToolCall: ({ call }) => {
+            started.push(call.id);
+            entered();
+            return pending;
+          },
+        },
+      });
+      await ready;
+      cancel.abort();
+      let snapshot = "";
+      try {
+        const stopped = await Promise.race([
+          turn,
+          new Promise<"still waiting">((resolve) => setImmediate(() => resolve("still waiting"))),
+        ]);
+        expect(stopped).toBe("aborted");
+        expect(started).toEqual(["one"]);
+        const results = log.events.filter((event) => event.type === "tool/result");
+        expect(results).toHaveLength(2);
+        for (const result of results) {
+          expect(result.isError).toBe(true);
+          expect(result.content).toContain("post-processing was interrupted");
+          expect(result.content).not.toContain("echo:kept");
+        }
+        expect(
+          log.events
+            .filter((event) => event.type === "tool/executed")
+            .map((event) => event.content),
+        ).toEqual(["echo:kept-one", "echo:kept-two"]);
+        snapshot = JSON.stringify(log.events);
+      } finally {
+        if (late === "reject") fail(new Error("Late post-processing failure."));
+        else finish({ content: "Late patch must not be committed." });
+        await turn;
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(JSON.stringify(log.events)).toBe(snapshot);
+    }
+  });
+
   it("外来工具的 JSON 自有键在审批与执行副本中保持,不变成原型", async () => {
     const args = JSON.parse('{"path":"b.ts","__proto__":{"inherited":"marker"}}');
     const log = newLog();
@@ -962,6 +1132,7 @@ describe("runTurn", () => {
       const cancel = new AbortController();
       const executed: string[] = [];
       let approvals = 0;
+      let afterStarts = 0;
       if (mode === "arguments")
         boundaryLog.subscribe((event) => {
           if (event.type === "tool/arguments") cancel.abort();
@@ -1002,6 +1173,9 @@ describe("runTurn", () => {
           beforeToolCall: async () => {
             if (mode === "before") cancel.abort();
           },
+          afterToolCall: () => {
+            afterStarts += 1;
+          },
           approve: async (call) => {
             approvals += 1;
             if (
@@ -1014,6 +1188,7 @@ describe("runTurn", () => {
         },
       });
       expect(stopped).toBe("aborted");
+      expect(afterStarts).toBe(0);
       if (mode === "before" || mode === "arguments") expect(approvals).toBe(0);
       if (mode === "before")
         expect(boundaryLog.events.some((event) => event.type === "tool/arguments")).toBe(false);
@@ -1036,6 +1211,31 @@ describe("runTurn", () => {
         });
         expect(result.durationMs).toBeUndefined();
       }
+    }
+
+    for (const throws of [false, true]) {
+      const getterLog = newLog();
+      const getterCancel = new AbortController();
+      const getterOutcome = await runTurn({
+        log: getterLog,
+        signal: getterCancel.signal,
+        provider: scripted([
+          { text: "", toolCalls: [call("echo", { text: "kept" })], stopReason: "tool" },
+        ]),
+        tools: [echoTool],
+        slots: {
+          afterToolCall: () => ({
+            get content() {
+              getterCancel.abort();
+              if (throws) throw Object.create(null);
+              return "Uncommitted patch.";
+            },
+          }),
+        },
+      });
+      expect(getterOutcome).toBe("aborted");
+      expect(firstResult(getterLog)?.content).toContain("post-processing was interrupted");
+      expect(firstResult(getterLog)?.content).not.toContain("Uncommitted patch");
     }
 
     const lateLog = newLog();

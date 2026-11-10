@@ -15,6 +15,56 @@ export type BeforeToolCall = (
   // biome-ignore lint/suspicious/noConfusingVoidType: 异步观察函数也可不返回替换值。
 ) => void | { args: unknown } | Promise<void | { args: unknown }>;
 
+type ExecutionResult = Pick<
+  Extract<AgentEvent, { type: "tool/executed" }>,
+  "content" | "isError" | "durationMs" | "outcome"
+>;
+type ResultPatch = { content?: string; isError?: boolean };
+
+/** 后置只改给模型的正文和错误标记,原执行事实与元数据不变。 */
+export type AfterToolCall = (
+  context: {
+    call: Readonly<ToolCall>;
+    args: unknown;
+    result: Readonly<ExecutionResult>;
+    origin?: Readonly<ApproveOrigin>;
+  },
+  signal: AbortSignal,
+  // biome-ignore lint/suspicious/noConfusingVoidType: 异步观察函数也可不返回替换值。
+) => void | ResultPatch | Promise<void | ResultPatch>;
+
+const AFTER_INTERRUPTED = Symbol("after interrupted");
+
+/** 只结束本地等待;两路消费迟到结果,不强制终止扩展代码。 */
+function waitForAfter(
+  invoke: () => ReturnType<AfterToolCall>,
+  signal: AbortSignal,
+): Promise<Awaited<ReturnType<AfterToolCall>> | typeof AFTER_INTERRUPTED> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      resolve(AFTER_INTERRUPTED);
+      return;
+    }
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(AFTER_INTERRUPTED);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve()
+      .then(() => (signal.aborted ? AFTER_INTERRUPTED : invoke()))
+      .then(
+        (value) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      );
+  });
+}
+
 const INTERRUPTED_NOTICE = "Interrupted by the user; not executed.";
 const STORAGE_NOTICE = "Not executed: recording buffer filled while saving was unavailable.";
 const interruptedNotice = (signal: AbortSignal) =>
@@ -120,6 +170,7 @@ export async function executeCalls(
     callEvent: number;
     tools: Tool[];
     beforeToolCall?: BeforeToolCall;
+    afterToolCall?: AfterToolCall;
     approve: ApprovePolicy;
     execution: ExecutionPolicy;
     facts: FactsConfig;
@@ -201,21 +252,78 @@ export async function executeCalls(
     }
     const results = await Promise.all(items.map((p) => runOne(p, signal, ctx.log, ctx.callEvent)));
     await ctx.log.checkpoint(signal?.aborted ? undefined : signal);
-    items.forEach((p, i) => {
+    for (const [i, p] of items.entries()) {
       const r = results[i] as Executed;
+      let result = r;
+      let annotate = r.durationMs !== undefined && r.outcome !== "unknown";
+      if (ctx.afterToolCall && r.executionEvent !== undefined && r.outcome !== "unknown") {
+        const executed = ctx.log.events[r.executionEvent] as Extract<
+          AgentEvent,
+          { type: "tool/executed" }
+        >;
+        const state = executed.isError ? "an error" : "success";
+        const prefix = `Tool execution already returned (reported ${state}).`;
+        try {
+          const after = ctx.afterToolCall;
+          const patch = await waitForAfter(
+            () =>
+              after(
+                {
+                  call: p.call,
+                  args: p.args,
+                  result: Object.freeze({
+                    content: executed.content,
+                    isError: executed.isError,
+                    durationMs: executed.durationMs,
+                    ...(executed.outcome && { outcome: executed.outcome }),
+                  }),
+                  ...(ctx.origin && { origin: Object.freeze({ ...ctx.origin }) }),
+                },
+                signal,
+              ),
+            signal,
+          );
+          if (patch !== AFTER_INTERRUPTED && patch !== undefined) {
+            if (!patch || typeof patch !== "object" || Array.isArray(patch))
+              throw new TypeError("afterToolCall must return a result patch or undefined.");
+            const { content, isError } = patch;
+            if (content !== undefined && typeof content !== "string")
+              throw new TypeError("afterToolCall content must be a string.");
+            if (isError !== undefined && typeof isError !== "boolean")
+              throw new TypeError("afterToolCall isError must be a boolean.");
+            result = { ...r, content: content ?? r.content, isError: isError ?? r.isError };
+          }
+        } catch (error) {
+          if (!signal.aborted)
+            result = {
+              ...r,
+              content: `${prefix} Result post-processing failed: ${errorMessage(error)}. The original execution result is recorded; no automatic tool retry was performed.`,
+              isError: true,
+            };
+          annotate = false;
+        }
+        // 回调或 patch getter 可同步取消;取消优先于其返回值或异常。
+        if (signal.aborted) {
+          result = {
+            ...r,
+            content: `${prefix} Result post-processing was interrupted. The original execution result is recorded; no automatic tool retry was performed.`,
+            isError: true,
+          };
+          annotate = false;
+        }
+      }
       // 事实附注贴在这条结果上:此前同样的失败有几次、这次比中位耗时慢多少。附注进日志,模型看到的就是它。
-      const content =
-        r.durationMs === undefined || r.outcome === "unknown"
-          ? r.content
-          : annotateResult(ctx.log.events, p.call, r, ctx.facts);
-      appendResult(ctx.log, p.call, { ...r, content });
+      const content = annotate
+        ? annotateResult(ctx.log.events, p.call, result, ctx.facts)
+        : result.content;
+      appendResult(ctx.log, p.call, { ...result, content });
       if (ctx.log.recording)
         recordEvent(ctx.log, "tool/end", {
           callId: p.call.id,
-          isError: r.isError,
-          ...(r.outcome && { outcome: r.outcome }),
+          isError: result.isError,
+          ...(result.outcome && { outcome: result.outcome }),
         });
-    });
+    }
     await ctx.log.checkpoint(signal?.aborted ? undefined : signal);
   };
 

@@ -252,6 +252,9 @@ export async function prepareSessionRuntime(options: {
               ...(resources.slots?.beforeToolCall && {
                 beforeToolCall: resources.slots.beforeToolCall,
               }),
+              ...(resources.slots?.afterToolCall && {
+                afterToolCall: resources.slots.afterToolCall,
+              }),
             };
           };
           return fork(childLog);
