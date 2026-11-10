@@ -1,6 +1,6 @@
 // MCP 工具桥接:每个 MCP 工具映射成内核的 Tool,名字 mcp__<server>__<tool>;
 // 服务器的启动、失败、每次往返、stderr、工具表变化都记成 ext/event(source "mcp")。内核不知道 MCP 的存在。
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { TSchema } from "@sinclair/typebox";
@@ -172,20 +172,18 @@ const EXT: Record<string, string> = {
 };
 
 /** 工具结果 content[] → 文本。二进制块落盘(有目录时),文本里留一行路径。 */
-export function contentToText(
-  content: McpContent[],
-  opts: { dir?: string; callId?: string } = {},
-): string {
+export function contentToText(content: McpContent[], opts: { dir?: string } = {}): string {
   const parts: string[] = [];
-  content.forEach((c, i) => {
+  content.forEach((c) => {
     if (c.type === "text") parts.push((c as { text: string }).text);
     else if (c.type === "image" || c.type === "audio") {
       const b = c as { data: string; mimeType: string };
       const bytes = Buffer.from(b.data, "base64");
       if (opts.dir) {
         mkdirSync(opts.dir, { recursive: true });
-        const file = join(opts.dir, `${opts.callId ?? "result"}-${i}.${EXT[b.mimeType] ?? "bin"}`);
-        writeFileSync(file, bytes);
+        // 调用 ID 会跨轮复用;文件身份由写盘方分配。
+        const file = join(opts.dir, `${randomUUID()}.${EXT[b.mimeType] ?? "bin"}`);
+        writeFileSync(file, bytes, { flag: "wx" });
         parts.push(`[${c.type} ${b.mimeType}, ${bytes.length} bytes, saved to ${file}]`);
       } else parts.push(`[${c.type} ${b.mimeType}, ${bytes.length} bytes, not saved]`);
     } else if (c.type === "resource") {
@@ -326,7 +324,6 @@ export async function connectMcpServers(
               ctx.output?.write(JSON.stringify(result));
               let text = contentToText(result.content, {
                 ...(opts.artifactsDir && { dir: opts.artifactsDir }),
-                ...(ctx.callId && { callId: ctx.callId }),
               });
               if (result.structuredContent !== undefined && !text.trim())
                 text = JSON.stringify(result.structuredContent, null, 2);

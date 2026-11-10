@@ -14,7 +14,7 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eventViewLines } from "../cli/inspector-events.js";
@@ -240,13 +240,14 @@ console.log("closed");
   it("server/discover 定时代;分页拼全;命名;echo / boom / proto / image;stderr 进 mcp/log;关闭", async () => {
     const dir = mkdtempSync(join(tmpdir(), "clarook-mcp-"));
     tempDirs.push(dir);
+    const artifacts = join(dir, "artifacts");
     const log = new EventLog(join(dir, "session.jsonl"));
     recordedLogs.push(log);
     const tools: Tool[] = [];
     const connections = new McpConnections();
     const bridge = await connectMcpServers(
       [stdioServer("fake", ["--era", "modern", "--tools", "3", "--page", "2", "--stderr-noise"])],
-      { log, tools, artifactsDir: dir, connections },
+      { log, tools, artifactsDir: artifacts, connections },
     );
     const [s] = bridge.statuses();
     expect(s).toMatchObject({
@@ -319,7 +320,28 @@ console.log("closed");
     const img = await find(tools, "mcp__fake__image").execute({}, ctx);
     expect(img).toContain("here is a picture");
     expect(img).toContain("saved to");
-    expect(readdirSync(dir)).toContain("call_1-1.png");
+    const imagePath = /saved to (.+)\]/.exec(img)?.[1];
+    if (!imagePath) throw new Error("MCP image path missing");
+    expect(dirname(imagePath)).toBe(artifacts);
+    expect(readFileSync(imagePath, "utf8")).toBe("PNG");
+    const repeated = await find(tools, "mcp__fake__image").execute({}, ctx);
+    const repeatedPath = /saved to (.+)\]/.exec(repeated)?.[1];
+    if (!repeatedPath) throw new Error("MCP image path missing");
+    expect(repeatedPath).not.toBe(imagePath);
+    expect(readFileSync(repeatedPath, "utf8")).toBe("PNG");
+    const nestedId = await find(tools, "mcp__fake__image").execute(
+      {},
+      {
+        signal: new AbortController().signal,
+        callId: "../escaped",
+      },
+    );
+    const nestedIdPath = /saved to (.+)\]/.exec(nestedId)?.[1];
+    if (!nestedIdPath) throw new Error("MCP image path missing");
+    expect(dirname(nestedIdPath)).toBe(artifacts);
+    expect(existsSync(join(dir, "escaped-1.png"))).toBe(false);
+    expect(readdirSync(artifacts).filter((name) => name.endsWith(".png"))).toHaveLength(3);
+    expect(readFileSync(imagePath, "utf8")).toBe("PNG");
     const nextLog = new EventLog();
     const nextTools: Tool[] = [];
     const servers = [
@@ -356,7 +378,9 @@ console.log("closed");
     const oldCount = log.events.length;
     expect(await find(nextTools, "mcp__fake__image").execute({}, ctx)).toContain(join(dir, "next"));
     expect(log.events).toHaveLength(oldCount);
-    expect(readdirSync(join(dir, "next"))).toEqual(["call_1-1.png"]);
+    const nextImages = readdirSync(join(dir, "next"));
+    expect(nextImages).toHaveLength(1);
+    expect(readFileSync(join(dir, "next", nextImages[0] as string), "utf8")).toBe("PNG");
     const separate = await connectMcpServers(servers, {
       log: new EventLog(),
       tools: [],
