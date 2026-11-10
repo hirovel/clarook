@@ -33,6 +33,7 @@
     "test": "vitest run",
     "lint": "biome check . --error-on-warnings",
     "check": "tsc --noEmit && biome check . --error-on-warnings && vitest run",
+    "check:package": "node scripts/check-package.mjs",
     "tui": "tsx cli/tui.ts",
     "replay": "tsx cli/replay.ts",
     "once": "tsx cli/run.ts",

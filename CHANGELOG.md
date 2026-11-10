@@ -7,6 +7,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Added
 
+- Add `npm run check:package` to verify the built tarball in an isolated consumer through the installed CLI, native search and session recovery. Run package checks on Linux, macOS and Windows with a local fake model, including the minimum Node version on Linux.
 - Add `EventLog.create` for one-time initialization from independently captured events. Copy referenced bodies before journal writes and reject invalid initial JSON before writer allocation; keep live append and recovery behavior.
 - Add `slots.afterToolCall` for explicit model-result text and error-flag replacement after immutable execution recording. Preserve unknown outcomes, distinguish post-processing failures from execution failures, stop local hook waits on cancellation, discard late patches, and keep factory-created child hooks bound to their own session.
 - Record executor returns and errors as native `tool/executed` facts before ordered model-result publication, including SDK sessions without Recording. Link final results to their execution facts and inspect execution values independently of original output bytes and model results. Replace recording completion events without automatically retrying or reconstructing missing final results.
@@ -35,6 +36,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Keep the TUI running when the optional system link opener cannot start. Pass Windows URLs directly to the system handler instead of a command interpreter.
 - Compare repeated tool failures using the final prepared arguments shared by approval and execution. Preserve original model calls and final model-result error semantics.
 - Avoid losing MCP tool-list change notifications during refresh completion. Keep refreshes serial and preserve the last usable catalog on discovery failure.
 - Stop reusing an MCP connection after its last session releases it, even while transport cleanup is pending. Keep failed cleanup available for retry without closing a replacement session's connection.

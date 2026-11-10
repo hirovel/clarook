@@ -197,6 +197,8 @@ Before submitting changes, run:
 pnpm check
 ```
 
+Run `npm run check:package` to build and pack Clarook, install it in a temporary consumer, and verify the installed CLI, native search and session recovery with a local fake model. It downloads production dependencies from npm; it makes no paid model calls. CI runs this check on Linux, macOS and Windows, including the minimum Node version on Linux.
+
 Compare configurations with real API calls from the source checkout:
 
 ```sh

@@ -1,7 +1,9 @@
 // 现代终端能力:备用屏布局真的画到了 xterm 的备用缓冲区;焦点事件与通知;/copy 的 OSC 52;
 // 路径的 OSC 8 链接;流式合帧;提示标记在整行最前。
+import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { fileUrl, osc8, PROMPT_MARK } from "../cli/terminal-extras.js";
 import { createReadTool } from "../cli/tools/fs.js";
@@ -118,6 +120,30 @@ describe("备用屏", () => {
 });
 
 describe("通知、标题、剪贴板、链接", () => {
+  it.skipIf(process.platform === "win32")("系统没有可选的链接打开器时,进程仍正常返回", () => {
+    const root = testDirectory("tui-no-opener-");
+    const entry = pathToFileURL(resolve("cli/terminal-extras.ts")).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        resolve("node_modules/tsx/dist/loader.mjs"),
+        "--input-type=module",
+        "-e",
+        `import { openUrl } from ${JSON.stringify(entry)};
+        process.env.PATH = ${JSON.stringify(root)};
+        openUrl("https://example.invalid");
+        setImmediate(() => process.stdout.write("still running"));`,
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, CLAROOK_CREDENTIALS: join(root, "no-credentials.json") },
+      },
+    );
+    expect(child.status, child.stderr).toBe(0);
+    expect(child.stdout).toBe("still running");
+  });
+
   it("失焦时回合结束发桌面通知加铃;有焦点不发;标题跟状态", async () => {
     const term = new VirtualTerminal(100, 24);
     const titles = term.titles;

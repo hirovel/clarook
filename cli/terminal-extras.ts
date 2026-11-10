@@ -70,12 +70,15 @@ export const PROMPT_MARK = `\x1b]133;A${BEL}`;
 export function openUrl(url: string): void {
   const [cmd, args] =
     process.platform === "win32"
-      ? ["cmd", ["/c", "start", "", url]]
+      ? ["rundll32", ["url.dll,FileProtocolHandler", url]]
       : process.platform === "darwin"
         ? ["open", [url]]
         : ["xdg-open", [url]];
   try {
-    spawn(cmd, args, { detached: true, stdio: "ignore" }).unref();
+    // 地址直传系统处理器,不交 shell 解释;启动失败异步报告,也不能终止聊天。
+    spawn(cmd, args, { detached: true, stdio: "ignore" })
+      .on("error", () => {})
+      .unref();
   } catch {
     // 打不开就算了;界面不因此出错。
   }

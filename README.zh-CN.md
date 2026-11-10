@@ -197,6 +197,8 @@ pnpm tui
 pnpm check
 ```
 
+`npm run check:package` 构建并打包 Clarook，在临时项目安装，再用本机假模型验证安装后的命令、原生搜索和会话恢复。它从 npm 下载生产依赖，不调用付费模型。CI 在 Linux、macOS、Windows 运行这项检查，并在 Linux 核对最低 Node 版本。
+
 在源码目录用真实 API 比较配置：
 
 ```sh
