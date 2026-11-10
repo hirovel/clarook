@@ -33,6 +33,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Avoid rebuilding unused intermediate event snapshots when writing a physical session fork. Use the existing Recording writer and JSON snapshot rules while preserving event order, referenced bodies, source history and failed-fork cleanup.
 - Set the active cancellation signal before notifying pending-input and interruption observers. Reentrant interruption no longer duplicates cancellation records, newly queued input stays paused, and callback or recording failures still leave the run cancelled.
 - Render child transcripts in committed event order when extensions append messages during synchronous event callbacks. Share the existing history-prefix projection with the main view while retaining recursive subscriptions, child-view start positions and cleanup.
 - Keep error descriptions printable when a thrown value or optional error metadata cannot be read, preserving any message already obtained. Honor post-processing cancellation before formatting its exception.

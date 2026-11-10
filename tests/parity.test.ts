@@ -18,6 +18,7 @@ import { deriveMessages } from "../src/messages.js";
 import type { AssistantTurn, Provider, ToolDef } from "../src/provider.js";
 import { anthropic } from "../src/providers/anthropic.js";
 import { openaiCompat } from "../src/providers/openai-chat.js";
+import { Recording } from "../src/recording.js";
 import { createToolDefinitionQuery, toolDefinitionsForRequest } from "../src/tool-definitions.js";
 import { defineTool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
@@ -758,6 +759,40 @@ describe("分叉与扩展模块", () => {
     const copied = EventLog.load(r.file);
     expect(copied.events).toEqual(events.slice(0, 3));
     expect(events).toHaveLength(4);
+
+    const source = new Recording(join(dir, "source.jsonl"));
+    try {
+      const body = source.open("original output");
+      body.write("original bytes");
+      source.flush();
+      const recorded: AgentEvent = {
+        type: "ext/event",
+        at: "",
+        source: "recording",
+        kind: "tool/output",
+        payload: { output: { ...body.ref, bytes: body.bytes } },
+      };
+      const missing: AgentEvent = {
+        ...recorded,
+        payload: { output: { file: "deadbeef.body", bytes: 1 } },
+      };
+      const unrecordable: AgentEvent & { toJSON(): undefined } = {
+        type: "user/message",
+        at: "",
+        text: "not recordable",
+        toJSON: () => undefined,
+      };
+      // 两个实际阶段:正文已部分复制,或正文复制后日志已部分写入。
+      for (const tail of [missing, unrecordable]) {
+        const prefix = [...events.slice(0, 1), recorded, tail];
+        const before = fs.readdirSync(dir).sort();
+        expect(() => forkSession(prefix, prefix.length, dir, source)).toThrow();
+        expect(fs.readdirSync(dir).sort()).toEqual(before);
+      }
+      expect(source.read({ ...body.ref, bytes: body.bytes })).toBe("original bytes");
+    } finally {
+      source.dispose();
+    }
   });
 
   it("loadExtensions:default 导出函数,返回工具与槽,可订阅事件;非函数报错", async () => {

@@ -118,6 +118,8 @@ For earlier compaction, set `compactionRatio` in `/settings`: `0` disables it; `
 
 Built-in tools read, write and edit files, run commands, search file contents and paths, and fetch pages. The agent continues through tool calls until the model finishes. In fullscreen mode, PgUp/PgDn pages through the transcript; Shift+PgUp/PgDn selects a request, and Enter folds or expands it when the input is empty. Esc closes a view or returns to live output before interrupting a running turn. `/session` creates, resumes and forks sessions. Type in the resume list to search all saved sessions by their latest user message, model or path. History, API bodies and original tool output are stored locally.
 
+Session forks copy the selected event prefix and its referenced recordings into an independent file. Forking a long history avoids rebuilding unused intermediate session snapshots for each copied event.
+
 Built-in `edit` accepts `path` and a nonempty `edits` array. Each item has `oldText`, `newText` and optional `replaceAll`. Every item searches the same original file; matching, ambiguity or overlap errors leave the whole group unwritten. Each item requires a unique match unless it explicitly sets `replaceAll: true`. Valid changes are written together after all checks. The former top-level `oldText`/`newText`/`replaceAll` input is rejected. Tool previews show each requested replacement and its range; historical parameters remain readable.
 
 The `userMessagesOnly` child scope inherits prior user messages with current edits and exclusions applied, including early requirements covered by compaction. Tool results and assistant steps are omitted. Those early messages can increase child input size.

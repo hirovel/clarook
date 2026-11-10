@@ -7,8 +7,9 @@ import { join } from "node:path";
 import type { KernelConfig } from "../src/config.js";
 import type { AgentEvent } from "../src/events.js";
 import { lockFile } from "../src/file-lock.js";
+import { jsonSnapshot } from "../src/json-snapshot.js";
 import { EventLog } from "../src/log.js";
-import type { Recording } from "../src/recording.js";
+import { Recording } from "../src/recording.js";
 import { recordUnresolvedCalls } from "../src/recovery.js";
 import type { CommonArgs } from "./args.js";
 
@@ -249,20 +250,22 @@ export function forkSession(
 ): { file: string; events: number } {
   const n = Math.max(1, Math.min(upTo, events.length));
   const file = newSessionPath(dir, "-fork");
-  const log = new EventLog(file);
+  const recording = new Recording(file);
+  recording.claim();
   const prefix = events.slice(0, n);
   try {
-    log.recording?.copyAttachments(prefix, source);
-    for (const e of prefix) log.append(e);
-    log.recording?.flush();
-    if (log.recording?.error) throw new Error(log.recording.error);
+    recording.copyAttachments(prefix, source);
+    // 分叉只生成文件,不用为无人消费的日志构建每一个中间快照。
+    for (const e of prefix) recording.appendEvent(jsonSnapshot(e).json);
+    recording.flush();
+    if (recording.error) throw new Error(recording.error);
     return { file, events: n };
   } catch (error) {
-    log.recording?.dispose();
+    recording.dispose();
     rmSync(file, { force: true });
-    if (log.recording) rmSync(log.recording.directory, { recursive: true, force: true });
+    rmSync(recording.directory, { recursive: true, force: true });
     throw error;
   } finally {
-    log.recording?.dispose();
+    recording.dispose();
   }
 }
