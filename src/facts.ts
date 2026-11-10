@@ -15,7 +15,7 @@ export const SLOW_MIN_SAMPLES = 3;
 
 const argsKey = (args: unknown): string => JSON.stringify(args ?? null);
 
-/** 同一工具、同样参数此前失败过几次。调用本身不带参数就按事件里的调用找。 */
+/** 同一工具、同样最终参数此前失败过几次;准备事实覆盖原模型参数。 */
 export function priorFailures(events: readonly AgentEvent[], call: ToolCall): number {
   const key = argsKey(call.args);
   const calls = new Map<string, { name: string; key: string }>();
@@ -23,6 +23,8 @@ export function priorFailures(events: readonly AgentEvent[], call: ToolCall): nu
   for (const e of events) {
     if (e.type === "assistant/message") {
       for (const tc of e.toolCalls) calls.set(tc.id, { name: tc.name, key: argsKey(tc.args) });
+    } else if (e.type === "tool/arguments") {
+      calls.set(e.callId, { name: e.name, key: argsKey(e.args) });
     } else if (e.type === "tool/result" && e.isError && e.outcome !== "unknown") {
       const c = calls.get(e.callId);
       if (c && c.name === call.name && c.key === key) n += 1;

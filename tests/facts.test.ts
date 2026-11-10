@@ -96,6 +96,56 @@ describe("事实附注", () => {
       false,
     );
     expect(priorFailures(log.events, call("fail", { path: "a.txt" }, "x"))).toBe(2);
+
+    // 附注必须与实际参数一致,包括扩展改参和无扩展的标量转换。
+    for (const scenario of [
+      { raw: ["a.txt", "a.txt"], prepared: ["b.txt", "c.txt"], repeated: false },
+      { raw: ["a.txt", "b.txt"], prepared: ["c.txt", "c.txt"], repeated: true },
+      { raw: [123, "123"], prepared: undefined, repeated: true },
+    ]) {
+      const current = newLog();
+      const executed: string[] = [];
+      let prepared = 0;
+      let input: Message[] = [];
+      let step = 0;
+      await runTurn({
+        log: current,
+        provider: {
+          model: "fake",
+          async complete(messages) {
+            input = messages;
+            const index = step++;
+            return index < scenario.raw.length
+              ? {
+                  text: "",
+                  toolCalls: [call("fail", { path: scenario.raw[index] }, "reused")],
+                  stopReason: "tool",
+                }
+              : { text: "done", toolCalls: [], stopReason: "end" };
+          },
+        },
+        tools: [
+          defineTool({
+            ...failTool,
+            async execute(args) {
+              executed.push(args.path);
+              throw new Error(`Cannot read ${args.path}`);
+            },
+          }),
+        ],
+        facts: { repeats: true, date: false, slow: false },
+        slots: {
+          beforeToolCall: () =>
+            scenario.prepared ? { args: { path: scenario.prepared[prepared++] } } : undefined,
+        },
+      });
+      expect(executed).toEqual(scenario.prepared ?? ["123", "123"]);
+      const delivered = input.filter((message) => message.role === "tool");
+      expect(delivered[0]?.content).not.toContain("[note:");
+      expect(delivered[1]?.content.includes("failed with exactly these arguments 1 time")).toBe(
+        scenario.repeated,
+      );
+    }
   });
 
   it("慢调用:至少三个样本、至少 30 秒、超过中位五倍才说;日期变了才说", () => {

@@ -314,7 +314,7 @@ export async function executeCalls(
       }
       // 事实附注贴在这条结果上:此前同样的失败有几次、这次比中位耗时慢多少。附注进日志,模型看到的就是它。
       const content = annotate
-        ? annotateResult(ctx.log.events, p.call, result, ctx.facts)
+        ? annotateResult(ctx.log.events, { ...p.call, args: p.args }, result, ctx.facts)
         : result.content;
       appendResult(ctx.log, p.call, { ...result, content });
       if (ctx.log.recording)
