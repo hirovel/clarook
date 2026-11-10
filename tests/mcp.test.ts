@@ -940,6 +940,7 @@ describe("命名、白黑名单、内容转换、审批规则、配置", () => {
     ]);
     const callbacks = new Map<string, McpClientOptions>();
     let updated = false;
+    let failList = false;
     const tools: Tool[] = [];
     const log = new EventLog();
     const bridge = await connectMcpServers(
@@ -953,8 +954,12 @@ describe("命名、白黑名单、内容转换、审批规则、配置", () => {
             async connect() {
               return { era: "modern", protocolVersion: "2026-07-28" };
             },
-            async listTools() {
-              return (
+            listTools() {
+              if (server.name === "a.b" && failList) {
+                failList = false;
+                throw new Error("Synchronous list failure");
+              }
+              return Promise.resolve(
                 definitions.get(server.name)?.map((name) => ({
                   name,
                   description: `${server.name}/${name}${updated && server.name === "a.b" ? " updated" : ""}`,
@@ -966,7 +971,7 @@ describe("命名、白黑名单、内容转换、审批规则、配置", () => {
                           required: ["value"],
                         }
                       : { type: "object" },
-                })) ?? []
+                })) ?? [],
               );
             },
             async callTool(name: string, args: unknown) {
@@ -1061,6 +1066,47 @@ describe("命名、白黑名单、内容转换、审批规则、配置", () => {
           (event) => event.kind === "log" && event.line.includes("duplicate tool name"),
         ),
       ).toBe(true);
+
+      const intermediate = bridgedName("a.b", "intermediate");
+      const latest = bridgedName("a.b", "latest");
+      const unsubscribe = log.subscribe((event) => {
+        const change = mcpEvent(event);
+        if (change?.kind !== "tools" || !change.added.includes(intermediate)) return;
+        // 首轮目录已发布后才排入通知,覆盖工作结束与解除占用之间的交接。
+        queueMicrotask(() => {
+          definitions.set("a.b", ["latest", "a_b"]);
+          callbacks.get("a.b")?.onNotification?.("notifications/tools/list_changed", {});
+        });
+      });
+      try {
+        definitions.set("a.b", ["intermediate", "a_b"]);
+        callbacks.get("a.b")?.onNotification?.("notifications/tools/list_changed", {});
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        await agent.prompt("Use the latest catalog after consecutive notifications.");
+        const latestNames = [...changedNames.slice(0, -1), latest];
+        expect(sent.map((definition) => definition.name)).toEqual(latestNames);
+        expect(bridge.toolNames()).toEqual(latestNames);
+        expect(await find(tools, latest).execute({ value: 11 }, ctx)).toBe(
+          'a.b/latest updated {"value":11}',
+        );
+      } finally {
+        unsubscribe();
+      }
+
+      const beforeFailure = sent;
+      failList = true;
+      callbacks.get("a.b")?.onNotification?.("notifications/tools/list_changed", {});
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await agent.prompt("Use the last valid catalog after a synchronous failure.");
+      expect(sent).toEqual(beforeFailure);
+      definitions.set("a.b", ["recovered", "a_b"]);
+      callbacks.get("a.b")?.onNotification?.("notifications/tools/list_changed", {});
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await agent.prompt("Use the recovered catalog after the next notification.");
+      expect(sent.map((definition) => definition.name)).toEqual([
+        ...changedNames.slice(0, -1),
+        bridgedName("a.b", "recovered"),
+      ]);
     } finally {
       await bridge.close();
     }

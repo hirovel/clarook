@@ -35,6 +35,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Avoid losing MCP tool-list change notifications during refresh completion. Keep refreshes serial and preserve the last usable catalog on discovery failure.
 - Stop reusing an MCP connection after its last session releases it, even while transport cleanup is pending. Keep failed cleanup available for retry without closing a replacement session's connection.
 - Avoid repeatedly copying the event prefix when a new child inherits a long history. Reject existing journal or recording paths under the write lock, and centralize failed-candidate deletion in Recording while retaining write ownership during cleanup.
 - Include nested task logs in saving status, manual retry, session switching and shutdown. Reuse live grandchild logs on follow-up, retain failed writes across switches, and protect borrowed logs while a replacement runtime is preparing.

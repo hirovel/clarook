@@ -23,7 +23,7 @@ export class Connection {
   private readonly scope = new AsyncLocalStorage<EventLog>();
   private readonly requests = new Map<number | string, EventLog>();
   private closing: Promise<void> | undefined;
-  private refresh: Promise<void> | undefined;
+  private refreshing = false;
   private refreshAgain = false;
 
   constructor(
@@ -179,9 +179,11 @@ export class Connection {
     }
   }
 
-  private refreshTools(): Promise<void> {
+  private async refreshTools(): Promise<void> {
     this.refreshAgain = true;
-    this.refresh ??= (async () => {
+    if (this.refreshing) return;
+    this.refreshing = true;
+    try {
       while (this.refreshAgain && !this.closing) {
         this.refreshAgain = false;
         try {
@@ -197,10 +199,10 @@ export class Connection {
           });
         }
       }
-    })().finally(() => {
-      this.refresh = undefined;
-    });
-    return this.refresh;
+    } finally {
+      // 占用与任务同步收尾,不把已结束的任务留给后续通知。
+      this.refreshing = false;
+    }
   }
 
   call(log: EventLog, name: string, args: unknown, signal: AbortSignal, timeoutMs: number) {
