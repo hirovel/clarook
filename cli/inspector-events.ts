@@ -33,6 +33,7 @@ const CONVERSATION = new Set([
 ]);
 const KERNEL = new Set([
   "tool/arguments",
+  "tool/executed",
   "request",
   "request/error",
   "retry",
@@ -155,6 +156,12 @@ export function eventSummary(
       return {
         sign: G.note,
         text: `${e.name} · prepared arguments · call from #${e.callEvent} · execution not implied`,
+        tok: undefined,
+      };
+    case "tool/executed":
+      return {
+        sign: G.note,
+        text: `${e.name} · execution ${e.outcome === "unknown" ? "outcome unknown" : e.isError ? "error" : "success"} · call from #${e.callEvent} · ${fmtMs(e.durationMs)}`,
         tok: undefined,
       };
     case "tool/result": {
@@ -431,6 +438,35 @@ export function eventViewLines(
       out.push(row("state", "prepared for approval; execution not implied"));
       out.push(...block("prepared arguments", JSON.stringify(e.args, null, 2)));
       break;
+    case "tool/executed": {
+      out.push(row("tool", `${e.name} · ${e.callId} · call event #${e.callEvent}`));
+      out.push(
+        row(
+          "execution",
+          `${e.outcome === "unknown" ? "outcome unknown" : e.isError ? "error" : "success"} · ${fmtMs(e.durationMs)}`,
+        ),
+      );
+      const result = events.findIndex(
+        (result) =>
+          result.type === "tool/result" &&
+          result.executionEvent === i &&
+          result.callId === e.callId &&
+          result.name === e.name,
+      );
+      out.push(
+        row("model result", result < 0 ? "pending; no final result recorded" : `event #${result}`),
+      );
+      out.push(row("projection", "execution fact; never reaches the model"));
+      if (e.output)
+        out.push(
+          row(
+            "output",
+            `${e.output.file} · ${e.output.bytes} attempted bytes${e.output.missingFrom === undefined ? "" : ` · captured prefix ${e.output.missingFrom} bytes`}`,
+          ),
+        );
+      out.push(...block("execution result", e.content));
+      break;
+    }
     case "tool/result":
       out.push(
         row(
@@ -439,6 +475,14 @@ export function eventViewLines(
         ),
       );
       out.push(row("call", e.callId));
+      out.push(
+        row(
+          "execution",
+          e.executionEvent === undefined
+            ? "No execution reference recorded"
+            : `event #${e.executionEvent}`,
+        ),
+      );
       out.push(row("size", `${e.content.length} chars · ≈${eventTokens(e)} tok`));
       out.push(...block("content", e.content));
       break;

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
@@ -25,6 +25,7 @@ import { openaiCompat } from "../src/providers/openai-chat.js";
 import { openaiResponses } from "../src/providers/openai-responses.js";
 import { defineTool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
+import { testDirectory } from "./helpers/setup.js";
 import { stripAnsi } from "./helpers/virtual-terminal.js";
 
 const echo = defineTool({
@@ -84,6 +85,7 @@ describe("请求层记录", () => {
       "request",
       "assistant/message",
       "tool/arguments",
+      "tool/executed",
       "tool/result",
       "request",
       "assistant/message",
@@ -140,6 +142,13 @@ describe("请求层记录", () => {
     const first = records[0];
     if (!first) throw new Error("missing request");
     const inputs = receivedBlocks(first);
+    const executed = inputs.filter((block) => block.id.startsWith("execution-"));
+    expect(executed.map((block) => block.lines().join("\n"))).toEqual(["echo:prepared a"]);
+    expect(executed[0]?.title).toContain("success");
+    expect(inputs.some((block) => block.id.startsWith("pending-"))).toBe(false);
+    expect(inputs.find((block) => block.id === "call-c3")?.meta).toContain(
+      "No execution fact recorded",
+    );
     expect(
       inputs
         .filter((block) => block.id.startsWith("prepared-"))
@@ -190,9 +199,12 @@ describe("请求层记录", () => {
       captured.findIndex((block) => block.id === "model-c1"),
     );
     expect(
-      captured.filter((block) => /^(call|original|model)-/.test(block.id)).map((block) => block.id),
+      captured
+        .filter((block) => /^(call|execution|original|model)-/.test(block.id))
+        .map((block) => block.id),
     ).toEqual([
       "call-c1",
+      "execution-c1",
       "original-c1",
       "model-c1",
       "call-c2",
@@ -251,6 +263,79 @@ describe("请求层记录", () => {
     expect(narrow).toContain("result not recorded");
     expect(narrow).not.toContain("running");
     expect(partial.some((block) => block.id === "model-c1")).toBe(false);
+    expect(partial.find((block) => block.id === "execution-c1")?.lines()).toEqual([
+      "echo:prepared a",
+    ]);
+    expect(partial.find((block) => block.id === "pending-c1")?.title).toContain("pending");
+    // 两阶段状态独立,最终模型值改变不覆盖执行正文或执行状态。
+    const changed = receivedBlocks({
+      ...first,
+      results: first.results.map((result) =>
+        result.callId === "c1"
+          ? { ...result, content: "Rejected after execution", isError: true }
+          : result,
+      ),
+    });
+    expect(changed.find((block) => block.id === "execution-c1")?.title).toContain("success");
+    expect(changed.find((block) => block.id === "execution-c1")?.lines()).toEqual([
+      "echo:prepared a",
+    ]);
+    expect(changed.find((block) => block.id === "model-c1")?.title).toContain("error");
+    expect(changed.find((block) => block.id === "model-c1")?.lines()).toEqual([
+      "Rejected after execution",
+    ]);
+    // 只有内核事实的日志重开后仍能读原执行值,不能补造最终模型结果。
+    const executionIndex = log.events.findIndex((event) => event.type === "tool/executed");
+    const nativeFile = join(testDirectory("native-execution-"), "session.jsonl");
+    writeFileSync(
+      nativeFile,
+      `${log.events
+        .slice(0, executionIndex + 1)
+        .map((event) => JSON.stringify(event))
+        .join("\n")}\n`,
+    );
+    const native = EventLog.load(nativeFile);
+    const nativeRequest = collectRequests(native.events)[0];
+    if (!nativeRequest) throw new Error("missing native request");
+    const nativeBlocks = receivedBlocks(nativeRequest);
+    expect(nativeBlocks.find((block) => block.id === "execution-c1")?.lines()).toEqual([
+      "echo:prepared a",
+    ]);
+    expect(nativeBlocks.find((block) => block.id === "pending-c1")?.title).toContain("pending");
+    expect(nativeBlocks.some((block) => block.id === "model-c1")).toBe(false);
+    expect(deriveMessages(native.events).filter((message) => message.role === "tool")).toEqual([]);
+    // 原调用跨过下一请求才完成时,固定引用仍归原请求,不借复用 ID 配对。
+    const late: AgentEvent[] = [
+      ...native.events.slice(0, executionIndex),
+      { ...first.request, at: "later" },
+      {
+        ...first.response,
+        at: "later",
+        toolCalls: [{ id: "c1", name: "echo", args: { text: "later" } }],
+      },
+      native.events[executionIndex] as AgentEvent,
+      {
+        ...(results[0] as Extract<AgentEvent, { type: "tool/result" }>),
+        executionEvent: executionIndex + 2,
+      },
+    ];
+    const lateRequests = collectRequests(late);
+    const originalLate = lateRequests[0];
+    const nextLate = lateRequests[1];
+    if (!originalLate || !nextLate) throw new Error("missing late request");
+    expect(
+      receivedBlocks(originalLate)
+        .find((block) => block.id === "execution-c1")
+        ?.lines(),
+    ).toEqual(["echo:prepared a"]);
+    expect(
+      receivedBlocks(originalLate)
+        .find((block) => block.id === "model-c1")
+        ?.lines(),
+    ).toEqual(["echo:prepared a"]);
+    expect(receivedBlocks(nextLate).some((block) => /^(execution|model)-/.test(block.id))).toBe(
+      false,
+    );
     // 未匹配结果不能丢失,且未知状态优先于成功标记。
     const unknown = receivedBlocks({
       ...first,
@@ -411,6 +496,140 @@ describe("请求层记录", () => {
         ?.lines()
         .join("\n"),
     ).toBe(JSON.stringify({ text: "later" }, null, 2));
+    expect(original.find((block) => block.id === "execution-c1")?.lines()).toEqual([
+      "echo:prepared a",
+    ]);
+    expect(later.find((block) => block.id === "execution-c1")?.lines()).toEqual([
+      "echo:prepared later",
+    ]);
+
+    // 真实附件按 native 文件身份关联;复用 ID 不串正文,bytes 仍能发现损坏。
+    const file = join(testDirectory("execution-recording-"), "session.jsonl");
+    const recorded = new EventLog(file);
+    const outputTool = defineTool({
+      ...echo,
+      execute(args, context) {
+        context.output?.write(`original ${args.text}`);
+        return Promise.resolve(`summary ${args.text}`);
+      },
+    });
+    try {
+      for (const text of ["first", "second"]) {
+        recorded.append({ type: "user/message", at: "t", text });
+        await runTurn({
+          log: recorded,
+          provider: scripted([
+            {
+              text: "",
+              toolCalls: [{ id: "same", name: "echo", args: { text } }],
+              stopReason: "tool",
+            },
+          ]),
+          tools: [outputTool],
+          slots: { termination: maxSteps(1) },
+        });
+      }
+      await recorded.checkpoint();
+      const reloaded = EventLog.load(file);
+      const requests = collectRequests(reloaded.events);
+      const saved = requests.map((request) =>
+        readRequestRecording(file, reloaded.events, request.index),
+      );
+      expect(saved.map((recording) => recording?.outputs?.[0]?.original)).toEqual([
+        "original first",
+        "original second",
+      ]);
+      expect(
+        saved.every((recording) => recording?.outputs?.[0]?.state === "model result recorded"),
+      ).toBe(true);
+      const originalRequest = requests[0];
+      const nativeOutput = originalRequest?.executions?.[0]?.event.output;
+      if (!originalRequest || !nativeOutput || !recorded.recording)
+        throw new Error("missing output");
+      // 旧调用跨请求完成,结果和输出来源都沿固定身份读取,不能借给复用 ID 的新调用。
+      const nextRequest = requests[1];
+      const originalExecution = originalRequest.executions?.[0]?.event;
+      const nextOutput = nextRequest?.executions?.[0]?.event.output;
+      const originalResult = originalRequest.results[0];
+      if (
+        !originalRequest.response ||
+        !nextRequest?.response ||
+        !originalExecution ||
+        !nextOutput ||
+        !originalResult
+      )
+        throw new Error("missing late recording evidence");
+      const lateRecording: AgentEvent[] = [
+        originalRequest.request,
+        originalRequest.response,
+        {
+          type: "ext/event",
+          at: "t",
+          source: "recording",
+          kind: "tool/output",
+          payload: { callId: "same", output: { file: nativeOutput.file, label: "first output" } },
+        },
+        nextRequest.request,
+        nextRequest.response,
+        {
+          type: "ext/event",
+          at: "t",
+          source: "recording",
+          kind: "tool/output",
+          payload: { callId: "same", output: { file: nextOutput.file, label: "second output" } },
+        },
+        {
+          type: "ext/event",
+          at: "t",
+          source: "recording",
+          kind: "tool/output-source",
+          payload: { callId: "same", file: nativeOutput.file, source: "returned text" },
+        },
+        { ...originalExecution, callEvent: 1 },
+        { ...originalResult, executionEvent: 7 },
+      ];
+      const originalSaved = readRequestRecording(file, lateRecording, 0);
+      const nextSaved = readRequestRecording(file, lateRecording, 3);
+      expect(originalSaved?.outputs?.[0]).toMatchObject({
+        original: "original first",
+        state: "model result recorded",
+        source: "returned text",
+      });
+      expect(nextSaved?.outputs?.[0]).toMatchObject({
+        original: "original second",
+        state: "unfinished; execution result not recorded",
+        source: "original output",
+      });
+      const wrongScope = reloaded.events.map((event) =>
+        event.type === "tool/executed" && event.output?.file === nativeOutput.file
+          ? { ...event, callEvent: requests[1]?.responseIndex as number }
+          : event,
+      );
+      expect(
+        readRequestRecording(file, wrongScope, originalRequest.index)?.outputs?.[0]?.state,
+      ).toContain("execution result not recorded");
+      const outputFile = join(recorded.recording.directory, nativeOutput.file);
+      writeFileSync(outputFile, "orig");
+      const damaged = readRequestRecording(file, reloaded.events, originalRequest.index);
+      expect(damaged?.error).toContain("Recording size mismatch");
+      const gapEvents = reloaded.events.map((event) =>
+        event.type === "tool/executed" && event.output?.file === nativeOutput.file
+          ? { ...event, output: { ...event.output, missingFrom: 4 } }
+          : event,
+      );
+      const gap = readRequestRecording(file, gapEvents, originalRequest.index);
+      expect(gap?.outputs?.[0]?.original).toBe("orig");
+      expect(gap?.error).toContain("bytes from 4 were not captured");
+      rmSync(outputFile);
+      const missing = readRequestRecording(file, reloaded.events, originalRequest.index);
+      const evidence = receivedBlocks(originalRequest, missing);
+      expect(missing?.error).toContain("Missing or unreadable recording");
+      expect(evidence.find((block) => block.id === "execution-same")?.lines()).toEqual([
+        "summary first",
+      ]);
+    } finally {
+      recorded.recording?.dispose();
+    }
   });
 
   it("未配置压缩时 request 不带阈值", async () => {

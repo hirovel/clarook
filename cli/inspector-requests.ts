@@ -40,6 +40,8 @@ export type RequestRecord = {
   /** 原始 assistant 的固定位置;准备参数不能只按可能复用的 callId 关联。 */
   responseIndex?: number;
   prepared?: Extract<AgentEvent, { type: "tool/arguments" }>[];
+  /** 从追加事实派生;固定下标将执行返回与最终模型结果配对。 */
+  executions?: { index: number; event: Extract<AgentEvent, { type: "tool/executed" }> }[];
   /** 本次回复后产生的工具结果;未执行的调用也有结果,不依赖原文附件。 */
   results: Extract<AgentEvent, { type: "tool/result" }>[];
   error?: RequestErrorEvent;
@@ -56,6 +58,7 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
   let pending: AgentEvent[] = [];
   let current: RequestRecord | undefined;
   const responses = new Map<number, RequestRecord>();
+  const executions = new Map<number, RequestRecord>();
   for (let i = 0; i < events.length; i++) {
     const e = events[i];
     if (!e) continue;
@@ -67,6 +70,7 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
           request: e,
           results: [],
           prepared: [],
+          executions: [],
           retries: [],
           before: pending,
         };
@@ -89,9 +93,28 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
       case "tool/arguments":
         responses.get(e.callEvent)?.prepared?.push(e);
         break;
-      case "tool/result":
-        current?.results.push(e);
+      case "tool/executed": {
+        const owner = responses.get(e.callEvent);
+        if (
+          owner?.response?.toolCalls.some((call) => call.id === e.callId && call.name === e.name)
+        ) {
+          owner.executions?.push({ index: i, event: e });
+          executions.set(i, owner);
+        }
         break;
+      }
+      case "tool/result": {
+        const execution = e.executionEvent === undefined ? undefined : events[e.executionEvent];
+        const owner =
+          execution?.type === "tool/executed" &&
+          e.executionEvent !== undefined &&
+          execution.callId === e.callId &&
+          execution.name === e.name
+            ? executions.get(e.executionEvent)
+            : undefined;
+        (owner ?? current)?.results.push(e);
+        break;
+      }
       case "compaction":
         // 既是摘要请求的结果,也是下一请求之前发生的决定。
         if (current?.request.reason === "compaction" && !current.compaction && !current.error) {

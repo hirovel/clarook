@@ -255,6 +255,26 @@ describe("composeContext", () => {
       1,
     );
     expect(remoteBefore.provenance.at(-1)).toEqual({ event: 4, stages: ["unknown-result"] });
+    const executedOnly = new EventLog();
+    for (const e of sample().slice(0, 4)) executedOnly.append(e);
+    executedOnly.append({
+      type: "tool/executed",
+      at: "",
+      callEvent: 2,
+      callId: "b",
+      name: "r",
+      content: "Execution content must not replace the missing model result.",
+      isError: false,
+      durationMs: 1,
+    });
+    recordUnresolvedCalls(executedOnly);
+    const pending = deriveMessages(executedOnly.events).filter(
+      (message) => message.role === "tool" && message.callId === "b",
+    );
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.content).toContain("An execution result was recorded");
+    expect(pending[0]?.content).toContain("no final result for the model");
+    expect(pending[0]?.content).not.toContain("Execution content must not replace");
   });
   it("丢弃旧调用时保留后续轮次复用同一 ID 的工具结果", () => {
     const events: AgentEvent[] = [

@@ -244,6 +244,7 @@ describe("runTurn", () => {
       "request",
       "assistant/message",
       "tool/arguments",
+      "tool/executed",
       "tool/result",
       "tools/snapshot",
       "request",
@@ -592,6 +593,10 @@ describe("runTurn", () => {
 
   it("前置显式改参后重新校验,审批固定最终值,原始调用和跨请求身份保留", async () => {
     const log = newLog();
+    log.subscribe((event) => {
+      if (event.type === "tool/executed")
+        log.append({ type: "ext/event", at: "", source: "test", kind: "observed", payload: {} });
+    });
     const raw = [
       call("echo", { text: "original" }, "same-id"),
       call("echo", { text: "second" }, "second"),
@@ -693,6 +698,35 @@ describe("runTurn", () => {
     expect(results[3]?.content).toContain("Tool argument preparation failed");
     expect(results[4]?.content).toContain("extension unavailable");
     expect(results[5]?.content).toContain("The user denied this call");
+    const executions = log.events.filter((event) => event.type === "tool/executed");
+    expect(executions.map((event) => event.content)).toEqual([
+      "echo:123",
+      "echo:second",
+      "echo:new-final",
+    ]);
+    expect(log.recording).toBeUndefined();
+    for (const result of results) {
+      if (result.isError) expect(result.executionEvent).toBeUndefined();
+      else {
+        const execution = log.events[result.executionEvent as number];
+        expect(execution).toMatchObject({
+          type: "tool/executed",
+          callId: result.callId,
+          content: result.content,
+          isError: false,
+        });
+        if (execution?.type === "tool/executed") {
+          expect(execution.output).toBeUndefined();
+          expect(log.events[execution.callEvent]?.type).toBe("assistant/message");
+        }
+      }
+    }
+    expect(deriveMessages(log.events).filter((message) => message.role === "tool")).toHaveLength(
+      results.length,
+    );
+    expect(deriveMessages(JSON.parse(JSON.stringify(log.events)) as AgentEvent[])).toEqual(
+      deriveMessages(log.events),
+    );
     expect(raw[0]?.args).toEqual({ text: "original" });
     expect(again.args).toEqual({ text: "new-original" });
     expect(
@@ -841,6 +875,7 @@ describe("runTurn", () => {
       "request",
       "assistant/message",
       "tool/arguments",
+      "tool/executed",
       "tool/result",
       "decision",
       "user/message",
@@ -872,6 +907,7 @@ describe("runTurn", () => {
       "request",
       "assistant/message",
       "tool/arguments",
+      "tool/executed",
       "tool/result",
       "request",
       "assistant/message",
@@ -915,6 +951,10 @@ describe("runTurn", () => {
       content: "Interrupted by the user; not executed.",
       isError: true,
     });
+    expect(log.events.filter((event) => event.type === "tool/executed")).toMatchObject([
+      { callId: "c1", content: "执行中被打断", isError: true },
+    ]);
+    expect(results[1]?.executionEvent).toBeUndefined();
 
     // 审批等待与批次刷新都能让取消跨过最外层检查;以实际副作用计数验证执行入口。
     for (const mode of ["before", "arguments", "approval", "buffered", "flush"] as const) {
@@ -982,6 +1022,11 @@ describe("runTurn", () => {
           1,
         );
       expect(executed, mode).toEqual(mode === "flush" ? ["first"] : []);
+      expect(
+        boundaryLog.events
+          .filter((event) => event.type === "tool/executed")
+          .map((event) => event.callId),
+      ).toEqual(mode === "flush" ? ["one"] : []);
       const boundaryResults = boundaryLog.events.filter((e) => e.type === "tool/result");
       expect(boundaryResults.map((r) => r.callId)).toEqual(["one", "two"]);
       for (const result of boundaryResults.slice(mode === "flush" ? 1 : 0)) {

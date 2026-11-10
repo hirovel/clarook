@@ -6,6 +6,7 @@ type UnresolvedCall = {
   call: ToolCall;
   recovery?: { event: number; content: string };
   result?: { event: number; content: string };
+  execution?: number;
 };
 
 /** 无结果只表示缺少证据;不能据此断言工具没有启动或没有副作用。 */
@@ -23,6 +24,9 @@ export function unresolvedCalls(
         pending.set(key, { event: i, call });
         latest.set(call.id, key);
       }
+    } else if (e?.type === "tool/executed") {
+      const item = pending.get(`${e.callEvent}:${e.callId}`);
+      if (item?.call.name === e.name) item.execution = i;
     } else if (e?.type === "tool/result") {
       const key = latest.get(e.callId);
       if (key) {
@@ -51,7 +55,7 @@ export function pendingUserShells(events: readonly AgentEvent[]) {
 
 /** 显式恢复或强制退出时记录事实,不触发模型或工具;已有说明不重复追加。 */
 export function recordUnresolvedCalls(log: EventLog, reason: "restore" | "exit" = "restore"): void {
-  for (const { event, call, recovery, result } of unresolvedCalls(log.events)) {
+  for (const { event, call, recovery, result, execution } of unresolvedCalls(log.events)) {
     if (recovery || result) continue;
     log.append({
       type: "tool/unresolved",
@@ -59,7 +63,10 @@ export function recordUnresolvedCalls(log: EventLog, reason: "restore" | "exit" 
       callEvent: event,
       callId: call.id,
       name: call.name,
-      content: `No result was recorded for this tool call ${reason === "exit" ? "when force exit was requested" : "before the session was restored"}. Its execution outcome is unknown; it may have produced side effects. No automatic retry was performed. Check the actual state before deciding whether to retry or continue, using the existing tool permissions.`,
+      content:
+        execution !== undefined
+          ? `An execution result was recorded for this tool call, but no final result for the model was recorded ${reason === "exit" ? "when force exit was requested" : "before the session was restored"}. No automatic retry was performed. Review the execution result and actual state before deciding whether to continue, using the existing tool permissions.`
+          : `No result was recorded for this tool call ${reason === "exit" ? "when force exit was requested" : "before the session was restored"}. Its execution outcome is unknown; it may have produced side effects. No automatic retry was performed. Check the actual state before deciding whether to retry or continue, using the existing tool permissions.`,
     });
   }
   // 强制退出保留开始记录,恢复时才补未知结果;退出保存期间晚到的真实结果不会重复投影。

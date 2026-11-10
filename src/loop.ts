@@ -375,7 +375,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
 
     if (turn.stopReason === "length") {
       // 截断响应的调用一个都不执行,逐个补错误应答(协议要求每个 call 有应答)。
-      for (const call of turn.toolCalls) appendResult(log, call, LENGTH_NOTICE, true);
+      for (const call of turn.toolCalls)
+        appendResult(log, call, { content: LENGTH_NOTICE, isError: true });
       if (turn.toolCalls.length === 0) {
         // 无调用时没有可回喂结果;保留不完整回答后停止,避免裸重发同一助手末消息。
         const reason = "Response incomplete: generation reached the token or context limit.";

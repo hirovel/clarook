@@ -88,6 +88,10 @@ describe("执行槽:并行只在选了策略且工具声明并行安全时发生
     const b = slowTool("rb", 10, "parallel");
     const w = slowTool("w", 5);
     const timeline: string[] = [];
+    let firstCompletion: readonly AgentEvent[] = [];
+    log.subscribe((event) => {
+      if (event.type === "tool/executed" && event.callId === "b") firstCompletion = log.events;
+    });
     const wrap = (t: ReturnType<typeof slowTool>) => ({
       ...t.tool,
       async execute(args: never, ctx: never) {
@@ -105,6 +109,10 @@ describe("执行槽:并行只在选了策略且工具声明并行安全时发生
     });
     // rb 比 ra 先完成,说明两者同时在跑;w 在两者之后才开始。
     expect(timeline).toEqual(["rb", "ra", "w"]);
+    expect(firstCompletion.filter((event) => event.type === "tool/executed")).toMatchObject([
+      { callId: "b", content: "rb", isError: false },
+    ]);
+    expect(firstCompletion.some((event) => event.type === "tool/result")).toBe(false);
     const results = log.events.filter((e) => e.type === "tool/result").map((e) => e.callId);
     expect(results).toEqual(["a", "b", "c"]);
     const decision = log.events.find((e) => e.type === "decision" && e.slot === "execution");

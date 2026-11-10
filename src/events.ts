@@ -98,6 +98,20 @@ export type AgentEvent =
       args: unknown;
     }
   | {
+      type: "tool/executed";
+      at: string;
+      callEvent: number;
+      callId: string;
+      name: string;
+      /** 执行器返回或抛错的原结果,不包含后续模型结果处理。 */
+      content: string;
+      isError: boolean;
+      durationMs: number;
+      outcome?: "unknown";
+      /** 既有附件的完整性摘要;真正的 ref 和字节仍归 Recording。 */
+      output?: { file: string; bytes: number; missingFrom?: number };
+    }
+  | {
       type: "tool/result";
       at: string;
       callId: string;
@@ -109,6 +123,8 @@ export type AgentEvent =
       outcome?: "unknown";
       /** 本地执行或等待耗时,不证明远端已停止;未执行时缺省。只给人看。 */
       durationMs?: number;
+      /** 对应的执行完成事实;未执行的校验/拒绝/取消结果没有该引用。 */
+      executionEvent?: number;
     }
   | { type: "session/interrupt"; at: string }
   /** 用户请求强制退出的记录,不证明外部任务或进程已经停止。只给人看。 */

@@ -93,7 +93,14 @@ export function readRequestRecording(
   }
   const input = records.find((e) => e.kind === "request/input" && e.payload.request === request);
   const starts = records.filter((e) => e.kind === "http/start" && e.payload.request === request);
-  if (!input && !starts.length) return undefined;
+  const next = events.findIndex((e, i) => i > request && e.type === "request");
+  const end = next < 0 ? events.length : next;
+  const after = events.slice(request + 1, end);
+  const outputs = after.filter(
+    (e): e is Extract<AgentEvent, { type: "ext/event" }> =>
+      e.type === "ext/event" && e.source === "recording" && e.kind === "tool/output",
+  );
+  if (!input && !starts.length && !outputs.length) return undefined;
   const result: RequestRecording = {
     bodies: [],
     attempts: [],
@@ -153,45 +160,68 @@ export function readRequestRecording(
       ...(section === "received" && { body: responseBody }),
     });
   }
-  const next = events.findIndex((e, i) => i > request && e.type === "request");
-  const after = events.slice(request + 1, next < 0 ? events.length : next);
-  for (const e of after) {
-    if (e.type !== "ext/event" || e.source !== "recording" || e.kind !== "tool/output") continue;
+  // 完整性摘要只认文件身份和原调用;同一 callId 以后可以再次出现。
+  const executions = new Map<
+    string,
+    { index: number; event: Extract<AgentEvent, { type: "tool/executed" }> }
+  >();
+  events.forEach((event, index) => {
+    if (event.type !== "tool/executed" || !event.output) return;
+    if (event.callEvent <= request || event.callEvent >= end || index <= event.callEvent) return;
+    const call = events[event.callEvent];
+    if (
+      call?.type === "assistant/message" &&
+      call.toolCalls.some((tool) => tool.id === event.callId && tool.name === event.name)
+    )
+      executions.set(event.output.file, { index, event });
+  });
+  const responseOffset = after.findIndex((event) => event.type === "assistant/message");
+  const response = after[responseOffset];
+  for (const e of outputs) {
     const callId = e.payload.callId;
-    const returned = after.find((r) => r.type === "tool/result" && r.callId === callId);
-    const finished = after.find(
-      (r) =>
-        r.type === "ext/event" &&
-        r.source === "recording" &&
-        r.kind === "tool/finished" &&
-        r.payload.callId === callId,
+    const ref = e.payload.output as ContentRef;
+    const captured = executions.get(ref.file);
+    const execution = captured?.event.callId === callId ? captured : undefined;
+    const call =
+      response?.type === "assistant/message"
+        ? response.toolCalls.find((call) => call.id === callId)
+        : undefined;
+    const returned = events.find(
+      (r, index) =>
+        r.type === "tool/result" &&
+        r.callId === callId &&
+        (execution
+          ? index > execution.index &&
+            r.name === execution.event.name &&
+            r.executionEvent === execution.index
+          : r.executionEvent === undefined &&
+            call?.name === r.name &&
+            index > request + 1 + responseOffset &&
+            index < end),
     );
-    const bytes = finished?.type === "ext/event" ? finished.payload.bytes : undefined;
-    const source = after.find(
+    const source = records.find(
       (r) =>
         r.type === "ext/event" &&
         r.source === "recording" &&
         r.kind === "tool/output-source" &&
-        r.payload.callId === callId,
+        r.payload.file === ref.file,
     );
     const originalBody = body({
-      ...(e.payload.output as ContentRef),
-      ...(typeof bytes === "number" && { bytes }),
-      ...(finished?.type === "ext/event" &&
-        typeof finished.payload.missingFrom === "number" && {
-          missingFrom: finished.payload.missingFrom,
-        }),
+      ...ref,
+      ...execution?.event.output,
     });
     result.outputs?.push({
       callId: String(callId),
-      name: returned?.type === "tool/result" ? returned.name : String(callId),
+      name:
+        execution?.event.name ??
+        (returned?.type === "tool/result" ? returned.name : String(callId)),
       original: !section ? originalBody.read() : "",
       ...(section === "received" && { body: originalBody }),
       state: returned
-        ? "result recorded"
-        : finished
-          ? "tool finished; model result pending"
-          : "unfinished",
+        ? `model result recorded${execution ? "" : "; execution result not recorded"}`
+        : execution
+          ? "execution recorded; model result pending"
+          : "unfinished; execution result not recorded",
       source: source?.type === "ext/event" ? String(source.payload.source) : "original output",
     });
   }

@@ -20,23 +20,13 @@ const STORAGE_NOTICE = "Not executed: recording buffer filled while saving was u
 const interruptedNotice = (signal: AbortSignal) =>
   signal.reason === RECORDING_FULL ? STORAGE_NOTICE : INTERRUPTED_NOTICE;
 
-export function appendResult(
-  log: EventLog,
-  call: ToolCall,
-  content: string,
-  isError: boolean,
-  durationMs?: number,
-  outcome?: "unknown",
-): void {
+export function appendResult(log: EventLog, call: ToolCall, result: Executed): void {
   log.append({
     type: "tool/result",
     at: now(),
     callId: call.id,
     name: call.name,
-    content,
-    isError,
-    ...(durationMs !== undefined && { durationMs }),
-    ...(outcome && { outcome }),
+    ...result,
   });
 }
 
@@ -44,12 +34,19 @@ type Prepared =
   | { call: ToolCall; immediate: string }
   | { call: ToolCall; tool: Tool; args: unknown; argumentsEvent: number };
 
-type Executed = { content: string; isError: boolean; durationMs?: number; outcome?: "unknown" };
+type Executed = {
+  content: string;
+  isError: boolean;
+  durationMs?: number;
+  outcome?: "unknown";
+  executionEvent?: number;
+};
 
 async function runOne(
   p: Extract<Prepared, { tool: Tool }>,
   signal: AbortSignal,
   log: EventLog,
+  callEvent: number,
 ): Promise<Executed> {
   // 审批与前一批执行都可能等待;真正调用执行器前重新检查取消。
   if (signal.aborted) return { content: interruptedNotice(signal), isError: true };
@@ -67,55 +64,53 @@ async function runOne(
     if (!signal.aborted) throw error;
   }
   if (signal.aborted) return { content: interruptedNotice(signal), isError: true };
-  const finish = async (result: Executed): Promise<Executed> => {
-    if (output) {
-      await log.checkpoint();
-      // 并行工具各自完成即保存;模型结果仍按派发顺序追加,不让慢工具吞掉已完成证据。
-      recordEvent(log, "tool/finished", {
-        callId: p.call.id,
-        bytes: output.bytes,
-        ...result,
-        ...(output.ref.missingFrom !== undefined && { missingFrom: output.ref.missingFrom }),
-      });
-      await log.checkpoint();
-    }
-    return result;
-  };
+  const args = structuredClone(p.args) as never;
+  let result: Omit<Executed, "executionEvent"> & { durationMs: number };
   try {
-    const content = await p.tool.execute(structuredClone(p.args) as never, {
+    const content = await p.tool.execute(args, {
       signal,
       callId: p.call.id,
       ...(output && { output }),
     });
-    if (output && !output.written) {
-      output.write(content);
-      recordEvent(log, "tool/output-source", {
-        callId: p.call.id,
-        source: "returned text",
-        note: "No separate original output was provided by this tool",
-      });
-    }
-    return finish({ content, isError: false, durationMs: Date.now() - startedAt });
+    result = { content, isError: false, durationMs: Date.now() - startedAt };
   } catch (err) {
     const content = errorMessage(err);
-    if (output && !output.written) {
-      output.write(content);
-      recordEvent(log, "tool/output-source", {
-        callId: p.call.id,
-        source: "error text",
-        note: "No separate original output was provided by this tool",
-      });
-    }
-    //:执行失败也是结果。打断导致的失败同样如实记录。
-    return finish({
+    result = {
       content,
       isError: true,
       durationMs: Date.now() - startedAt,
       ...((err instanceof ToolOutcomeUnknownError || signal.reason === RECORDING_FULL) && {
         outcome: "unknown" as const,
       }),
+    };
+  }
+  // 捕获和保存失败不能改写执行器已经返回的结果。
+  if (output && !output.written) {
+    output.write(result.content);
+    recordEvent(log, "tool/output-source", {
+      callId: p.call.id,
+      file: output.ref.file,
+      source: result.isError ? "error text" : "returned text",
+      note: "No separate original output was provided by this tool",
     });
   }
+  const executionEvent = log.append({
+    type: "tool/executed",
+    at: now(),
+    callEvent,
+    callId: p.call.id,
+    name: p.call.name,
+    ...result,
+    ...(output && {
+      output: {
+        file: output.ref.file,
+        bytes: output.bytes,
+        ...(output.ref.missingFrom !== undefined && { missingFrom: output.ref.missingFrom }),
+      },
+    }),
+  });
+  await log.checkpoint();
+  return { ...result, executionEvent };
 }
 
 export async function executeCalls(
@@ -204,7 +199,7 @@ export async function executeCalls(
         tools: items.map((p) => p.call.name),
       });
     }
-    const results = await Promise.all(items.map((p) => runOne(p, signal, ctx.log)));
+    const results = await Promise.all(items.map((p) => runOne(p, signal, ctx.log, ctx.callEvent)));
     await ctx.log.checkpoint(signal?.aborted ? undefined : signal);
     items.forEach((p, i) => {
       const r = results[i] as Executed;
@@ -213,7 +208,7 @@ export async function executeCalls(
         r.durationMs === undefined || r.outcome === "unknown"
           ? r.content
           : annotateResult(ctx.log.events, p.call, r, ctx.facts);
-      appendResult(ctx.log, p.call, content, r.isError, r.durationMs, r.outcome);
+      appendResult(ctx.log, p.call, { ...r, content });
       if (ctx.log.recording)
         recordEvent(ctx.log, "tool/end", {
           callId: p.call.id,
@@ -228,13 +223,13 @@ export async function executeCalls(
     // 打断后剩余调用不再执行,但必须逐个补应答。
     if (signal.aborted) {
       await flush();
-      appendResult(ctx.log, call, interruptedNotice(signal), true);
+      appendResult(ctx.log, call, { content: interruptedNotice(signal), isError: true });
       continue;
     }
     const p = await prepare(call);
     if ("immediate" in p) {
       await flush();
-      appendResult(ctx.log, call, p.immediate, true);
+      appendResult(ctx.log, call, { content: p.immediate, isError: true });
       continue;
     }
     const parallelSafe = ctx.execution === "parallel" && p.tool.concurrency === "parallel";

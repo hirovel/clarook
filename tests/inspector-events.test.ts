@@ -111,6 +111,20 @@ describe("事件一句话", () => {
     });
     expect(s(12)).toContain("read · prepared arguments · call from #4 · execution not implied");
     expect(modelSees(e, 12).text).toBe("kernel");
+    e.push({
+      type: "tool/executed",
+      at,
+      callEvent: 4,
+      callId: "c1",
+      name: "read",
+      content: "External state requires verification",
+      isError: true,
+      durationMs: 5,
+      outcome: "unknown",
+    });
+    expect(s(13)).toContain("execution outcome unknown · call from #4 · 5ms");
+    expect(eventSummary(e, 13).tok).toBeUndefined();
+    expect(modelSees(e, 13).text).toBe("kernel");
   });
 
   it("模型眼里的状态:sent · kernel · covered · cleared · dropped · edited · not sent yet", () => {
@@ -144,8 +158,18 @@ describe("事件一句话", () => {
       name: "read",
       args: { path: "b" },
     });
+    e.push({
+      type: "tool/executed",
+      at,
+      callEvent: 4,
+      callId: "c1",
+      name: "read",
+      content: "original return",
+      isError: false,
+      durationMs: 4,
+    });
     expect(filteredIndices(e, 2)).toEqual([0, 1, 4, 5]);
-    expect(filteredIndices(e, 3)).toEqual([2, 3, 6, 7, 12]);
+    expect(filteredIndices(e, 3)).toEqual([2, 3, 6, 7, 12, 13]);
     expect(filteredIndices(e, 4)).toEqual([8, 9, 10]);
     expect(filteredIndices(e, 5)).toEqual([11]);
     expect(eventPasses(e[2] as AgentEvent, 1)).toBe(true);
@@ -169,6 +193,36 @@ describe("事件一句话", () => {
     const prepared = eventViewLines(e, 12).map(stripAnsi).join("\n");
     expect(prepared).toContain("prepared for approval; execution not implied");
     expect(prepared).toContain('"path": "b"');
+    e.push({
+      type: "tool/executed",
+      at,
+      callEvent: 4,
+      callId: "c1",
+      name: "read",
+      content: "original return",
+      isError: false,
+      durationMs: 4,
+      output: { file: "a.body", bytes: 20, missingFrom: 4 },
+    });
+    const executed = eventViewLines(e, 13).map(stripAnsi).join("\n");
+    expect(executed).toContain("call event #4");
+    expect(executed).toContain("success · 4ms");
+    expect(executed).toContain("pending; no final result recorded");
+    expect(executed).toContain("20 attempted bytes · captured prefix 4 bytes");
+    expect(executed).toContain("original return");
+    e.push({
+      type: "tool/result",
+      at,
+      callId: "c1",
+      name: "read",
+      content: "normalized error",
+      isError: true,
+      executionEvent: 13,
+    });
+    expect(eventViewLines(e, 13).map(stripAnsi).join("\n")).toContain("event #14");
+    const final = eventViewLines(e, 14).map(stripAnsi).join("\n");
+    expect(final).toContain("event #13");
+    expect(final).toContain("normalized error");
     const dropped = projectionLines(e, 4).map(stripAnsi).join("\n");
     expect(dropped).toContain("now          dropped");
     expect(dropped).toContain("since        event #10 · retry");

@@ -243,6 +243,10 @@ describe("请求检视器", () => {
     expect(text()).toContain("prepared for approval");
     insp.handleInput("\x1b[B");
     insp.handleInput("\r");
+    expect(text()).toContain("Execution result");
+    expect(text()).toContain("echo:hi");
+    insp.handleInput("\x1b[B");
+    insp.handleInput("\r");
     expect(text()).toContain("Result for model");
     expect(text()).toContain("echo:hi");
     insp.handleInput("\x1b[B");

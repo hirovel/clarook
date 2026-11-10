@@ -115,10 +115,15 @@ export function receivedBlocks(rec: RequestRecord, saved?: RequestRecording): Bo
         ),
       );
   }
-  // 模型结果来自事件;附件仅补充原始输出,没有附件不能隐藏拒绝或校验错误。
+  // 执行返回和模型结果分别来自事实;附件只补充原始输出字节。
   const outputs = new Map((saved?.outputs ?? []).map((output) => [output.callId, output]));
   const results = new Map(rec.results.map((result) => [result.callId, result]));
-  const outcome = (result: RequestRecord["results"][number] | undefined) =>
+  const executions = new Map(
+    (rec.executions ?? []).map((execution) => [execution.event.callId, execution]),
+  );
+  const outcome = (
+    result: Pick<RequestRecord["results"][number], "outcome" | "isError"> | undefined,
+  ) =>
     !result
       ? "result not recorded"
       : result.outcome === "unknown"
@@ -141,13 +146,38 @@ export function receivedBlocks(rec: RequestRecord, saved?: RequestRecording): Bo
       ...(group && { group }),
     });
   };
-  const addEvidence = (callId: string, group?: BodyBlock["group"]) => {
+  const addEvidence = (callId: string, group?: BodyBlock["group"], name?: string) => {
+    const result = results.get(callId);
+    const found = executions.get(callId);
+    const execution = !name || found?.event.name === name ? found : undefined;
+    const pending = execution && result?.executionEvent !== execution.index;
+    if (execution) {
+      const state = outcome(execution.event);
+      blocks.push({
+        ...textBlock(
+          `execution-${callId}`,
+          `${group ? "Execution result" : `${execution.event.name} · execution result`} · ${state}`,
+          execution.event.content,
+          `${callId} · ${state} · ${fmtMs(execution.event.durationMs)} · execution #${execution.index} · call event #${execution.event.callEvent}${pending ? " · model result pending" : ""}`,
+        ),
+        ...(group && { group }),
+      });
+      executions.delete(callId);
+    }
     const output = outputs.get(callId);
     if (output) {
       addOriginal(output, group);
       outputs.delete(callId);
     }
-    const result = results.get(callId);
+    if (pending)
+      blocks.push({
+        ...textBlock(
+          `pending-${callId}`,
+          "Result for model · pending",
+          "Execution returned, but no final model result referencing this execution is recorded. The execution result does not verify external effects.",
+        ),
+        ...(group && { group }),
+      });
     if (!result) return;
     const state = outcome(result);
     blocks.push({
@@ -155,7 +185,7 @@ export function receivedBlocks(rec: RequestRecord, saved?: RequestRecording): Bo
         `model-${result.callId}`,
         `${group ? "Result for model" : `${result.name} · model result`} · ${state}`,
         result.content,
-        `${result.callId} · ${state} · available to later requests`,
+        `${result.callId} · ${state} · available to later requests${result.executionEvent === undefined ? " · No execution reference recorded" : ` · execution #${result.executionEvent}`}`,
       ),
       ...(group && { group }),
     });
@@ -206,7 +236,7 @@ export function receivedBlocks(rec: RequestRecord, saved?: RequestRecording): Bo
       `call-${call.id}`,
       "Model arguments",
       JSON.stringify(call.args, null, 2),
-      `${call.id} · original model request${prepared ? "" : " · No preparation fact recorded"}`,
+      `${call.id} · original model request${prepared ? "" : " · No preparation fact recorded"}${executions.get(call.id)?.event.name === call.name ? "" : " · No execution fact recorded"}`,
     );
     // 缺失说明先于规模和调用ID,窄屏截短也不能把它隐藏。
     if (!results.has(call.id)) block.meta = `result not recorded · ${block.meta}`;
@@ -244,10 +274,11 @@ export function receivedBlocks(rec: RequestRecord, saved?: RequestRecording): Bo
         lines: () => toolCallDetail(call.name, previewArgs, "full").split("\n").filter(Boolean),
       });
     }
-    addEvidence(call.id, group);
+    addEvidence(call.id, group, call.name);
   }
   // 记录不完整时仍显示未匹配证据,不因缺少对应调用而删掉结果。
   for (const callId of results.keys()) addEvidence(callId);
+  for (const callId of executions.keys()) addEvidence(callId);
   for (const output of outputs.values()) addOriginal(output);
   for (const attempt of saved?.attempts ?? [])
     blocks.push(
